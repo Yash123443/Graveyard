@@ -7,8 +7,9 @@ import { deadTreeCollision } from './DeadTreeCluster'
 import { createFogTexture, createRustTextures, createStoneTextures } from '../utils/proceduralTextures'
 import { getAudioStatus, playDistantCat, playGraveDiscovery } from '../audio/audioManager'
 import { graveStories } from './graveStories'
+import { selectNearestProximity } from './graveProximity'
 
-interface GraveSpec { x: number; z: number; height: number; scale: number; yaw: number; lean: number; style: number }
+interface GraveSpec { x: number; z: number; height: number; scale: number; yaw: number; lean: number; style: number; enterRadius: number; exitRadius: number }
 
 function scatter() {
   const locations: [number, number][] = [
@@ -22,6 +23,10 @@ function scatter() {
       yaw: Math.sin(i * 3.8) * 0.28,
       lean: Math.sin(i * 2.15) * 0.07 + (i % 3 === 0 ? 0.07 : 0),
       style: i % 4,
+      // Every plot owns a slightly different detection envelope. The wider
+      // exit ring makes a stable handoff when walking between two stones.
+      enterRadius: 5.35 + (i % 3) * 0.35,
+      exitRadius: 6.85 + (i % 3) * 0.35,
     }
   })
 }
@@ -178,6 +183,7 @@ export function ScatteredGraves() {
   const mounds = useRef<THREE.InstancedMesh>(null)
   const moss = useRef<THREE.InstancedMesh>(null)
   const graveMists = useRef<(THREE.Sprite | null)[]>([])
+  const engravingMaterials = useRef<(THREE.MeshStandardMaterial | null)[]>([])
   const graveLight = useRef<THREE.PointLight>(null)
   const activeGrave = useRef(-1)
   const fogTexture = useMemo(() => createFogTexture(77), [])
@@ -218,8 +224,13 @@ export function ScatteredGraves() {
       scale.set(grave.scale, grave.height * grave.scale, grave.scale)
       matrix.compose(position, rotation, scale)
       refs.current[style]?.setMatrixAt(localIndex, matrix)
+      refs.current[style]?.setColorAt(localIndex, new THREE.Color('#ffffff'))
     }))
-    if (refs.current.length) refs.current.forEach((mesh) => { if (mesh) mesh.instanceMatrix.needsUpdate = true })
+    if (refs.current.length) refs.current.forEach((mesh) => {
+      if (!mesh) return
+      mesh.instanceMatrix.needsUpdate = true
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    })
 
     specs.forEach((grave, index) => {
       euler.set(0, grave.yaw, 0)
@@ -266,24 +277,10 @@ export function ScatteredGraves() {
       nextCatSound.current = clock.elapsedTime + 28 + Math.random() * 22
     }
 
-    let candidateIndex = -1
-    let nearest = 4.8
-    specs.forEach((grave, index) => {
-      const distance = Math.hypot(camera.position.x - grave.x, camera.position.z - grave.z)
-      if (distance < nearest) { nearest = distance; candidateIndex = index }
-    })
     const previous = activeGrave.current
-    let nearIndex = candidateIndex
-    if (previous >= 0 && candidateIndex !== previous) {
-      const old = specs[previous]
-      const oldDistance = Math.hypot(camera.position.x - old.x, camera.position.z - old.z)
-      // A small exit buffer prevents flicker at the edge, but another stone
-      // takes over immediately once it is clearly the closer discovery.
-      if (oldDistance < 6.4 && (candidateIndex < 0 || nearest > oldDistance - 0.8)) nearIndex = previous
-    } else if (previous >= 0 && candidateIndex < 0) {
-      const old = specs[previous]
-      if (Math.hypot(camera.position.x - old.x, camera.position.z - old.z) < 6.4) nearIndex = previous
-    }
+    const nearIndex = seq.exploration.entered
+      ? selectNearestProximity(specs, camera.position.x, camera.position.z, previous)
+      : -1
     if (nearIndex !== previous) {
       const tint = (index: number, color: string) => {
         if (index < 0) return
@@ -292,12 +289,16 @@ export function ScatteredGraves() {
         if (localIndex >= 0) refs.current[spec.style]?.setColorAt(localIndex, new THREE.Color(color))
       }
       tint(previous, '#ffffff')
-      tint(nearIndex, '#d1c3a1')
+      tint(nearIndex, '#cce4f7')
       if (nearIndex >= 0) playGraveDiscovery()
       refs.current.forEach((mesh) => { if (mesh?.instanceColor) mesh.instanceColor.needsUpdate = true })
       activeGrave.current = nearIndex
+      if (nearIndex >= 0 && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('graveyard:grave-enter', { detail: { index: nearIndex } }))
+      }
     }
     seq.exploration.nearGrave = nearIndex
+    seq.exploration.graveFocus = THREE.MathUtils.damp(seq.exploration.graveFocus, nearIndex >= 0 ? 1 : 0, 5.5, Math.min(delta, 0.05))
     const mainDistance = Math.hypot(camera.position.x, camera.position.y - 2.5, camera.position.z + 83)
     // The central grave stays a distant landmark, but its record and story
     // remain dormant until the visitor reaches its own clearing.
@@ -310,9 +311,10 @@ export function ScatteredGraves() {
       const mist = graveMists.current[index]
       if (!mist) return
       const distance = Math.hypot(camera.position.x - grave.x, camera.position.z - grave.z)
-      const approachFade = smoothstep(4.5, 10, distance)
-      const range = smoothstep(24, 18, distance)
-      const targetOpacity = seq.reveal.fog * (0.026 + 0.095 * range) * approachFade * (1 - seq.ending.fogFade)
+      const selected = index === nearIndex ? seq.exploration.graveFocus : 0
+      const range = smoothstep(17, 8, distance)
+      // A selected plot clears first, while unselected graves retain their low fog.
+      const targetOpacity = seq.reveal.fog * (0.035 + 0.11 * range) * (1 - selected * 0.9) * (1 - seq.ending.fogFade)
       mist.position.x = grave.x + Math.sin(clock.elapsedTime * 0.16 + index * 2.3) * 0.55
       mist.position.y = 0.38 + Math.sin(clock.elapsedTime * 0.28 + index) * 0.09
       mist.position.z = grave.z + Math.cos(clock.elapsedTime * 0.13 + index * 1.8) * 0.4
@@ -324,6 +326,14 @@ export function ScatteredGraves() {
       graveLight.current.position.z = THREE.MathUtils.damp(graveLight.current.position.z, target.z, 4, dt)
       graveLight.current.intensity = THREE.MathUtils.damp(graveLight.current.intensity, nearIndex >= 0 ? 1.8 : 0, 4, dt)
     }
+    engravingMaterials.current.forEach((material, index) => {
+      if (!material) return
+      const selected = index === nearIndex ? seq.exploration.graveFocus : 0
+      material.color.setRGB(0.75 + selected * 0.2, 0.71 + selected * 0.23, 0.62 + selected * 0.31)
+      material.emissive.setRGB(0.04 * selected, 0.09 * selected, 0.13 * selected)
+      material.emissiveIntensity = selected * 0.8
+      material.opacity = 0.68 + selected * 0.32
+    })
   })
 
   return <group>
@@ -337,7 +347,7 @@ export function ScatteredGraves() {
       </mesh>)}
       <mesh position={[0, 0.79, 0.275]}>
         <planeGeometry args={[0.82, 0.31]} />
-        <meshStandardMaterial map={engravings[index]} transparent roughness={1} metalness={0} depthWrite={false} color="#c0b59f" />
+        <meshStandardMaterial ref={(material) => { engravingMaterials.current[index] = material }} map={engravings[index]} transparent roughness={1} metalness={0} depthWrite={false} color="#c0b59f" />
       </mesh>
       {[[-0.3, 0.24, 0.275], [0.28, 0.34, 0.275], [0.02, 0.12, 0.28]].map(([x, y, z], patch) => <mesh key={`moss-${patch}`} position={[x, y, z]} scale={[0.19 + patch * 0.04, 0.07 + patch * 0.02, 0.025]}>
         <sphereGeometry args={[1, 10, 7]} />

@@ -116,8 +116,8 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
       const lines = ['Let me discover what killed it.', 'Let me bring it back.', 'But first, let me prove it\'s alive.']
       const statuses = ['ANALYST — INVESTIGATING', 'FIXER — REPAIRING', 'TESTER — VERIFYING']
       const purposes = [
-        'Trace the dependency and commit history to find the failure point.',
-        'Carry the repair through the break the investigation uncovers.',
+        'Investigate dependency history · reconstruct package versions · find breaking releases · identify the root cause.',
+        'Attempt dependency repairs · update incompatible packages · repair configurations · rebuild and document modifications.',
         'Run the project’s build and tests before calling it alive.',
       ]
       const starts = [0, 0.24, 0.48]
@@ -170,8 +170,11 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
       }
       // Ordinary graves and the final grave never show two information panels
       // at once. The ordinary panel fades before the central record appears.
-      const ordinaryFocus = Number(seq.exploration.entered && graveIndex >= 0) * (1 - smoothstep(0.34, 0.5, seq.exploration.nearMain))
-      if (nearbyTrace.current) nearbyTrace.current.style.opacity = String(ordinaryFocus * storyFade)
+      const ordinaryFocus = Number(seq.exploration.entered && graveIndex >= 0) * seq.exploration.graveFocus * (1 - smoothstep(0.34, 0.5, seq.exploration.nearMain))
+      if (nearbyTrace.current) {
+        const panelFocus = ordinaryFocus * storyFade
+        nearbyTrace.current.style.opacity = String(panelFocus)
+      }
       const next = s < 0.5 ? 'I — THE GATE' : 'II — THE GROUNDS'
       if (chapter.current && next !== lastChapter) {
         chapter.current.textContent = next
@@ -218,7 +221,7 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
         <span>CAUSE OF DEATH: UNKNOWN</span>
       </div>
       <p ref={epitaph} className="grave-epitaph">“It wasn&apos;t abandoned. It was broken.”</p>
-      <p ref={graveStoryLine} className="grave-story-line">The cause is still unknown. The investigation begins here.<small>CAUSE UNKNOWN · AWAITING VERIFIED REPOSITORY DATA</small></p>
+      <p ref={graveStoryLine} className="grave-story-line">A dependency update caused a chain reaction. The build failed, and the original cause remained undiscovered.<small>CAUSE OF DEATH: UNKNOWN · FICTIONAL DEMONSTRATION</small></p>
       <div ref={agentPanel} className="agent-dialogue" aria-live="polite">
         <span ref={agentName} className="agent-dialogue__name">ANALYST — INVESTIGATING</span>
         <p ref={agentLine}>“Let me discover what killed it.”</p>
@@ -230,18 +233,19 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
         <div className="dependency-timeline__labels"><span>ROOT CAUSE</span><span>DEPENDENCY</span><span>BREAKING CHANGE</span><span>VERIFICATION</span></div>
       </div>
       <div ref={explorePad} className="explore-pad" aria-label="Cemetery exploration controls">
-        <span>WASD OR SCROLL TO WALK · CLICK TO LOOK · ESC TO RELEASE</span>
+        <span className="explore-pad__title">EXPLORE THE GROUNDS</span>
+        <span className="explore-pad__guide"><b>W A S D</b> MOVE · <b>MOUSE</b> LOOK · <b>ESC</b> RELEASE</span>
         <div className="explore-pad__keys">
-          <button type="button" aria-label="Turn left" onClick={() => turnRoam(-0.18)}>↶</button>
+          <button type="button" aria-label="Look left" onClick={() => turnRoam(-0.18)}>↶</button>
           <button type="button" aria-label="Move forward" onClick={() => moveRoam(0, -2)}>↑</button>
-          <button type="button" aria-label="Turn right" onClick={() => turnRoam(0.18)}>↷</button>
+          <button type="button" aria-label="Look right" onClick={() => turnRoam(0.18)}>↷</button>
           <button type="button" aria-label="Move left" onClick={() => moveRoam(-2, 0)}>←</button>
           <button type="button" aria-label="Move backward" onClick={() => moveRoam(0, 2)}>↓</button>
           <button type="button" aria-label="Move right" onClick={() => moveRoam(2, 0)}>→</button>
         </div>
       </div>
       <section ref={nearbyTrace} className="nearby-trace grave-story-panel" aria-live="polite" aria-label="Discovered grave story">
-        <span className="grave-story-panel__eyebrow">A WEATHERED INSCRIPTION</span>
+        <span className="grave-story-panel__eyebrow">DISCOVERED GRAVE · FICTIONAL CASE FILE</span>
         <strong ref={nearbyName}>THE UNFINISHED PROJECT · 01</strong>
         <em ref={nearbyEpitaph}>“Started with ambition. Never reached completion.”</em>
         <span ref={nearbyStory}>The developer began something ambitious, but left before its central features were finished.</span>

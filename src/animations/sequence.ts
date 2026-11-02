@@ -31,9 +31,10 @@ export const seq = {
   roam: {
     x: 0, z: 0, yaw: 0, pitch: 0,
     targetX: 0, targetZ: 0, targetYaw: 0, targetPitch: 0,
+    velocityX: 0, velocityZ: 0, initialized: false,
     input: { forward: false, back: false, left: false, right: false, turnLeft: false, turnRight: false },
   },
-  exploration: { nearGrave: -1, nearMain: 0, entered: false, storyProgress: 0, storyStarted: false, obstacles: [] as { x: number; z: number; radius: number }[] },
+  exploration: { nearGrave: -1, graveFocus: 0, nearMain: 0, entered: false, storyProgress: 0, storyStarted: false, obstacles: [] as { x: number; z: number; radius: number }[] },
   ending: {
     started: false,
     outcome: 'pending' as 'pending' | 'success' | 'failure',
@@ -263,8 +264,9 @@ export function moveRoam(dx: number, dz: number) {
   if (seq.exploration.storyStarted) return
   const r = seq.roam
   const yaw = r.targetYaw
-  r.targetX = Math.max(-54, Math.min(54, r.targetX + dx * Math.cos(yaw) + dz * Math.sin(yaw)))
-  r.targetZ = Math.max(-108, Math.min(38, r.targetZ - dx * Math.sin(yaw) + dz * Math.cos(yaw)))
+  // Touch controls add a short impulse in the same camera-relative basis as WASD.
+  r.velocityX += dx * Math.cos(yaw) + dz * Math.sin(yaw)
+  r.velocityZ += -dx * Math.sin(yaw) - dz * Math.cos(yaw)
 }
 
 export function turnRoam(yaw: number, pitch = 0) {

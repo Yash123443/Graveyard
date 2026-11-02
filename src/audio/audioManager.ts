@@ -145,6 +145,33 @@ export function playGraveDiscovery() {
   voice(111, 0.008)
 }
 
+/** Low, restrained pressure tone for the central grave's discovery beat. */
+export function playMainGraveRumble() {
+  if (status !== 'on') return
+  ensureEffects()
+  if (!effectContext || !effectMaster || effectContext.state !== 'running') return
+  const now = effectContext.currentTime
+  const osc = effectContext.createOscillator()
+  const sub = effectContext.createOscillator()
+  const filter = effectContext.createBiquadFilter()
+  const gain = effectContext.createGain()
+  osc.type = 'sine'
+  sub.type = 'sine'
+  osc.frequency.setValueAtTime(52, now)
+  osc.frequency.exponentialRampToValueAtTime(43, now + 3.6)
+  sub.frequency.setValueAtTime(26, now)
+  sub.frequency.exponentialRampToValueAtTime(22, now + 3.6)
+  filter.type = 'lowpass'
+  filter.frequency.setValueAtTime(115, now)
+  filter.Q.value = 0.8
+  gain.gain.setValueAtTime(0.0001, now)
+  gain.gain.exponentialRampToValueAtTime(0.038, now + 0.5)
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 4.1)
+  osc.connect(filter); sub.connect(filter); filter.connect(gain); gain.connect(effectMaster)
+  osc.start(now); sub.start(now)
+  osc.stop(now + 4.2); sub.stop(now + 4.2)
+}
+
 /** A sparse synthesized feline cry, filtered and kept distant in the mix. */
 export function playDistantCat() {
   if (status !== 'on') return

@@ -284,6 +284,20 @@ export function createMoonTexture(width = 2048, height = 1024) {
   }
   ctx.putImageData(data, 0, 0)
 
+  // Broad, irregular maria give the disc recognisable continental structure.
+  const mariaBasins: Array<[number, number, number, number, number]> = [
+    [0.31, 0.42, 0.16, 0.11, 0.22], [0.52, 0.55, 0.18, 0.13, 0.2],
+    [0.65, 0.34, 0.11, 0.08, 0.17], [0.43, 0.27, 0.09, 0.07, 0.14],
+  ]
+  mariaBasins.forEach(([x, y, rx, ry, opacity]) => {
+    const g = ctx.createRadialGradient(x * width, y * height, 2, x * width, y * height, rx * width)
+    g.addColorStop(0, `rgba(38, 52, 68, ${opacity})`)
+    g.addColorStop(0.55, `rgba(48, 62, 78, ${opacity * 0.75})`)
+    g.addColorStop(1, 'rgba(45, 60, 78, 0)')
+    ctx.save(); ctx.translate(x * width, y * height); ctx.scale(1, ry / rx); ctx.translate(-x * width, -y * height)
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x * width, y * height, rx * width, 0, Math.PI * 2); ctx.fill(); ctx.restore()
+  })
+
   for (let c = 0; c < 780; c += 1) {
     const cx = hash(c, 1, 41) * width
     const cy = (0.12 + hash(c, 2, 41) * 0.76) * height
@@ -311,6 +325,20 @@ export function createMoonTexture(width = 2048, height = 1024) {
   const texture = toTexture(canvas)
   texture.wrapS = THREE.RepeatWrapping
   return texture
+}
+
+/** Fine luminance breakup stops the lunar face from reading as a clean graphic disc. */
+export function createMoonDetailTexture(width = 2048, height = 1024) {
+  const { canvas, ctx } = makeCanvas(width, height)
+  const data = ctx.createImageData(width, height)
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const n = fbm(x / width, y / height, 119, 5, 82, 41, false)
+    const i = (y * width + x) * 4
+    const v = 170 + n * 85
+    data.data[i] = v; data.data[i + 1] = v; data.data[i + 2] = v; data.data[i + 3] = 255
+  }
+  ctx.putImageData(data, 0, 0)
+  return toTexture(canvas, false)
 }
 
 /* ------------------------------------------------------------------ */

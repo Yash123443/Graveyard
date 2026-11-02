@@ -4,6 +4,8 @@ import { useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { seq, smoothstep } from '../animations/sequence'
 import { createFogTexture, createGlowTexture, createStoneTextures } from '../utils/proceduralTextures'
+import { playMainGraveRumble } from '../audio/audioManager'
+import { ImportedAnalyst } from './ImportedAnalyst'
 
 const GRAVE = new THREE.Vector3(0, 0, -83)
 
@@ -13,13 +15,14 @@ function Candle({ position }: { position: [number, number, number] }) {
   const glow = useRef<THREE.SpriteMaterial>(null)
   useFrame(({ clock }) => {
     const t = clock.elapsedTime
+    const found = seq.exploration.nearMain
     const flicker = 0.82 + Math.sin(t * 19) * 0.09 + Math.sin(t * 31) * 0.045
     if (flame.current) {
       flame.current.scale.set(1 + Math.sin(t * 23) * 0.09, flicker, 1 + Math.cos(t * 17) * 0.08)
       flame.current.rotation.z = Math.sin(t * 13) * 0.08
     }
-    if (light.current) light.current.intensity = 2.4 * flicker
-    if (glow.current) glow.current.opacity = 0.38 * flicker
+    if (light.current) light.current.intensity = (0.38 + found * 2.45) * flicker
+    if (glow.current) glow.current.opacity = (0.08 + found * 0.36) * flicker
   })
   return <group position={position}>
     <mesh castShadow><cylinderGeometry args={[0.12, 0.15, 0.72, 12]} /><meshStandardMaterial color="#b8a88a" roughness={0.92} /></mesh>
@@ -52,28 +55,46 @@ function MainStone() {
   const inscriptionMaterial = useRef<THREE.MeshBasicMaterial>(null)
   const halo = useRef<THREE.SpriteMaterial>(null)
   const burialLight = useRef<THREE.PointLight>(null)
+  const rumbleArmed = useRef(true)
   const inscription = useMemo(() => {
     const canvas = document.createElement('canvas')
     canvas.width = 1024
-    canvas.height = 240
+    canvas.height = 512
     const ctx = canvas.getContext('2d')!
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.textAlign = 'center'
-    ctx.fillStyle = '#b9c4c2'
+    ctx.fillStyle = '#91a2a5'
     ctx.shadowColor = '#dae8eb'
-    ctx.shadowBlur = 7
-    ctx.font = '500 74px Georgia, serif'
-    ctx.fillText('OLD-PORTFOLIO', 512, 104)
+    ctx.shadowBlur = 5
+    ctx.font = '600 30px Georgia, serif'
+    ctx.fillText('R . I . P .', 512, 58)
+    ctx.shadowBlur = 8
+    ctx.fillStyle = '#c7d4d3'
+    ctx.font = '500 78px Georgia, serif'
+    ctx.fillText('OLD-PORTFOLIO', 512, 156)
     ctx.shadowBlur = 0
     ctx.fillStyle = '#829195'
-    ctx.font = '28px Georgia, serif'
-    ctx.fillText('RESTING SINCE 2019', 512, 172)
+    ctx.font = '25px Georgia, serif'
+    ctx.fillText('LAST ALIVE: 2019', 512, 222)
+    ctx.fillText('STATUS: ABANDONED', 512, 265)
+    ctx.fillText('CAUSE OF DEATH: UNKNOWN', 512, 308)
+    ctx.strokeStyle = 'rgba(184, 202, 201, .48)'
+    ctx.lineWidth = 2
+    ctx.beginPath(); ctx.moveTo(250, 334); ctx.lineTo(774, 334); ctx.stroke()
+    ctx.fillStyle = '#9aacae'
+    ctx.font = 'italic 28px Georgia, serif'
+    ctx.fillText('IT WASN\'T ABANDONED. IT WAS BROKEN.', 512, 386)
     const texture = new THREE.CanvasTexture(canvas)
     texture.colorSpace = THREE.SRGBColorSpace
     return texture
   }, [])
   useFrame(({ clock }) => {
     const found = seq.exploration.nearMain
+    if (found > 0.58 && rumbleArmed.current) {
+      rumbleArmed.current = false
+      playMainGraveRumble()
+    }
+    if (found < 0.16) rumbleArmed.current = true
     const success = seq.ending.outcome === 'success'
     const opening = success ? smoothstep(0.7, 0.86, seq.ending.progress) : 0
     const verifiedShake = success ? smoothstep(0.44, 0.53, seq.ending.progress) * (1 - smoothstep(0.68, 0.73, seq.ending.progress)) : 0
@@ -117,16 +138,23 @@ function MainStone() {
       </mesh>
       {cracks.map((geometry, i) => <mesh key={`crack-${i}`} geometry={geometry}><meshStandardMaterial color="#101518" emissive="#161e20" roughness={1} /></mesh>)}
       {moss.map((m, i) => <mesh key={`moss-${i}`} position={[m.x, m.y, m.z]} scale={[m.s * 1.8, m.s, 0.05]} rotation={[0, 0, Math.sin(i) * 0.35]}><sphereGeometry args={[1, 9, 7]} /><meshStandardMaterial color={i % 3 ? '#344b35' : '#536448'} roughness={1} /></mesh>)}
-      <mesh position={[0, 3.58, 0.64]}>
-        <planeGeometry args={[2.6, 0.61]} />
+      {/* Carved gothic crown: cross, rose window and pointed arch detail. */}
+      <group position={[0, 3.42, 0.64]}>
+        <mesh position={[0, 0.48, 0]}><boxGeometry args={[0.11, 0.96, 0.08]} /><meshStandardMaterial color="#596367" roughness={0.9} /></mesh>
+        <mesh position={[0, 0.62, 0.01]}><boxGeometry args={[0.58, 0.1, 0.08]} /><meshStandardMaterial color="#596367" roughness={0.9} /></mesh>
+        <mesh position={[0, -0.2, 0.015]}><torusGeometry args={[0.31, 0.045, 8, 24]} /><meshStandardMaterial color="#626c6d" roughness={0.92} /></mesh>
+        {[0, Math.PI / 2].map((rotation) => <mesh key={rotation} position={[0, -0.2, 0.04]} rotation={[0, 0, rotation]}><boxGeometry args={[0.45, 0.035, 0.05]} /><meshStandardMaterial color="#596367" roughness={0.92} /></mesh>)}
+      </group>
+      <mesh position={[0, 2.14, 0.64]}>
+        <planeGeometry args={[2.72, 1.48]} />
         <meshBasicMaterial ref={inscriptionMaterial} map={inscription} transparent opacity={0.38} depthWrite={false} toneMapped={false} />
       </mesh>
       <mesh position={[0, 0.46, 0.82]} rotation={[0, 0, Math.PI / 2]}><torusGeometry args={[0.2, 0.045, 7, 16]} /><meshStandardMaterial color="#242a2d" metalness={0.72} roughness={0.82} /></mesh>
       <mesh position={[0.32, 0.46, 0.82]} rotation={[0, 0, Math.PI / 2]}><torusGeometry args={[0.2, 0.045, 7, 16]} /><meshStandardMaterial color="#242a2d" metalness={0.72} roughness={0.82} /></mesh>
     </group>
-    <Candle position={[-1.65, 0.48, 1.1]} />
-    <Candle position={[0, 0.48, 1.35]} />
-    <Candle position={[1.65, 0.48, 1.1]} />
+    {[[-1.65, 0.48, 1.1], [-0.75, 0.48, 1.42], [0.25, 0.48, 1.32], [1.55, 0.48, 1.08], [2.0, 0.48, 0.28]].map((position, index) => <Candle key={index} position={position as [number, number, number]} />)}
+    {/* Chipped fragments make the monument feel older than the surrounding plots. */}
+    {[[-1.65, 0.36, -0.52, 0.34], [1.55, 0.26, -0.34, 0.26], [-1.48, 1.65, -0.52, 0.18], [1.42, 2.76, -0.48, 0.21]].map(([x, y, z, s], index) => <mesh key={`chip-${index}`} position={[x, y, z]} rotation={[index * 0.5, index * 0.7, index * 0.23]} scale={s} castShadow><tetrahedronGeometry args={[1, 1]} /><meshStandardMaterial color="#4c5354" roughness={1} /></mesh>)}
     <sprite position={[0, 0.32, 1.3]} scale={[13, 4.5, 1]}>
       <spriteMaterial ref={halo} map={createGlowTexture(192)} color="#b6d0c0" transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} />
     </sprite>
@@ -177,10 +205,176 @@ function GiantTree() {
   return <primitive object={tree} position={[5.5, 12.1, -94]} scale={25} rotation={[0, 0.3, 0]} />
 }
 
+/** The Analyst is a distinct hooded entity: fog-born particles form its body, then its scan turns toward the grave. */
+function Analyst() {
+  const root = useRef<THREE.Group>(null)
+  const cloak = useRef<THREE.MeshStandardMaterial>(null)
+  const hood = useRef<THREE.MeshStandardMaterial>(null)
+  const aura = useRef<THREE.SpriteMaterial>(null)
+  const particles = useRef<THREE.Points>(null)
+  const particleMaterial = useRef<THREE.PointsMaterial>(null)
+  const light = useRef<THREE.PointLight>(null)
+  const scan = useRef<THREE.Group>(null)
+  const body = useMemo(() => new THREE.LatheGeometry([
+    new THREE.Vector2(0.84, 0), new THREE.Vector2(0.76, 0.18), new THREE.Vector2(0.62, 0.6),
+    new THREE.Vector2(0.5, 1.26), new THREE.Vector2(0.4, 1.82), new THREE.Vector2(0.29, 2.28),
+    new THREE.Vector2(0.13, 2.54), new THREE.Vector2(0.02, 2.68),
+  ], 36), [])
+  const particleGeometry = useMemo(() => {
+    const positions = new Float32Array(220 * 3)
+    for (let i = 0; i < 220; i += 1) {
+      const angle = i * 2.39996
+      const radius = 0.25 + (i % 31) * 0.09
+      positions[i * 3] = Math.cos(angle) * radius
+      positions[i * 3 + 1] = (i % 43) * 0.095
+      positions[i * 3 + 2] = Math.sin(angle) * radius
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    return geometry
+  }, [])
+  const veins = useMemo(() => [
+    new THREE.CatmullRomCurve3([new THREE.Vector3(-0.36, 0.72, 0.48), new THREE.Vector3(-0.18, 1.24, 0.61), new THREE.Vector3(-0.24, 1.74, 0.52), new THREE.Vector3(-0.08, 2.16, 0.35)]),
+    new THREE.CatmullRomCurve3([new THREE.Vector3(0.32, 0.68, 0.48), new THREE.Vector3(0.16, 1.12, 0.62), new THREE.Vector3(0.28, 1.58, 0.5), new THREE.Vector3(0.06, 2.1, 0.36)]),
+  ], [])
+  const ribbons = useMemo(() => [-1, 1].map((side) => new THREE.CatmullRomCurve3([
+    new THREE.Vector3(side * 0.28, 1.78, 0), new THREE.Vector3(side * 1.1, 1.35, -0.2),
+    new THREE.Vector3(side * 1.42, 0.58, 0.12), new THREE.Vector3(side * 1.1, -0.42, -0.08),
+  ])), [])
+  const vortex = useMemo(() => [
+    new THREE.CatmullRomCurve3([new THREE.Vector3(-2.4, 0.6, 0.3), new THREE.Vector3(-1.1, 1.1, -0.5), new THREE.Vector3(0.4, 1.7, -0.7), new THREE.Vector3(1.9, 1.22, -0.15), new THREE.Vector3(2.35, 0.72, 0.42)]),
+    new THREE.CatmullRomCurve3([new THREE.Vector3(2.2, 2.9, -0.15), new THREE.Vector3(0.95, 3.55, -0.55), new THREE.Vector3(-0.75, 3.28, -0.38), new THREE.Vector3(-2.12, 2.46, 0.05)]),
+  ], [])
+
+  useFrame(({ clock }) => {
+    const story = seq.exploration.storyProgress
+    const materialize = smoothstep(0.015, 0.17, story)
+    const scanPower = smoothstep(0.16, 0.23, story) * (1 - smoothstep(0.72, 0.8, story))
+    const t = clock.elapsedTime
+    if (root.current) {
+      root.current.visible = materialize > 0.004
+      root.current.position.set(-2.85, 0.48 + materialize * 0.18 + Math.sin(t * 0.85) * 0.1, -80.5)
+      root.current.rotation.y = 0.18 + Math.sin(t * 0.25) * 0.06
+      root.current.scale.setScalar(0.84 + materialize * 0.16)
+    }
+    if (cloak.current) cloak.current.opacity = materialize * 0.64
+    if (hood.current) hood.current.opacity = materialize * 0.9
+    if (aura.current) aura.current.opacity = materialize * (0.22 + Math.sin(t * 2.4) * 0.04)
+    if (particles.current) {
+      particles.current.rotation.y = t * 0.34
+      particles.current.scale.setScalar(1.8 - materialize * 0.74)
+      particles.current.position.y = 0.2 + Math.sin(t * 1.2) * 0.08
+    }
+    if (particleMaterial.current) particleMaterial.current.opacity = materialize * (0.42 + Math.sin(t * 3.1) * 0.08)
+    if (light.current) light.current.intensity = materialize * (0.42 + scanPower * 1.25)
+    if (scan.current) {
+      scan.current.visible = scanPower > 0.005
+      scan.current.rotation.z = t * 0.52
+      scan.current.rotation.y = t * 0.26
+      scan.current.scale.setScalar(0.78 + scanPower * 0.38)
+    }
+  })
+
+  return <>
+    <group ref={root} visible={false}>
+      <sprite position={[0, 1.55, -0.28]} scale={[5.2, 6.4, 1]}><spriteMaterial ref={aura} map={createGlowTexture(192)} color="#7b3bcb" transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} /></sprite>
+      <points ref={particles} geometry={particleGeometry}><pointsMaterial ref={particleMaterial} color="#b875ff" size={0.065} transparent opacity={0} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} /></points>
+      <mesh geometry={body}><meshStandardMaterial ref={cloak} color="#0b0911" emissive="#31114f" emissiveIntensity={0.7} transparent opacity={0} roughness={0.42} metalness={0.04} depthWrite={false} side={THREE.DoubleSide} /></mesh>
+      {/* Broad draped shoulders and a deep hood give the character its recognisable wraith silhouette. */}
+      <mesh position={[0, 2.04, -0.01]} scale={[1.08, 0.35, 0.62]}><sphereGeometry args={[1, 28, 16]} /><meshStandardMaterial color="#100c18" emissive="#2c1048" emissiveIntensity={0.34} transparent opacity={0.84} roughness={0.68} depthWrite={false} /></mesh>
+      <mesh position={[0, 2.43, 0.02]} scale={[0.57, 0.68, 0.5]}><sphereGeometry args={[1, 28, 20]} /><meshStandardMaterial ref={hood} color="#05050a" emissive="#2d1048" emissiveIntensity={0.38} transparent opacity={0} roughness={0.74} depthWrite={false} /></mesh>
+      <mesh position={[0, 2.33, 0.43]} scale={[0.32, 0.4, 0.1]}><sphereGeometry args={[1, 20, 14]} /><meshBasicMaterial color="#000000" transparent opacity={0.98} depthWrite={false} /></mesh>
+      {[-1, 1].map((side) => <group key={`analyst-arm-${side}`} position={[side * 0.78, 1.88, 0.05]} rotation={[0.16, 0, -side * 0.88]}>
+        <mesh position={[side * 0.45, -0.1, 0]} scale={[0.17, 0.86, 0.2]}><capsuleGeometry args={[0.5, 1, 6, 10]} /><meshStandardMaterial color="#100b19" emissive="#3d155f" emissiveIntensity={0.52} transparent opacity={0.78} roughness={0.45} depthWrite={false} /></mesh>
+        <mesh position={[side * 0.86, -0.72, 0.04]} scale={[0.17, 0.28, 0.13]}><sphereGeometry args={[1, 14, 10]} /><meshStandardMaterial color="#191024" emissive="#7b35b6" emissiveIntensity={0.72} transparent opacity={0.86} roughness={0.4} depthWrite={false} /></mesh>
+        {[-0.1, 0.08, 0.24].map((offset) => <mesh key={offset} position={[side * (0.9 + offset), -0.89, 0.06]} rotation={[0.15, 0, side * 0.45]} scale={[0.025, 0.23, 0.025]}><capsuleGeometry args={[0.5, 1, 4, 6]} /><meshBasicMaterial color="#b96cff" transparent opacity={0.7} blending={THREE.AdditiveBlending} depthWrite={false} /></mesh>)}
+      </group>)}
+      {veins.map((curve, index) => <mesh key={`analyst-vein-${index}`}><tubeGeometry args={[curve, 28, 0.023, 5, false]} /><meshBasicMaterial color="#ac65ff" transparent opacity={0.72} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>)}
+      {ribbons.map((curve, index) => <mesh key={`analyst-ribbon-${index}`}><tubeGeometry args={[curve, 34, 0.048, 6, false]} /><meshBasicMaterial color="#6d32b8" transparent opacity={0.52} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>)}
+      {[-0.48, 0, 0.48].map((x, index) => <mesh key={`torn-tail-${index}`} position={[x, 0.36 - index * 0.08, -0.02]} rotation={[0.1, 0, (index - 1) * 0.18]} scale={[0.26, 1.15 + index * 0.16, 0.05]}><coneGeometry args={[1, 1, 4]} /><meshStandardMaterial color="#130d1d" emissive="#32114f" emissiveIntensity={0.42} transparent opacity={0.6} roughness={0.6} depthWrite={false} side={THREE.DoubleSide} /></mesh>)}
+      <pointLight ref={light} position={[0, 1.4, 0.5]} color="#9d55e8" intensity={0} distance={14} decay={2} />
+    </group>
+    <group ref={scan} position={[GRAVE.x, 2.45, GRAVE.z + 0.42]} visible={false}>
+      {[0, 1, 2].map((index) => <mesh key={index} rotation={[Math.PI / 2 + index * 0.12, 0, index * 0.45]}><torusGeometry args={[0.92 + index * 0.42, 0.018, 6, 72]} /><meshBasicMaterial color="#a865ff" transparent opacity={0.56 - index * 0.09} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>)}
+      {vortex.map((curve, index) => <mesh key={`vortex-${index}`}><tubeGeometry args={[curve, 42, 0.075, 7, false]} /><meshBasicMaterial color="#8d42ef" transparent opacity={0.76} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>)}
+    </group>
+  </>
+}
+
+/** The Fixer is denser and more physical than the Analyst: a crimson repair-wraith rooted in sparks and fractured energy. */
+function Fixer() {
+  const root = useRef<THREE.Group>(null)
+  const bodyMaterial = useRef<THREE.MeshStandardMaterial>(null)
+  const hoodMaterial = useRef<THREE.MeshStandardMaterial>(null)
+  const emberMaterial = useRef<THREE.PointsMaterial>(null)
+  const light = useRef<THREE.PointLight>(null)
+  const core = useRef<THREE.MeshBasicMaterial>(null)
+  const body = useMemo(() => new THREE.LatheGeometry([
+    new THREE.Vector2(1.02, 0), new THREE.Vector2(0.88, 0.24), new THREE.Vector2(0.7, 0.72),
+    new THREE.Vector2(0.52, 1.34), new THREE.Vector2(0.45, 1.86), new THREE.Vector2(0.31, 2.27),
+    new THREE.Vector2(0.13, 2.56), new THREE.Vector2(0.02, 2.72),
+  ], 36), [])
+  const embers = useMemo(() => {
+    const positions = new Float32Array(260 * 3)
+    for (let i = 0; i < 260; i += 1) {
+      const a = i * 2.399
+      const r = 0.3 + (i % 37) * 0.075
+      positions[i * 3] = Math.cos(a) * r
+      positions[i * 3 + 1] = (i % 52) * 0.07
+      positions[i * 3 + 2] = Math.sin(a) * r
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    return geometry
+  }, [])
+  const rootTrails = useMemo(() => Array.from({ length: 8 }, (_, i) => {
+    const side = i % 2 ? 1 : -1
+    const spread = 0.55 + (i % 4) * 0.25
+    return new THREE.CatmullRomCurve3([
+      new THREE.Vector3(side * (0.2 + (i % 3) * 0.12), 0.86, 0), new THREE.Vector3(side * spread, 0.35, -0.1),
+      new THREE.Vector3(side * (spread + 0.45), -0.22, 0.18), new THREE.Vector3(side * (spread + 0.8), -0.52, -0.18),
+    ])
+  }), [])
+  const armTrails = useMemo(() => [-1, 1].map((side) => new THREE.CatmullRomCurve3([
+    new THREE.Vector3(side * 0.55, 1.86, 0), new THREE.Vector3(side * 1.45, 1.45, 0.02),
+    new THREE.Vector3(side * 2.05, 0.92, -0.1), new THREE.Vector3(side * 2.42, 0.46, 0.08),
+  ])), [])
+  useFrame(({ clock }) => {
+    const story = seq.exploration.storyProgress
+    const arrival = smoothstep(0.24, 0.42, story)
+    const t = clock.elapsedTime
+    if (root.current) {
+      root.current.visible = arrival > 0.004
+      root.current.position.set(2.9, 0.42 + arrival * 0.16 + Math.sin(t * 0.92 + 1.2) * 0.075, -80.15)
+      root.current.rotation.y = -0.24 + Math.sin(t * 0.3) * 0.055
+      root.current.scale.setScalar(0.78 + arrival * 0.22)
+    }
+    if (bodyMaterial.current) bodyMaterial.current.opacity = arrival * 0.72
+    if (hoodMaterial.current) hoodMaterial.current.opacity = arrival * 0.92
+    if (emberMaterial.current) emberMaterial.current.opacity = arrival * (0.55 + Math.sin(t * 4.6) * 0.12)
+    if (core.current) core.current.opacity = arrival * (0.75 + Math.sin(t * 3.6) * 0.12)
+    if (light.current) light.current.intensity = arrival * (1.4 + Math.sin(t * 3.5) * 0.2)
+  })
+  return <group ref={root} visible={false}>
+    <points geometry={embers} position={[0, -0.25, 0]}><pointsMaterial ref={emberMaterial} color="#ff5548" size={0.085} transparent opacity={0} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} /></points>
+    <sprite position={[0, 1.35, -0.3]} scale={[5.4, 6.6, 1]}><spriteMaterial map={createGlowTexture(192)} color="#9c1f23" transparent opacity={0.18} depthWrite={false} blending={THREE.AdditiveBlending} /></sprite>
+    <mesh geometry={body}><meshStandardMaterial ref={bodyMaterial} color="#120809" emissive="#5b1719" emissiveIntensity={0.74} transparent opacity={0} roughness={0.4} metalness={0.08} depthWrite={false} side={THREE.DoubleSide} /></mesh>
+    <mesh position={[0, 2.43, 0.02]} scale={[0.6, 0.7, 0.53]}><sphereGeometry args={[1, 28, 20]} /><meshStandardMaterial ref={hoodMaterial} color="#080708" emissive="#4f1416" emissiveIntensity={0.48} transparent opacity={0} roughness={0.72} depthWrite={false} /></mesh>
+    <mesh position={[0, 2.31, 0.43]} scale={[0.33, 0.4, 0.1]}><sphereGeometry args={[1, 20, 14]} /><meshBasicMaterial color="#010000" transparent opacity={0.98} depthWrite={false} /></mesh>
+    {[-0.13, 0.13].map((x) => <mesh key={x} position={[x, 2.38, 0.51]} scale={[0.05, 0.035, 0.02]}><sphereGeometry args={[1, 12, 8]} /><meshBasicMaterial color="#ff342d" toneMapped={false} /></mesh>)}
+    <mesh position={[0, 1.57, 0.49]} scale={[0.17, 0.24, 0.06]}><sphereGeometry args={[1, 16, 12]} /><meshBasicMaterial ref={core} color="#ff5b45" transparent opacity={0} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>
+    {[-1, 1].map((side) => <group key={`fixer-arm-${side}`} position={[side * 0.78, 1.9, 0]} rotation={[0.12, 0, -side * 0.88]}>
+      <mesh position={[side * 0.5, -0.08, 0]} scale={[0.18, 0.9, 0.21]}><capsuleGeometry args={[0.5, 1, 6, 10]} /><meshStandardMaterial color="#190b0d" emissive="#722025" emissiveIntensity={0.55} transparent opacity={0.8} roughness={0.48} depthWrite={false} /></mesh>
+      <mesh position={[side * 0.94, -0.75, 0.03]} scale={[0.17, 0.3, 0.13]}><sphereGeometry args={[1, 14, 10]} /><meshStandardMaterial color="#251014" emissive="#bc302c" emissiveIntensity={0.8} transparent opacity={0.9} roughness={0.35} depthWrite={false} /></mesh>
+    </group>)}
+    {rootTrails.map((curve, index) => <mesh key={`fixer-root-${index}`}><tubeGeometry args={[curve, 28, 0.035 + (index % 3) * 0.012, 5, false]} /><meshBasicMaterial color={index % 2 ? '#6c1b21' : '#b42b2a'} transparent opacity={0.52} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>)}
+    {armTrails.map((curve, index) => <mesh key={`fixer-arm-trail-${index}`}><tubeGeometry args={[curve, 32, 0.046, 6, false]} /><meshBasicMaterial color="#d13931" transparent opacity={0.62} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>)}
+    <pointLight ref={light} position={[0, 1.5, 0.5]} color="#e63b35" intensity={0} distance={16} decay={2} />
+  </group>
+}
+
 interface AgentConfig { name: string; color: string; x: number; start: number; role: number }
 const agents: AgentConfig[] = [
-  { name: 'ANALYST', color: '#a56cff', x: -2.8, start: 0, role: 0 },
-  { name: 'FIXER', color: '#fa554c', x: 2.8, start: 0.24, role: 1 },
   { name: 'TESTER', color: '#61f29b', x: 0, start: 0.48, role: 2 },
 ]
 
@@ -525,6 +719,8 @@ export function GraveStory() {
     <ResurrectionParticles />
     <ReturningSoul />
     <GraveMist />
+    <ImportedAnalyst />
+    <Fixer />
     {agents.map((config) => <Apparition key={config.name} config={config} />)}
   </group>
 }

@@ -29,9 +29,9 @@ function Lights() {
 
   useFrame(() => {
     const k = seq.reveal.light
-    if (moonLight.current) moonLight.current.intensity = 2.6 * k
-    if (fill.current) fill.current.intensity = 1.05 * k
-    if (hemi.current) hemi.current.intensity = 0.48 * k
+    if (moonLight.current) moonLight.current.intensity = 2.35 * k
+    if (fill.current) fill.current.intensity = 0.82 * k
+    if (hemi.current) hemi.current.intensity = 0.42 * k
     if (ambient.current) ambient.current.intensity = 0.16 * k
   })
 
@@ -43,7 +43,7 @@ function Lights() {
       <directionalLight
         ref={moonLight}
         castShadow
-        color="#a8c8e8"
+        color="#b6d5f2"
         intensity={0}
         position={[MOON_POSITION[0] * 0.55, MOON_POSITION[1] * 0.8, MOON_POSITION[2] * 0.55]}
         shadow-bias={-0.0002}
