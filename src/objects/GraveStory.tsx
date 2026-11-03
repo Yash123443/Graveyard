@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { seq, smoothstep } from '../animations/sequence'
 import { createFogTexture, createGlowTexture, createStoneTextures } from '../utils/proceduralTextures'
 import { playMainGraveRumble } from '../audio/audioManager'
-import { ImportedAnalyst } from './ImportedAnalyst'
+import { AnalystCharacter, FixerCharacter, TesterCharacter } from './SpectreCharacters'
 
 const GRAVE = new THREE.Vector3(0, 0, -83)
 
@@ -719,9 +719,9 @@ export function GraveStory() {
     <ResurrectionParticles />
     <ReturningSoul />
     <GraveMist />
-    <ImportedAnalyst />
-    <Fixer />
-    {agents.map((config) => <Apparition key={config.name} config={config} />)}
+    <AnalystCharacter />
+    <FixerCharacter />
+    <TesterCharacter />
   </group>
 }
 
