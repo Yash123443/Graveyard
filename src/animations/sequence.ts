@@ -31,7 +31,7 @@ export const seq = {
   roam: {
     x: 0, z: 0, yaw: 0, pitch: 0,
     targetX: 0, targetZ: 0, targetYaw: 0, targetPitch: 0,
-    velocityX: 0, velocityZ: 0, initialized: false,
+    velocityX: 0, velocityZ: 0, entryBlend: 0, initialized: false,
     input: { forward: false, back: false, left: false, right: false, turnLeft: false, turnRight: false },
   },
   exploration: { nearGrave: -1, graveFocus: 0, nearMain: 0, entered: false, storyProgress: 0, storyStarted: false, obstacles: [] as { x: number; z: number; radius: number }[] },

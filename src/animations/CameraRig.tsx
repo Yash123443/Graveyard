@@ -52,6 +52,7 @@ export function CameraRig() {
   const l = useMemo(() => new THREE.Vector3(), [])
   const smoothedLook = useMemo(() => new THREE.Vector3(0, 8.4, -8), [])
   const direction = useMemo(() => new THREE.Vector3(), [])
+  const railDirection = useMemo(() => new THREE.Vector3(), [])
   const lookTarget = useMemo(() => new THREE.Vector3(), [])
   const up = useMemo(() => new THREE.Vector3(0, 1, 0), [])
   const finalShotPosition = useMemo(() => new THREE.Vector3(0, 2.9, -69.5), [])
@@ -81,9 +82,14 @@ export function CameraRig() {
       roam.pitch = roam.targetPitch = 0
       roam.velocityX = 0
       roam.velocityZ = 0
+      roam.entryBlend = 0
       roam.initialized = true
     }
     const roamAllowed = seq.exploration.entered ? 1 : 0
+    // The opening rail and free-roam camera intentionally use different
+    // height rules. Ease between them after the gate handoff so it never
+    // reads as a cut in the opening shot.
+    roam.entryBlend = THREE.MathUtils.damp(roam.entryBlend, roamAllowed, 5.5, dt)
     const isClear = (x: number, z: number) => {
       // A round collision limit mirrors the iron fence enclosing the grounds.
       return Math.hypot(x, z - CEMETERY_CENTER_Z) < CEMETERY_ROAM_RADIUS - 0.9
@@ -125,10 +131,16 @@ export function CameraRig() {
     const freeX = THREE.MathUtils.lerp(roam.x, 0, seq.ending.cameraBack)
     const freeZ = THREE.MathUtils.lerp(roam.z, 34, seq.ending.cameraBack)
     const eyeHeight = groundHeight(roam.x, roam.z) + 1.72
-    camera.position.set(roamAllowed ? freeX + swayX : p.x + swayX + seq.pointer.x * 0.15, roamAllowed ? eyeHeight + swayY : 2.15 + swayY + seq.pointer.y * 0.08, roamAllowed ? freeZ : p.z + introCreep)
+    const handoff = roam.entryBlend
+    camera.position.set(
+      THREE.MathUtils.lerp(p.x + seq.pointer.x * 0.15, freeX, handoff) + swayX,
+      THREE.MathUtils.lerp(2.15 + seq.pointer.y * 0.08, eyeHeight, handoff) + swayY,
+      THREE.MathUtils.lerp(p.z + introCreep, freeZ, handoff),
+    )
 
     l.y = THREE.MathUtils.lerp(l.y, 2.15, smoothstep(0.2, 0.4, t))
     smoothedLook.lerp(l, 1 - Math.exp(-dt * 3))
+    railDirection.subVectors(smoothedLook, camera.position).normalize()
     if (roamAllowed) {
       direction.set(Math.sin(roam.yaw) * Math.cos(roam.pitch), Math.sin(roam.pitch), -Math.cos(roam.yaw) * Math.cos(roam.pitch))
       if (seq.ending.cameraBack > 0) {
@@ -136,7 +148,8 @@ export function CameraRig() {
         direction.lerp(l, seq.ending.cameraBack).normalize()
       }
     }
-    else direction.subVectors(smoothedLook, camera.position).applyAxisAngle(up, roam.yaw * roamAllowed)
+    else direction.copy(railDirection).applyAxisAngle(up, roam.yaw * roamAllowed)
+    if (handoff < 1) direction.lerp(railDirection, 1 - handoff).normalize()
     // Ordinary graves never redirect the visitor. The central grave alone
     // takes over once its dedicated apparition sequence has begun.
     const storyShot = smoothstep(0.01, 0.1, seq.exploration.storyProgress) * (1 - seq.ending.cameraBack)
