@@ -25,9 +25,9 @@ function sculptFace(){const g=new THREE.SphereGeometry(1,110,80),p=g.attributes.
   p.setXYZ(i,x*(1+d),y*(1+d),z*(1+d))}
  g.setAttribute('aAO',new THREE.BufferAttribute(ao,1));g.computeVertexNormals();return g}
 
- const VR={analyst:{col:[.55,.15,1],shape:[1,1,1],vw:.022,base:[.012,.007,.03],skin:[.11,.08,.1],sk2:[.7,.5,.8],scale:1},
-  fixer:{col:[1,.2,.1],shape:[1.35,1.6,1.1],vw:.05,base:[.03,.008,.006],skin:[.17,.07,.05],sk2:[.9,.5,.45],scale:1.12},
-  tester:{col:[.15,1,.55],shape:[.72,.35,.85],vw:.012,base:[.01,.03,.02],skin:[.42,.52,.47],sk2:[.5,.85,.7],scale:1.08}};
+ const VR={analyst:{col:[.55,.15,1],shape:[1,1,1],vw:.018,base:[.012,.007,.03],skin:[.11,.08,.1],sk2:[.7,.5,.8],scale:1},
+  fixer:{col:[1,.2,.1],shape:[1.08,1.16,1.02],vw:.026,base:[.03,.008,.006],skin:[.17,.07,.05],sk2:[.9,.5,.45],scale:1.04},
+  tester:{col:[.15,1,.55],shape:[.96,1.04,.96],vw:.015,base:[.01,.03,.02],skin:[.42,.52,.47],sk2:[.5,.85,.7],scale:1.02}};
  const kind=o.variant||'analyst',V=VR[kind],col=o.color||V.col,pos=o.pos||[0,0,0],rotY=o.rotY??1,S=(o.scale??1)*V.scale;
  const U={uTime:{value:0},uAppear:{value:0},uCol:{value:new THREE.Vector3(...col)},uShape:{value:new THREE.Vector3(...V.shape)}};
  const vs=`uniform float uTime,uMode;uniform vec3 uShape;varying vec3 vN,vV,vP;varying float vT,vA,vWY;
@@ -55,7 +55,7 @@ function sculptFace(){const g=new THREE.SphereGeometry(1,110,80),p=g.attributes.
   float vein=1.-smoothstep(0.,uVW,abs(vn-.5));vein*=(.3+.7*(.5+.5*sin(vP.y*8.-uTime*2.4+vn*7.)))*uVein;
   float core=exp(-pow((vP.y-1.15)*3.5,2.))*.4*(1.-f);
   vec3 c=(uBase+uCol*(df*.22+(f*.5+f2*1.0)*(1.-.65*uHood)+vein*1.5+core))*dk+vec3(.9,.7,1.)*(ed*2.+re*.6+vein*vein*.2)+uCol*rim*.35;
-  float al=.74+f*.25+vein*.25+ed;if(uRag>.5)al*=smoothstep(rag,rag+.12,vT);gl_FragColor=vec4(c,clamp(al,0.,1.));}`;
+  float al=.82+f*.18+vein*.2+ed;if(uRag>.5)al*=smoothstep(rag,rag+.12,vT);gl_FragColor=vec4(c,clamp(al,0.,1.));}`;
  const mk=(m,r,hd,vn)=>new THREE.ShaderMaterial({uniforms:{...U,uMode:{value:m},uRag:{value:r},uHood:{value:hd},uVein:{value:vn},uVW:{value:V.vw},uBase:{value:new THREE.Vector3(...V.base)}},vertexShader:vs,fragmentShader:fs,transparent:true,depthWrite:false,side:THREE.DoubleSide});
  const body=mk(1,1,0,1),gen=mk(0,0,0,1),slv=mk(0,1,0,.6),hoodM=mk(2,0,1,.12),skn=mk(0,0,0,.18);
  skn.uniforms.uBase.value.set(...V.skin);skn.uniforms.uCol={value:new THREE.Vector3(...V.sk2)};
@@ -67,9 +67,9 @@ function sculptFace(){const g=new THREE.SphereGeometry(1,110,80),p=g.attributes.
  // A deliberately oversized hood and an unreadable void give the figures a threatening,
  // human-scale silhouette instead of exposing a small, doll-like face.
  const head=new THREE.Group();head.position.set(0,1.8,0);head.rotation.x=.14;G.add(head);
- const hood=new THREE.Mesh(new THREE.SphereGeometry(.38,56,40),hoodM);const hs=kind==='fixer'?1.26:1;hood.scale.set(hs,1.22*hs,1.15*hs);if(kind!=='tester')head.add(hood);
+ const hood=new THREE.Mesh(new THREE.SphereGeometry(.38,56,40),hoodM);const hs=kind==='fixer'?1.12:1;hood.scale.set(hs,1.22*hs,1.15*hs);head.add(hood);
  
- const vd=new THREE.Mesh(new THREE.SphereGeometry(.32,32,20),new THREE.MeshBasicMaterial({color:0x000001,transparent:true,opacity:0}));vd.scale.set(.86,1.12,.7);vd.position.z=.04;vd.renderOrder=-1;vd.visible=kind!=='tester';head.add(vd);
+ const vd=new THREE.Mesh(new THREE.SphereGeometry(.32,32,20),new THREE.MeshBasicMaterial({color:0x000001,transparent:true,opacity:0}));vd.scale.set(.86,1.12,.7);vd.position.z=.04;vd.renderOrder=-1;vd.visible=true;head.add(vd);
  const halo=new THREE.Sprite(new THREE.SpriteMaterial({map:GT,color:new THREE.Color(...col),blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0}));halo.scale.set(1.5,1.5,1);halo.position.z=-.2;head.add(halo);
  const fx=new THREE.Group();head.add(fx);
  if(kind==='analyst'&&o.showHumanFace){const face=new THREE.Mesh(sculptFace(),new THREE.ShaderMaterial({uniforms:{uA:U.uAppear,uC:U.uCol},
@@ -93,12 +93,10 @@ function sculptFace(){const g=new THREE.SphereGeometry(1,110,80),p=g.attributes.
  if(kind==='analyst')[-1,1].forEach(s=>addEye(s*.055,-.01,.27,1.15,.24,-s*.1,.09,.035,.29));
  if(kind==='fixer'){[-1,1].forEach(s=>addEye(s*.085,.015,.255,1.65,.18,s*.28,.14,.035,.275));
   fcore=new THREE.Sprite(new THREE.SpriteMaterial({map:GT,color:eyeC,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0}));fcore.scale.set(.9,1.1,1);fcore.position.set(0,1.2,.22);G.add(fcore)}
- if(kind==='tester'){const mk2=mk(0,0,0,.35);mk2.uniforms.uBase.value.set(.16,.2,.18);
-  const hd=new THREE.Mesh(new THREE.SphereGeometry(.28,48,36),mk2);hd.scale.set(.9,1.26,.98);head.add(hd);
-  const vis=new THREE.Mesh(new THREE.BoxGeometry(.36,.045,.045),new THREE.MeshBasicMaterial({color:0x000302}));vis.position.set(0,.02,.27);fx.add(vis);
-  addEye(0,.03,.295,4.2,.07,0,.28,.022,.305);addEye(0,.03,.3,.85,.42,0,.09,.075,.31);scan=eyes[eyes.length-1];scanG=glows[glows.length-1];
-  const mr=(r,tb,y,z,par)=>{const m=new THREE.Mesh(new THREE.TorusGeometry(r,tb,8,96),new THREE.MeshBasicMaterial({color:eyeC,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false}));m.position.set(0,y,z);par.add(m);rings.push(m);return m};
-  mr(.3,.006,0,-.16,head);mr(.36,.004,0,-.17,head);mr(.62,.006,1.1,0,G).userData.sp=[.5,.2];mr(.8,.005,1.05,0,G).userData.sp=[-.3,.45];}
+ if(kind==='tester')[-1,1].forEach(s=>addEye(s*.055,-.01,.27,1.15,.24,-s*.1,.09,.035,.29));
+ if(kind==='analyst'||kind==='fixer'){
+  [-1,1].forEach((s,i)=>{const m=new THREE.Mesh(new THREE.TorusGeometry(.48+i*.13,.008,6,72),new THREE.MeshBasicMaterial({color:eyeC,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false}));m.position.set(0,.62+i*.38,0);m.rotation.x=Math.PI/2;m.userData.sp=[s*(.32+i*.12),s*(.48+i*.16)];G.add(m);rings.push(m)})
+ }
  // This collection is intentionally built once: step() runs every rendered frame.
  const eyesAndGlows=[...eyes,...glows];
  // legs: smooth lathe leg + shaped bare foot
@@ -120,10 +118,6 @@ function sculptFace(){const g=new THREE.SphereGeometry(1,110,80),p=g.attributes.
  const aS=arm(-1),aI=arm(1);
  const tv=`uniform float uTime,uSeed;varying vec2 vUv;void main(){vUv=uv;vec3 p=position;float v=1.-uv.y;p.z-=v*1.1+sin(uv.y*7.-uTime*1.8+uSeed)*.15*v;p.x+=sin(uv.y*5.-uTime*1.3+uSeed*2.)*.2*v;gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.);}`;
  const tf=`uniform float uAppear;uniform vec3 uCol;varying vec2 vUv;void main(){float v=1.-vUv.y;float a=pow(1.-v,1.7)*smoothstep(0.,.35,vUv.x)*smoothstep(1.,.65,vUv.x)*.3*clamp((uAppear-.5)*2.,0.,1.);gl_FragColor=vec4(uCol*(1.1+(1.-v)),a);}`;
- for(let i=0;i<(kind==='analyst'?7:0);i++){const g=new THREE.PlaneGeometry(.3,2.1,3,40);g.translate(0,-1.05,0);const m=new THREE.Mesh(g,new THREE.ShaderMaterial({uniforms:{uTime:U.uTime,uAppear:U.uAppear,uCol:U.uCol,uSeed:{value:i*1.7}},vertexShader:tv,fragmentShader:tf,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,side:THREE.DoubleSide}));
-  m.position.set((i-3)*.09,1.55-Math.abs(i-3)*.09,-.14);m.rotation.y=(i-3)*.15;G.add(m)}
- 
- if(kind==='tester')[-1,1].forEach((s,j)=>{[0,1,2,3].forEach(k=>{const L=2.1-k*.3,g=new THREE.PlaneGeometry(.4,L,3,44);g.translate(s*.2,-L/2,0);const m=new THREE.Mesh(g,new THREE.ShaderMaterial({uniforms:{uTime:U.uTime,uAppear:U.uAppear,uCol:U.uCol,uSeed:{value:j*3.1+k*1.3}},vertexShader:tv,fragmentShader:tf,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,side:THREE.DoubleSide}));m.position.set(s*.1,1.64-k*.07,-.14);m.rotation.y=s*(.35+k*.22);m.rotation.z=-s*(.1+k*.17);G.add(m)})});
  const NW=kind==='fixer'?1300:800,ws=new Float32Array(NW*4).map(Math.random),wg=new THREE.BufferGeometry();wg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(NW*3),3));wg.setAttribute('aS',new THREE.BufferAttribute(ws,4));
  const WU={uCol:U.uCol,uTime:U.uTime,uAppear:U.uAppear,uPx:{value:Math.min(window.devicePixelRatio||1,2)}};
  const wp=new THREE.Points(wg,new THREE.ShaderMaterial({uniforms:WU,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,

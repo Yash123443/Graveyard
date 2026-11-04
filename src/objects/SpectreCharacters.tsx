@@ -2,7 +2,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { seq, smoothstep } from '../animations/sequence'
-import { createAnalyst } from './analyst/createAnalyst'
+import { createWitchSoul } from './analyst/createWitchSoul'
 
 /** Seconds of a character's own entrance timeline per unit of story progress (0.2 progress = fully materialized). */
 const INTRO_SECONDS_PER_PROGRESS = 55
@@ -25,12 +25,12 @@ interface SpectreProps {
  */
 function Spectre({ variant, position, rotY, scale, start }: SpectreProps) {
   const holder = useRef<THREE.Group>(null)
-  const actor = useRef<ReturnType<typeof createAnalyst> | null>(null)
+  const actor = useRef<ReturnType<typeof createWitchSoul> | null>(null)
   const gl = useThree((state) => state.gl)
 
   useEffect(() => {
     if (!holder.current) return
-    const a = createAnalyst(holder.current, { variant, rotY, scale, lightIntensity: 3, lightDistance: 12 })
+    const a = createWitchSoul(holder.current, { variant, rotY, scale, lightIntensity: 1.15, lightDistance: 9 })
     a.group.visible = false
     actor.current = a
     return () => {
@@ -55,17 +55,17 @@ function Spectre({ variant, position, rotY, scale, start }: SpectreProps) {
   return <group ref={holder} position={position} />
 }
 
-/** Purple forensic investigator: slim, hooded, witch-like face, bare feet, trailing ribbons. Left of the grave. */
+/** Purple forensic investigator: slim hooded occult soul with a partially revealed human face. Left of the grave. */
 export function AnalystCharacter() {
-  return <Spectre variant="analyst" position={[-2.85, 0.55, -80.5]} rotY={1.0} scale={1.5} start={0} />
+  return <Spectre variant="analyst" position={[-2.85, 0.55, -80.5]} rotY={1.0} scale={1.58} start={0} />
 }
 
-/** Crimson repair specialist: broad armored shoulders, molten cracks, faceless void with red slit eyes. Right of the grave. */
+/** Crimson repair specialist: broad hooded occult soul with ember-veined robes and red slit eyes. Right of the grave. */
 export function FixerCharacter() {
-  return <Spectre variant="fixer" position={[2.9, 0.55, -80.15]} rotY={-1.0} scale={1.5} start={0.24} />
+  return <Spectre variant="fixer" position={[2.9, 0.55, -80.15]} rotY={-1.0} scale={1.58} start={0.24} />
 }
 
-/** Emerald verification specialist: porcelain mask with scanning visor, halo rings, feathered wings. Rises behind the grave. */
+/** Emerald verification specialist: hooded occult soul with green eyes and a restrained spectral orbit. Rises behind the grave. */
 export function TesterCharacter() {
-  return <Spectre variant="tester" position={[0, 0.9, -86.2]} rotY={0} scale={1.5} start={0.48} />
+  return <Spectre variant="tester" position={[0, 0.9, -86.2]} rotY={0} scale={1.58} start={0.48} />
 }

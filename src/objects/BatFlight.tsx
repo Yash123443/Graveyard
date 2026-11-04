@@ -2,6 +2,7 @@ import { useFrame } from '@react-three/fiber'
 import { useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { seq } from '../animations/sequence'
+import { GATE_Z } from './CemeteryGate'
 import { MOON_POSITION } from './Moon'
 
 /** Classic bat silhouette: one wing outline (extends +x), mirrored for the other side. */
@@ -36,6 +37,7 @@ interface Flight {
   phase: number
   flapHz: number
   near: boolean
+  gate: boolean
 }
 
 function Bat({ size, wing, material, setRef }: { size: number; wing: THREE.BufferGeometry; material: THREE.Material; setRef: (g: THREE.Group | null) => void }) {
@@ -69,12 +71,13 @@ export function BatFlight() {
   const material = useMemo(() => new THREE.MeshBasicMaterial({ color: '#010204', side: THREE.DoubleSide, fog: false, toneMapped: false }), [])
   const groups = useRef<(THREE.Group | null)[]>([])
   const flights = useRef<Flight[]>(
-    Array.from({ length: BAT_COUNT }, () => ({ active: false, start: 0, duration: 1, x0: 0, x1: 0, y: 0, arc: 0, wobble: 0, z: 0, phase: 0, flapHz: 6, near: false })),
+    Array.from({ length: BAT_COUNT }, () => ({ active: false, start: 0, duration: 1, x0: 0, x1: 0, y: 0, arc: 0, wobble: 0, z: 0, phase: 0, flapHz: 6, near: false, gate: false })),
   )
   const sizes = useMemo(() => Array.from({ length: BAT_COUNT }, (_, i) => 0.55 + ((i * 37) % 11) / 11 * 0.85), [])
   const launched = useRef(0)
   const ambientLaunched = useRef(false)
   const nearLaunched = useRef(false)
+  const gateLaunched = useRef(false)
 
   useFrame(({ camera, clock }) => {
     const now = clock.elapsedTime
@@ -89,6 +92,30 @@ export function BatFlight() {
       seq.flock.id += 1
     }
 
+    // A separate near-camera burst spills through the iron gate itself; it is
+    // deliberately one-shot so returning to the threshold does not replay it.
+    if (seq.gateOpen > 0.08 && !gateLaunched.current) {
+      gateLaunched.current = true
+      seq.halloween.gateBurst = true
+      for (let i = 0; i < FLOCK_SIZE; i += 1) {
+        const f = flights.current[20 + i]
+        const r = (n: number) => Math.abs(Math.sin((i + 4) * 19.17 + n * 41.3)) % 1
+        f.active = true
+        f.gate = true
+        f.near = true
+        f.start = now + r(1) * 1.05 + i * 0.12
+        f.duration = 2.7 + r(2) * 1.8
+        f.x0 = (i - 4.5) * 0.42
+        f.x1 = f.x0 + (i % 2 ? -1 : 1) * (6.5 + r(3) * 8)
+        f.y = 3.3 + r(4) * 4.4
+        f.arc = 0.8 + r(5) * 1.8
+        f.wobble = 0.4 + r(6) * 1.1
+        f.z = GATE_Z
+        f.phase = r(7) * 6.28
+        f.flapHz = 7 + r(8) * 4
+      }
+    }
+
     // launch the next flock whenever scroll crosses a trigger
     while (launched.current < seq.flock.id) {
       const flockIdx = launched.current % 3
@@ -99,6 +126,7 @@ export function BatFlight() {
         const r = (n: number) => Math.abs(Math.sin((i + 1) * 12.9898 + n * 78.233 + launched.current * 3.7)) % 1
         f.active = true
         f.near = isNear
+        f.gate = false
         f.start = now + r(1) * 3.8 + i * 0.25
         f.duration = isNear ? 3.2 + r(2) * 2.1 : 7.2 + r(2) * 6.8
         const span = isNear ? 30 + r(9) * 18 : 106 + r(9) * 34
@@ -132,20 +160,27 @@ export function BatFlight() {
         return
       }
       // Fade into the surrounding black at the ends of each route.
-      g.visible = p > 0.035 && p < 0.965
+      g.visible = p > (f.gate ? 0.012 : 0.035) && p < 0.965
       const dir = Math.sign(f.x1 - f.x0)
       const x = f.x0 + (f.x1 - f.x0) * p
       // lazy erratic path: big arc + fast flutter
       const y = f.y + Math.sin(p * Math.PI * 1.4 + f.phase) * f.arc + Math.sin(now * 3.1 + f.phase) * f.wobble * 0.5
       // Match the sky's fixed visual depth so the existing camera rail never
       // overtakes the flock before it crosses the moon.
-      g.position.set(camera.position.x + x, camera.position.y + y - 2.15, camera.position.z + f.z - 34)
+      if (f.gate) {
+        const lift = Math.sin(p * Math.PI) * 1.25 + p * 0.6
+        g.position.set(x, f.y + lift + Math.sin(p * Math.PI + f.phase) * f.arc, GATE_Z + 0.15 - p * 18)
+      } else {
+        g.position.set(camera.position.x + x, camera.position.y + y - 2.15, camera.position.z + f.z - 34)
+      }
       const flap = Math.sin(now * f.flapHz * Math.PI * 2 + f.phase)
       const [r, l] = [g.children[0], g.children[1]]
       r.rotation.z = flap * 0.62 + 0.1
       l.rotation.z = -(flap * 0.62 + 0.1)
       // the whole animal rolls slightly and bobs against each flap
       g.rotation.z = dir * -0.12 + Math.cos(now * 1.9 + f.phase) * 0.12
+      g.rotation.y = f.gate ? Math.sin(p * Math.PI) * dir * 0.35 : 0
+      if (f.gate) g.scale.setScalar(0.9 + Math.sin(p * Math.PI) * 0.18)
       g.position.y += -flap * 0.12
     })
   })

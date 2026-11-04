@@ -32,3 +32,15 @@
 - Create a cinematic camera that can smoothly move through the environment.
 - Do not create a straight road with graves arranged in rows; the cemetery should feel spacious and naturally irregular.
 - Focus only on environment quality in this step. Do not implement the story or AI agents yet.
+
+## Add Halloween atmosphere and reactive apparitions
+
+- Add pumpkins, candles, a skull prop, and other Halloween dressing throughout the graveyard.
+- Add ghosts peeking from behind trees that disappear permanently when approached or searched for again.
+- Make bats burst out from the cemetery gate the first time the gate opens.
+- Make the three souls read as more realistic, dimensional spectral characters with softer lighting and a visible human face layer on the analyst.
+
+## Replace souls with a shared realistic occult form
+
+- Replace the previous stylized soul set with one shared hooded, layered-robes construction inspired by the supplied reference.
+- Keep the existing purple, red, and green identities while using shadowed hoods, skeletal hands, restrained eye/rune light, cloth trails, and smoke-like particles for all three.

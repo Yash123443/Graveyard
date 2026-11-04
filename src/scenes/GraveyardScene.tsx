@@ -15,6 +15,7 @@ import { DustParticles } from '../objects/DustParticles'
 import { FogVolume } from '../objects/FogVolume'
 import { Ground } from '../objects/Ground'
 import { GraveStory } from '../objects/GraveStory'
+import { HalloweenProps, TreePeekingGhosts } from '../objects/HalloweenAdditions'
 import { ScatteredGraves } from '../objects/ScatteredGraves'
 import { LeafLitter } from '../objects/LeafLitter'
 import { MOON_POSITION, Moon } from '../objects/Moon'
@@ -77,6 +78,8 @@ export function GraveyardScene() {
       <ScatteredGraves />
       <DeadTreeCluster />
       <CemeteryGate />
+      <HalloweenProps />
+      <TreePeekingGhosts />
       <DeadGrass />
       <LeafLitter />
       <DustParticles />

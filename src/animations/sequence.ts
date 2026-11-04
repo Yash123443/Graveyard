@@ -27,6 +27,7 @@ export const seq = {
   cam: 0,
   /** Bat flocks launched so far (bats subscribe via this counter). */
   flock: { id: 0, a: false, b: false },
+  halloween: { ghostsSeen: [false, false, false], gateBurst: false },
   pointer: { x: 0, y: 0 },
   roam: {
     x: 0, z: 0, yaw: 0, pitch: 0,
