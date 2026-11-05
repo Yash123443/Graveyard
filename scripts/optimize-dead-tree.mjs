@@ -1,8 +1,11 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { MeshoptDecoder, MeshoptEncoder, MeshoptSimplifier } from 'meshoptimizer'
 
-const sourcePath = 'scripts/assets-source/dead-tree.glb'
-const outputPath = 'public/models/dead-tree.glb'
+const background = process.argv.includes('--background')
+const sourcePath = background ? 'public/models/dead-tree.glb' : 'scripts/assets-source/dead-tree.glb'
+const outputPath = background ? 'public/models/dead-tree-background.glb' : 'public/models/dead-tree.glb'
+const ratio = background ? 0.16 : 0.22
+const targetError = background ? 0.003 : 0.01
 const input = await readFile(sourcePath)
 const jsonLength = input.readUInt32LE(12)
 const json = JSON.parse(input.toString('utf8', 20, 20 + jsonLength).trim())
@@ -32,8 +35,8 @@ for (let i = 0; i < positionSource.extension.count; i++) {
   positions[i * 3 + 2] = quantizedPositions[i * 4 + 2] / 32767
 }
 
-const targetIndexCount = Math.floor(originalIndices.length * 0.22 / 3) * 3
-const [simplifiedIndices, error] = MeshoptSimplifier.simplify(originalIndices, positions, 3, targetIndexCount, 0.01)
+const targetIndexCount = Math.floor(originalIndices.length * ratio / 3) * 3
+const [simplifiedIndices, error] = MeshoptSimplifier.simplify(originalIndices, positions, 3, targetIndexCount, targetError)
 if (simplifiedIndices.length < 3 || simplifiedIndices.length >= originalIndices.length) throw new Error('Simplification did not produce a smaller triangle mesh')
 const [vertexRemap, compactVertexCount] = MeshoptSimplifier.compactMesh(simplifiedIndices)
 
@@ -153,6 +156,6 @@ console.log(JSON.stringify({
   optimizedTriangles: simplifiedIndices.length / 3,
   originalVertices: originalVertexCount,
   optimizedVertices: compactVertexCount,
-  targetError: 0.01,
+  targetError,
   measuredError: error,
 }))

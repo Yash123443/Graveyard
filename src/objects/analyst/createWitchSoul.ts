@@ -1,238 +1,245 @@
 import * as THREE from 'three'
+import { batchStaticMeshes } from '../../utils/batchStaticMeshes'
 
 type SoulVariant = 'analyst' | 'fixer' | 'tester'
+interface SoulOptions { variant?: SoulVariant; rotY?: number; scale?: number; lightIntensity?: number; lightDistance?: number }
+const palette = { analyst: 0xa65bff, fixer: 0xff443b, tester: 0x42ee93 }
+const smooth = (v: number) => { const t = THREE.MathUtils.clamp(v, 0, 1); return t * t * (3 - 2 * t) }
 
-interface SoulOptions {
-  variant?: SoulVariant
-  rotY?: number
-  scale?: number
-  lightIntensity?: number
-  lightDistance?: number
-}
-
-const palette: Record<SoulVariant, { accent: number; robe: number; face: number }> = {
-  analyst: { accent: 0x9d55ff, robe: 0x17121f, face: 0x8d6b9e },
-  fixer: { accent: 0xff4b38, robe: 0x211413, face: 0x9e665d },
-  tester: { accent: 0x56e7a1, robe: 0x10231c, face: 0x6da78b },
-}
-
-const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
-const smooth = (v: number) => { const t = clamp01(v); return t * t * (3 - 2 * t) }
-
-function mat(color: number, roughness = 0.82) {
-  return new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.02, transparent: true, opacity: 0 })
-}
-
-function addHand(parent: THREE.Group, material: THREE.Material, side: number) {
-  const hand = new THREE.Group()
-  hand.position.set(side * 0.48, 0.78, 0.1)
-  hand.rotation.z = side * -0.08
-  const palm = new THREE.Mesh(new THREE.SphereGeometry(0.11, 18, 12), material)
-  palm.scale.set(0.75, 1.18, 0.62)
-  hand.add(palm)
-  for (let i = 0; i < 4; i += 1) {
-    const finger = new THREE.Mesh(new THREE.CapsuleGeometry(0.018, 0.11, 5, 8), material)
-    finger.position.set(side * (0.04 + i * 0.027), -0.12, 0.02)
-    finger.rotation.z = side * (0.12 + i * 0.04)
-    hand.add(finger)
+/** Continuous cloth surface: radial pleats, a torn hem, and asymmetric layered folds. */
+function cloth(bottom: number, top: number, height: number, phase = 0, arc = Math.PI * 2) {
+  const vertices: number[] = [], indices: number[] = [], uv: number[] = []
+  const columns = 56, rows = 20
+  for (let j = 0; j <= rows; j++) {
+    const v = j / rows
+    for (let i = 0; i <= columns; i++) {
+      const u = i / columns, a = u * arc + phase
+      const fold = Math.sin(a * 8 + v * 1.5) * 0.05 + Math.sin(a * 15 - v * 2) * 0.009
+      const radius = THREE.MathUtils.lerp(bottom, top, v) + fold * (1.2 - v * 0.6)
+      const torn = (Math.sin(a * 7) * 0.025 + Math.sin(a * 11 + 1) * 0.012) * Math.pow(1 - v, 6)
+      vertices.push(Math.sin(a) * radius, v * height + torn, Math.cos(a) * radius * 0.72)
+      uv.push(u * 4, v * 3)
+      if (j < rows && i < columns) {
+        const n = j * (columns + 1) + i
+        indices.push(n, n + 1, n + columns + 1, n + 1, n + columns + 2, n + columns + 1)
+      }
+    }
   }
-  parent.add(hand)
-  return hand
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2))
+  geometry.setIndex(indices); geometry.computeVertexNormals()
+  return geometry
+}
+
+function fabricTexture() {
+  const size = 128, data = new Uint8Array(size * size * 4)
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const n = (y * size + x) * 4
+    const grain = 110 + Math.sin(x * 91.7 + y * 27.1) * 22 + (x % 3 === 0 ? 24 : 0) + (y % 4 === 0 ? 18 : 0)
+    data[n] = data[n + 1] = data[n + 2] = grain; data[n + 3] = 255
+  }
+  const texture = new THREE.DataTexture(data, size, size)
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping
+  texture.needsUpdate = true
+  return texture
 }
 
 export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) {
-  const variant = options.variant ?? 'analyst'
-  const colors = palette[variant]
-  const accent = new THREE.Color(colors.accent)
-  const root = new THREE.Group()
-  root.rotation.y = options.rotY ?? 0
-  root.scale.setScalar(options.scale ?? 1)
-  parent.add(root)
-
-  const body = new THREE.Group()
-  root.add(body)
-
-  const robe = mat(colors.robe, 0.92)
-  const robeLight = mat(new THREE.Color(colors.robe).multiplyScalar(1.8).getHex(), 0.88)
-  const face = mat(colors.face, 0.62)
-  const skinDark = mat(new THREE.Color(colors.face).multiplyScalar(0.48).getHex(), 0.9)
-  const boot = mat(0x07070b, 0.96)
-  const voidMaterial = new THREE.MeshStandardMaterial({ color: 0x09070b, roughness: 1, transparent: true, opacity: 0 })
-  const accentMaterial = new THREE.MeshStandardMaterial({ color: accent, emissive: accent, emissiveIntensity: 1.8, roughness: 0.42, transparent: true, opacity: 0 })
-  const glowMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
-
-  const skirt = new THREE.Mesh(new THREE.ConeGeometry(0.9, 1.65, 40, 10, true), robe)
-  skirt.position.y = 0.72
-  skirt.castShadow = true
-  skirt.receiveShadow = true
-  body.add(skirt)
-
-  const frontPanel = new THREE.Mesh(new THREE.ConeGeometry(0.43, 1.3, 24, 6, true), robeLight)
-  frontPanel.position.set(0, 0.82, 0.19)
-  frontPanel.scale.set(0.62, 1, 0.28)
-  body.add(frontPanel)
-
-  const belt = new THREE.Mesh(new THREE.TorusGeometry(0.39, 0.035, 8, 48), robeLight)
-  belt.rotation.x = Math.PI / 2
-  belt.position.y = 1.18
-  body.add(belt)
-
-  const mantle = new THREE.Mesh(new THREE.SphereGeometry(0.7, 40, 20), robeLight)
-  mantle.scale.set(1.25, 0.38, 0.78)
-  mantle.position.y = 1.48
-  mantle.castShadow = true
-  body.add(mantle)
-
-  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.46, 0.64, 32, 8), robe)
-  torso.position.y = 1.34
-  body.add(torso)
-
-  const leftSleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.52, 8, 16), robe)
-  const rightSleeve = leftSleeve.clone()
-  leftSleeve.position.set(-0.38, 1.17, 0)
-  rightSleeve.position.set(0.38, 1.17, 0)
-  leftSleeve.rotation.z = -0.48
-  rightSleeve.rotation.z = 0.48
-  body.add(leftSleeve, rightSleeve)
-  const leftHand = addHand(body, face, -1)
-  const rightHand = addHand(body, face, 1)
-
-  const leftBoot = new THREE.Mesh(new THREE.SphereGeometry(0.19, 18, 12), boot)
-  const rightBoot = leftBoot.clone()
-  leftBoot.scale.set(0.7, 0.42, 1.3)
-  rightBoot.scale.copy(leftBoot.scale)
-  leftBoot.position.set(-0.24, -0.07, 0.2)
-  rightBoot.position.set(0.24, -0.07, 0.2)
-  body.add(leftBoot, rightBoot)
-
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.16, 0.22, 20), face)
-  neck.position.y = 1.76
-  body.add(neck)
-
-  const head = new THREE.Group()
-  head.position.set(0, 1.98, 0.04)
-  body.add(head)
-  const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.31, 40, 28), face)
-  headMesh.scale.set(0.88, 1.14, 0.84)
-  headMesh.castShadow = true
-  head.add(headMesh)
-
-  // Hood is a shell behind the face, so the face remains a readable human form.
-  const hood = new THREE.Mesh(new THREE.SphereGeometry(0.48, 40, 28), robe)
-  hood.scale.set(1.13, 1.18, 0.62)
-  hood.position.set(0, 0.02, -0.2)
-  hood.castShadow = true
-  head.add(hood)
-  const hoodBrim = new THREE.Mesh(new THREE.TorusGeometry(0.39, 0.075, 10, 48), robeLight)
-  hoodBrim.rotation.x = Math.PI / 2
-  hoodBrim.position.set(0, -0.22, 0.06)
-  hoodBrim.scale.set(1.12, 0.72, 1)
-  head.add(hoodBrim)
-
-  const socketMaterial = new THREE.MeshStandardMaterial({ color: 0x050407, roughness: 1, transparent: true, opacity: 0 })
-  const socketL = new THREE.Mesh(new THREE.SphereGeometry(0.065, 16, 10), socketMaterial)
-  const socketR = socketL.clone()
-  socketL.scale.set(1.25, 0.55, 0.25)
-  socketR.scale.copy(socketL.scale)
-  socketL.position.set(-0.105, 0.035, 0.305)
-  socketR.position.set(0.105, 0.035, 0.305)
-  head.add(socketL, socketR)
-
-  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.023, 12, 8), accentMaterial)
-  const eyeR = eyeL.clone()
-  eyeL.scale.set(1.25, 0.48, 0.35)
-  eyeR.scale.copy(eyeL.scale)
-  eyeL.position.set(-0.105, 0.035, 0.33)
-  eyeR.position.set(0.105, 0.035, 0.33)
-  head.add(eyeL, eyeR)
-
-  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.048, 12, 8), skinDark)
-  nose.scale.set(0.7, 1.45, 0.7)
-  nose.position.set(0, -0.04, 0.32)
-  head.add(nose)
-  const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.018, 0.012), skinDark)
-  mouth.position.set(0, -0.15, 0.31)
-  head.add(mouth)
-
-  const chestOrb = new THREE.Mesh(new THREE.SphereGeometry(0.115, 24, 16), accentMaterial)
-  chestOrb.position.set(0, 1.42, 0.43)
-  body.add(chestOrb)
-  const chestHalo = new THREE.Mesh(new THREE.SphereGeometry(0.28, 20, 14), glowMaterial)
-  chestHalo.position.copy(chestOrb.position)
-  body.add(chestHalo)
-  const glow = new THREE.PointLight(accent, 0, options.lightDistance ?? 9, 2)
-  glow.position.set(0, 1.5, 0.5)
-  body.add(glow)
-
-  const capeTrails = [-1, 0, 1].map((side) => {
-    const trail = new THREE.Mesh(new THREE.ConeGeometry(0.22, 1.45, 10, 6, true), robeLight)
-    trail.position.set(side * 0.3, 0.55, -0.34 - Math.abs(side) * 0.08)
-    trail.rotation.z = side * 0.26
-    trail.rotation.x = -0.18
-    trail.scale.set(0.7, 1, 0.42)
-    body.add(trail)
-    return trail
-  })
-
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.68, 0.012, 8, 64), glowMaterial)
-  ring.rotation.x = Math.PI / 2
-  ring.position.y = 0.58
-  body.add(ring)
-
-  const particlePositions = new Float32Array(160 * 3)
-  for (let i = 0; i < 160; i += 1) {
-    const a = i * 2.41
-    const radius = 0.35 + (i % 13) / 13 * 0.85
-    particlePositions[i * 3] = Math.cos(a) * radius
-    particlePositions[i * 3 + 1] = 0.18 + (i % 23) / 23 * 2.15
-    particlePositions[i * 3 + 2] = Math.sin(a) * radius * 0.48 - 0.15
+  const variant = options.variant ?? 'analyst', accent = new THREE.Color(palette[variant])
+  const root = new THREE.Group(), body = new THREE.Group()
+  root.rotation.y = options.rotY ?? 0; root.scale.setScalar(options.scale ?? 1)
+  parent.add(root); root.add(body)
+  const textures: THREE.Texture[] = []
+  const materials: THREE.Material[] = []
+  const fabric = fabricTexture(); textures.push(fabric)
+  const clothTime = { value: 0 }
+  const standard = (color: THREE.ColorRepresentation, roughness = 0.9) => {
+    const material = new THREE.MeshStandardMaterial({ color, roughness, transparent: true, opacity: 0, side: THREE.DoubleSide, forceSinglePass: true })
+    materials.push(material); return material
   }
-  const particlesGeometry = new THREE.BufferGeometry()
-  particlesGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3))
-  const particlesMaterial = new THREE.PointsMaterial({ color: accent, size: 0.022, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
-  const particles = new THREE.Points(particlesGeometry, particlesMaterial)
-  body.add(particles)
+  const robe = standard('#3b3e49'), mantle = standard('#4c505b'), lining = standard('#090b12'), bone = standard('#807b77', 0.7)
+  for (const material of [robe, mantle]) {
+    material.bumpMap = fabric; material.bumpScale = 0.012
+    material.emissive.copy(accent); material.emissiveIntensity = 0.008
+    material.onBeforeCompile = shader => {
+      shader.uniforms.soulClothTime = clothTime
+      shader.vertexShader = 'uniform float soulClothTime;\n' + shader.vertexShader
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
+        #include <begin_vertex>
+        float hem = 1.0 - smoothstep(0.15, 1.8, position.y);
+        transformed.x += sin(position.y * 3.0 + position.z * 4.0 + soulClothTime * 0.8) * 0.018 * hem;
+        transformed.z += sin(position.x * 5.0 + soulClothTime * 0.65) * 0.014 * hem;
+      `)
+    }
+    material.customProgramCacheKey = () => 'soul-cloth-breathing-v1'
+  }
+  const metal = standard('#51464b', 0.36); metal.metalness = 0.8
+  const glow = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0, toneMapped: false, depthWrite: false })
+  materials.push(glow)
+  const mesh = (geometry: THREE.BufferGeometry, material: THREE.Material, position: [number, number, number], target: THREE.Object3D = body) => {
+    const object = new THREE.Mesh(geometry, material); object.position.set(...position)
+    object.castShadow = material !== glow; object.receiveShadow = material !== glow
+    target.add(object); return object
+  }
+  const tube = (points: number[][], radius: number, material: THREE.Material, target: THREE.Object3D = body) =>
+    mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points.map(p => new THREE.Vector3(p[0], p[1], p[2]))), Math.max(12, points.length * 5), radius, 5, false), material, [0, 0, 0], target)
 
-  const fadeMaterials = [robe, robeLight, face, skinDark, boot, voidMaterial, accentMaterial, socketMaterial, glowMaterial, particlesMaterial]
-  let timeline = 0
-  let elapsed = 0
-  let pose = 0
-  const set = (T: number, time: number, targetPose = 1, fade = 1) => {
-    timeline = T
-    elapsed = time
-    pose += (targetPose - pose) * 0.05
-    const appear = smooth((T - 4.8) / 4.5) * fade
-    fadeMaterials.forEach((material) => { material.opacity = appear * (material === particlesMaterial ? 0.38 : 1) })
-    glow.intensity = appear * (options.lightIntensity ?? 1.15)
-    body.position.y = (1 - appear) * -0.18 + Math.sin(time * 0.8) * 0.018
-    body.rotation.y = Math.sin(time * 0.25) * 0.025
-    body.rotation.z = Math.sin(time * 0.7) * 0.008
-    leftHand.rotation.x = -0.1 - pose * 0.15 + Math.sin(time * 0.7) * 0.02
-    rightHand.rotation.x = -0.1 - pose * 0.15 + Math.cos(time * 0.65) * 0.02
-    chestHalo.scale.setScalar(0.9 + Math.sin(time * 1.6) * 0.08)
-    ring.rotation.z = time * 0.35
-    capeTrails.forEach((trail, i) => {
-      trail.rotation.y = Math.sin(time * 0.45 + i) * 0.12
-      trail.rotation.z = Math.cos(time * 0.3 + i) * 0.035
-    })
-    particles.rotation.y = time * 0.06
-    eyeL.scale.y = eyeR.scale.y = 0.38 + Math.abs(Math.sin(time * 2.1)) * 0.2
+  // A shaped torso and continuous cape establish a solid human silhouette.
+  const profile = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0.6, 0, 0), new THREE.Vector3(0.58, 0.35, 0),
+    new THREE.Vector3(0.46, 0.85, 0), new THREE.Vector3(0.34, 1.17, 0),
+    new THREE.Vector3(0.43, 1.49, 0), new THREE.Vector3(0.49, 1.65, 0),
+    new THREE.Vector3(0.23, 1.82, 0),
+  ])
+  const torsoGeometry = new THREE.LatheGeometry(profile.getPoints(36).map(p => new THREE.Vector2(p.x, p.y)), 48)
+  const torsoPositions = torsoGeometry.attributes.position
+  for (let i = 0; i < torsoPositions.count; i++) {
+    const x = torsoPositions.getX(i), y = torsoPositions.getY(i), z = torsoPositions.getZ(i)
+    const a = Math.atan2(x, z), pleat = 1 + Math.sin(a * 10 + y * 0.6) * 0.1 + Math.sin(a * 18 - y) * 0.02
+    torsoPositions.setXYZ(i, x * pleat, y, z * pleat * 0.72)
+  }
+  torsoGeometry.computeVertexNormals()
+  mesh(torsoGeometry, robe, [0, 0, 0])
+  mesh(cloth(0.72, 0.32, 1.8, 0.58, Math.PI * 2 - 1.16), mantle, [0, 0.04, -0.08])
+  const shoulders = mesh(new THREE.SphereGeometry(0.5, 24, 16), mantle, [0, 1.6, -0.025])
+  shoulders.scale.set(1.16, 0.3, 0.7)
+  // Broad curved cloth tails replace the jagged, paper-like shoulder strips.
+  const tatters: THREE.Mesh[] = []
+  for (const side of [-1, 1]) {
+    const tail = mesh(cloth(0.15, 0.19, 1.22, 0.3, Math.PI * 1.3), mantle, [side * 0.48, 0.38, -0.18])
+    tail.rotation.z = side * 0.12
+    tatters.push(tail)
+  }
+  // An engraved clasp and loose chain give the layered fabric a physical attachment.
+  tube([[-0.31, 1.7, 0.31], [-0.18, 1.59, 0.4], [0, 1.55, 0.43], [0.18, 1.59, 0.4], [0.31, 1.7, 0.31]], 0.014, metal)
+  const clasp = mesh(new THREE.OctahedronGeometry(0.07), metal, [0, 1.56, 0.45]); clasp.scale.z = 0.4
+  mesh(new THREE.OctahedronGeometry(0.025), glow, [0, 1.56, 0.48])
+  body.scale.x = variant === 'fixer' ? 1.12 : variant === 'analyst' ? 0.94 : 1
+  for (const side of [-1, 1]) {
+    const sleeve = mesh(cloth(0.21, 0.17, 0.73), robe, [side * 0.53, 1.04, 0.18])
+    sleeve.rotation.z = side * 0.38; sleeve.rotation.x = -0.38
+    const palm = mesh(new THREE.SphereGeometry(0.1, 16, 12), bone, [side * 0.52, 1.1, 0.56])
+    palm.scale.set(1, 0.45, 1.22)
+    for (let finger = 0; finger < 4; finger++) {
+      const x = side * 0.52 + (finger - 1.5) * 0.042
+      tube([[x, 1.1, 0.6], [x, 1.09, 0.71], [x + side * 0.015, 1.14, 0.77]], 0.017, bone)
+      mesh(new THREE.SphereGeometry(0.021, 8, 6), bone, [x, 1.09, 0.69])
+    }
+    tube([[side * 0.44, 1.1, 0.56], [side * 0.4, 1.12, 0.65], [side * 0.43, 1.14, 0.7]], 0.022, bone)
+  }
+
+  // Open hood with a pointed crown. The opening faces +Z; no sphere covers the face.
+  const hoodVertices: number[] = [], hoodIndices: number[] = []
+  for (let j = 0; j <= 24; j++) for (let i = 0; i <= 64; i++) {
+    const v = j / 24, a = i / 64 * Math.PI * 2
+    const arch = Math.cos(a), r = 1 - v * 0.94
+    const pleat = Math.sin(a * 7 + v * 2) * 0.006
+    hoodVertices.push(Math.sin(a) * (0.3 * r + pleat), 2.06 + arch * 0.43 * r + v * 0.43 + Math.max(0, arch) ** 8 * 0.13 * (1 - v), 0.26 - v * 0.62 - Math.max(0, arch) * 0.06)
+    if (j < 24 && i < 64) { const n = j * 65 + i; hoodIndices.push(n, n + 65, n + 1, n + 1, n + 65, n + 66) }
+  }
+  const hoodGeometry = new THREE.BufferGeometry()
+  hoodGeometry.setAttribute('position', new THREE.Float32BufferAttribute(hoodVertices, 3)); hoodGeometry.setIndex(hoodIndices); hoodGeometry.computeVertexNormals()
+  mesh(hoodGeometry, mantle, [0, 0, 0])
+  const hoodEdge: number[][] = []
+  for (let i = 0; i <= 64; i++) hoodEdge.push(hoodVertices.slice(i * 3, i * 3 + 3))
+  tube(hoodEdge, 0.014, robe)
+  const face = mesh(new THREE.SphereGeometry(0.225, 32, 24), lining, [0, 2.06, 0.01]); face.scale.set(1, 1.33, 0.55)
+  for (const side of [-1, 1]) {
+    const eye = mesh(new THREE.SphereGeometry(0.021, 16, 10), glow, [side * 0.085, 2.13, 0.15])
+    eye.scale.set(1.35, 0.32, 0.6); eye.rotation.z = side * 0.18
+    tube([[side * 0.24, 1.96, 0.15], [side * 0.14, 1.86, 0.18], [side * 0.06, 1.8, 0.14]], 0.025, robe)
+  }
+  // Folded face veil and cowl recess the eyes beneath the hood instead of a flat black oval.
+  const veil = mesh(cloth(0.22, 0.18, 0.28, -Math.PI * 0.5, Math.PI), robe, [0, 1.78, 0.08])
+  veil.scale.z = 0.62
+  for (let i = 0; i < 3; i++) {
+    tube([[-0.2, 1.9 - i * 0.045, 0.17], [0, 1.84 - i * 0.04, 0.22], [0.2, 1.9 - i * 0.045, 0.17]], 0.018, mantle)
+  }
+  const prop = new THREE.Group(); prop.position.set(0, 1.18, 0.75); body.add(prop)
+  if (variant === 'analyst') {
+    for (const side of [-1, 1]) {
+      const half = new THREE.Group(); half.rotation.z = side * 0.18; half.position.x = side * 0.22; prop.add(half)
+      mesh(new THREE.BoxGeometry(0.45, 0.055, 0.43), metal, [0, 0, 0], half)
+      mesh(new THREE.BoxGeometry(0.41, 0.045, 0.39), standard('#c5b8a0'), [0, 0.048, 0], half)
+      for (let line = 0; line < 7; line++) tube([[-0.15, 0.074, -0.14 + line * 0.045], [0.13, 0.074, -0.14 + line * 0.045]], 0.003, glow, half)
+    }
+  } else if (variant === 'fixer') {
+    prop.rotation.z = -0.55
+    mesh(new THREE.BoxGeometry(0.095, 1.05, 0.075), metal, [0.12, 0.18, 0], prop)
+    const jaw = new THREE.Shape()
+    jaw.moveTo(-0.19, 0); jaw.lineTo(-0.24, 0.19); jaw.lineTo(-0.14, 0.31); jaw.lineTo(-0.12, 0.13)
+    jaw.lineTo(0.09, 0.1); jaw.lineTo(0.18, 0.26); jaw.lineTo(0.23, 0.09); jaw.lineTo(0.14, -0.06); jaw.closePath()
+    mesh(new THREE.ExtrudeGeometry(jaw, { depth: 0.065, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.018, bevelThickness: 0.012 }), metal, [0.12, 0.68, -0.03], prop)
+    tube([[0.12, -0.3, 0.045], [0.12, 0.63, 0.045]], 0.009, glow, prop)
+  }
+  // Floating glass displays are actual world-space objects, with role-specific diagrams.
+  const display = new THREE.Group(); display.position.set(variant === 'tester' ? 0 : 0.85, variant === 'tester' ? 1.42 : 1.72, 0.58)
+  display.rotation.set(-0.12, -0.12, variant === 'tester' ? -0.1 : 0.08); body.add(display)
+  const glass = standard(accent.clone().multiplyScalar(0.12), 0.2); glass.depthWrite = false
+  mesh(new THREE.PlaneGeometry(0.74, 0.58), glass, [0, 0, 0], display)
+  tube([[-0.37, -0.29, 0], [-0.37, 0.29, 0], [0.37, 0.29, 0], [0.37, -0.29, 0], [-0.37, -0.29, 0]], 0.006, glow, display)
+  for (let i = 0; i < 3; i++) {
+    const y = 0.16 - i * 0.16
+    if (variant === 'tester') tube([[-0.28, y, 0.01], [-0.23, y - 0.045, 0.01], [-0.15, y + 0.05, 0.01]], 0.009, glow, display)
+    tube([[variant === 'tester' ? -0.08 : -0.28, y, 0.01], [0.12 + i * 0.055, y, 0.01]], 0.004, glow, display)
+  }
+  if (variant === 'analyst') tube([[-0.28, -0.2, 0.02], [-0.1, 0.02, 0.02], [0.05, -0.1, 0.02], [0.28, 0.21, 0.02]], 0.009, glow, display)
+  if (variant === 'tester') {
+    const seal = new THREE.Group(); seal.position.set(0.83, 1.94, 0.22); body.add(seal)
+    mesh(new THREE.TorusGeometry(0.23, 0.008, 6, 64), glow, [0, 0, 0], seal)
+    tube([[-0.12, 0, 0], [-0.025, -0.085, 0], [0.14, 0.12, 0]], 0.018, glow, seal)
+  }
+
+  const light = new THREE.PointLight('#c0cce5', 0, options.lightDistance ?? 9, 2); light.position.set(-0.5, 2.5, 1.3); body.add(light)
+  const rim = new THREE.PointLight(accent, 0, 5, 2); rim.position.set(0, 1.8, -0.8); body.add(rim)
+  const particlesGeometry = new THREE.BufferGeometry(), positions = new Float32Array(180 * 3)
+  for (let i = 0; i < 180; i++) { const a = i * 2.4, radius = 0.5 + (i % 17) / 20; positions.set([Math.cos(a) * radius, (i % 31) / 12, Math.sin(a) * radius * 0.7], i * 3) }
+  particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  const particleMaterial = new THREE.PointsMaterial({ color: accent, size: 0.035, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending })
+  materials.push(particleMaterial)
+  const particles = new THREE.Points(particlesGeometry, particleMaterial); body.add(particles)
+  // Soft ground wisps use a radial alpha texture instead of opaque particle squares.
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64
+  const context = canvas.getContext('2d')!
+  const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32)
+  gradient.addColorStop(0, 'rgba(255,255,255,0.45)'); gradient.addColorStop(0.4, 'rgba(255,255,255,0.15)'); gradient.addColorStop(1, 'rgba(255,255,255,0)')
+  context.fillStyle = gradient; context.fillRect(0, 0, 64, 64)
+  const smokeTexture = new THREE.CanvasTexture(canvas); textures.push(smokeTexture)
+  particleMaterial.map = smokeTexture
+  const smokeMaterial = new THREE.SpriteMaterial({ map: smokeTexture, color: accent, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 })
+  materials.push(smokeMaterial)
+  const wisps = Array.from({ length: 5 }, (_, i) => { const sprite = new THREE.Sprite(smokeMaterial); sprite.scale.set(1.6, 0.75, 1); sprite.position.set(Math.sin(i * 2.4) * 0.7, 0.15 + i * 0.08, Math.cos(i * 2.4) * 0.5); body.add(sprite); return sprite })
+  batchStaticMeshes(display)
+  batchStaticMeshes(body, new Set<THREE.Object3D>([display, ...tatters]))
+  let timeline = 0, elapsed = 0
+  let previousTime: number | undefined, motionTime = 0
+  const set = (T: number, time: number, _pose = 1, fade = 1) => {
+    timeline = T; elapsed = time
+    motionTime += Math.min(0.05, Math.max(0, time - (previousTime ?? time)))
+    previousTime = time
+    time = motionTime
+    clothTime.value = time
+    const appear = smooth((T - 4.8) / 4.5) * THREE.MathUtils.clamp(fade, 0, 1)
+    materials.forEach(material => { material.opacity = appear * (material === glass ? 0.65 : material === smokeMaterial ? 0.25 : material === particleMaterial ? 0.65 : 1) })
+    light.intensity = appear * (options.lightIntensity ?? 1.15) * 3; rim.intensity = appear * 0.75
+    body.position.y = Math.sin(time * 0.8) * 0.035 - (1 - appear) * 0.25
+    body.rotation.z = Math.sin(time * 0.6) * 0.009
+    tatters.forEach((tatter, i) => { tatter.rotation.x = Math.sin(time * 1.1 + i * 0.7) * 0.12 })
+    display.position.y = (variant === 'tester' ? 1.42 : 1.72) + Math.sin(time * 0.9) * 0.035
+    particles.rotation.y = time * 0.08
+    wisps.forEach((sprite, i) => { sprite.position.x = Math.sin(time * 0.28 + i * 2.4) * 0.85; sprite.position.y = 0.1 + ((time * 0.09 + i * 0.14) % 0.9) })
     root.visible = appear > 0.003
     return appear
   }
-
   return {
-    group: root,
-    set,
-    update(dt: number) { timeline += dt; elapsed += dt; return set(timeline, elapsed, 1, 1) },
+    group: root, set,
+    update(dt: number) { return set(timeline + dt, elapsed + dt) },
     setPixelRatio(_ratio: number) {},
     dispose() {
-      root.traverse((node) => {
-        const mesh = node as THREE.Mesh
-        if (mesh.geometry) mesh.geometry.dispose()
-        const material = mesh.material
-        if (material) (Array.isArray(material) ? material : [material]).forEach((item) => item.dispose())
-      })
+      const geometries = new Set<THREE.BufferGeometry>()
+      root.traverse(node => { const geometry = (node as THREE.Mesh).geometry; if (geometry) geometries.add(geometry) })
+      geometries.forEach(geometry => geometry.dispose()); materials.forEach(material => material.dispose()); textures.forEach(texture => texture.dispose())
       parent.remove(root)
     },
   }

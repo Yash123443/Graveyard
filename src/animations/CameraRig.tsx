@@ -1,9 +1,10 @@
 import { useFrame } from '@react-three/fiber'
 import { useMemo } from 'react'
 import * as THREE from 'three'
-import { cameraLimit, seq, smoothstep } from './sequence'
+import { advanceFinalGraveStory, cameraLimit, seq, smoothstep } from './sequence'
 import { CEMETERY_CENTER_Z, CEMETERY_ROAM_RADIUS } from '../objects/CircularCemeteryFence'
 import { groundHeight } from '../objects/Ground'
+import { memorialObstacles } from '../objects/CemeteryMemorials'
 
 /**
  * The camera is on a rail. Scroll scrubs along it, but the rail is critically
@@ -63,6 +64,7 @@ export function CameraRig() {
 
   useFrame(({ camera, clock }, delta) => {
     const dt = Math.min(delta, 0.05)
+    advanceFinalGraveStory(dt)
     const target = seq.exploration.entered ? seq.cam : Math.min(seq.scroll, cameraLimit())
     seq.cam += (target - seq.cam) * (1 - Math.exp(-dt * 1.6))
     const t = Math.min(1, Math.max(0, seq.cam - seq.ending.cameraBack * 0.27))
@@ -93,15 +95,18 @@ export function CameraRig() {
     const isClear = (x: number, z: number) => {
       // A round collision limit mirrors the iron fence enclosing the grounds.
       return Math.hypot(x, z - CEMETERY_CENTER_Z) < CEMETERY_ROAM_RADIUS - 0.9
-        && ![...seq.exploration.obstacles, ...gateObstacles].some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
+        && !seq.exploration.obstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
+        && !gateObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
+        && !memorialObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
     }
     if (roamAllowed > 0) {
       const forward = Number(roam.input.forward) - Number(roam.input.back)
       const strafe = Number(roam.input.right) - Number(roam.input.left)
       const turn = Number(roam.input.turnRight) - Number(roam.input.turnLeft)
       roam.targetYaw += turn * dt * 1.2
-      const magnitude = Math.min(1, Math.hypot(forward, strafe))
-      const walkSpeed = 5.4 * magnitude
+      const inputLength = Math.hypot(forward, strafe)
+      const magnitude = Math.min(1, inputLength)
+      const walkSpeed = 5.4 * magnitude / Math.max(1, inputLength)
       const wantedX = (forward * Math.sin(roam.yaw) + strafe * Math.cos(roam.yaw)) * walkSpeed
       const wantedZ = (-forward * Math.cos(roam.yaw) + strafe * Math.sin(roam.yaw)) * walkSpeed
       const response = magnitude > 0 ? 13 : 8

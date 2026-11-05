@@ -31,8 +31,8 @@ export function Ground() {
     const reveal = seq.reveal.fog * 0.8 + 0.2 * seq.reveal.trees
     const illumination = 0.18 + reveal * 0.82
     if (material.current) {
-      material.current.color.setRGB(illumination, illumination * 0.4, illumination * 0.16)
-      material.current.emissive.setRGB(reveal * 0.028, reveal * 0.011, reveal * 0.003)
+      material.current.color.setRGB(illumination * 0.42, illumination * 0.46, illumination * 0.43)
+      material.current.emissive.setRGB(reveal * 0.005, reveal * 0.009, reveal * 0.014)
     }
   })
 

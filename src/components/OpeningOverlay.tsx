@@ -3,6 +3,7 @@ import { moveRoam, nudgeScroll, playIntro, seq, smoothstep, turnRoam } from '../
 import { getAudioStatus, subscribeAudio, toggleAudio, unlockAudio } from '../audio/audioManager'
 import { getRepairResult, subscribeRepairResult } from '../integrations/repairResult'
 import { graveStories } from '../objects/graveStories'
+import { soulCue, SOUL_STARTS } from '../animations/soulChoreography'
 
 function SoundControl() {
   const status = useSyncExternalStore(subscribeAudio, getAudioStatus)
@@ -93,22 +94,27 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
         copy.current.style.visibility = out >= 1 ? 'hidden' : 'visible'
       }
       if (meter.current) meter.current.style.transform = `scaleY(${seq.cam})`
-      const mainFocus = smoothstep(0.55, 0.82, seq.exploration.nearMain)
+      const mainFocus = smoothstep(0.25, 0.48, seq.exploration.nearMain)
       const recordIn = mainFocus
-      const recordOut = smoothstep(0.9, 0.98, seq.exploration.nearMain)
+      const recordOut = smoothstep(0.85, 0.92, seq.exploration.nearMain)
+      const encounterFade = 1 - smoothstep(0, 0.035, seq.exploration.storyProgress)
       const storyFade = 1 - smoothstep(0.03, 0.22, seq.ending.progress)
       if (graveRecord.current) {
-        graveRecord.current.style.opacity = String(recordIn * (1 - recordOut * 0.72) * storyFade)
+        graveRecord.current.style.opacity = String(recordIn * (1 - recordOut) * storyFade * encounterFade)
         graveRecord.current.style.transform = `translate3d(0, ${(1 - recordIn) * 20}px, 0)`
+        for (let row = 2; row < 5; row++) {
+          const element = graveRecord.current.children[row] as HTMLElement | undefined
+          if (element) element.style.opacity = String(smoothstep(0.35 + (row - 2) * 0.115, 0.58 + (row - 2) * 0.115, seq.exploration.nearMain))
+        }
       }
       if (epitaph.current) {
-        const alpha = smoothstep(0.72, 0.86, seq.exploration.nearMain) * (1 - smoothstep(0.91, 0.98, seq.exploration.nearMain)) * storyFade
+        const alpha = smoothstep(0.92, 0.96, seq.exploration.nearMain) * (1 - smoothstep(0.985, 0.999, seq.exploration.nearMain)) * storyFade * encounterFade
         epitaph.current.style.opacity = String(alpha)
         // Preserve the CSS horizontal centering while the line rises in.
         epitaph.current.style.transform = `translate3d(-50%, ${(1 - alpha) * 12}px, 0)`
       }
       if (graveStoryLine.current) {
-        const alpha = smoothstep(0.82, 0.91, seq.exploration.nearMain) * (1 - smoothstep(0.93, 0.99, seq.exploration.nearMain)) * storyFade
+        const alpha = smoothstep(0.999, 1, seq.exploration.nearMain) * storyFade * encounterFade
         graveStoryLine.current.style.opacity = String(alpha)
       }
       const story = seq.exploration.storyProgress
@@ -120,11 +126,7 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
         'Attempt dependency repairs · update incompatible packages · repair configurations · rebuild and document modifications.',
         'Run the project’s build and tests before calling it alive.',
       ]
-      const starts = [0, 0.24, 0.48]
-      const ends = [0.24, 0.48, 0.72]
-      const agentIn = smoothstep(starts[agent], starts[agent] + 0.045, story)
-      const agentOut = 1 - smoothstep(ends[agent] - 0.025, ends[agent], story)
-      const showAgent = agentIn * agentOut * storyFade
+      const showAgent = soulCue(story, SOUL_STARTS[agent]).caption * storyFade
       if (agentPanel.current) {
         agentPanel.current.style.opacity = String(showAgent)
         agentPanel.current.style.transform = `translate3d(0, ${(1 - showAgent) * 18}px, 0)`

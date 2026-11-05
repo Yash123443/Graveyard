@@ -20,6 +20,7 @@ import { ScatteredGraves } from '../objects/ScatteredGraves'
 import { LeafLitter } from '../objects/LeafLitter'
 import { MOON_POSITION, Moon } from '../objects/Moon'
 import { Sky } from '../objects/Sky'
+import { CemeteryMemorials } from '../objects/CemeteryMemorials'
 
 /** Light rig whose intensity is driven by the scene-1 reveal, so the world starts in near-total darkness. */
 function Lights() {
@@ -58,7 +59,7 @@ function Lights() {
         shadow-camera-bottom={-48}
       />
       {/* cold fill from the camera side so rust and stone texture stay legible */}
-      <directionalLight ref={fill} color="#a18a6d" intensity={0} position={[-8, 7, 42]} />
+      <directionalLight ref={fill} color="#8096b1" intensity={0} position={[-8, 7, 42]} />
     </>
   )
 }
@@ -75,6 +76,7 @@ export function GraveyardScene() {
       <Ground />
       <CircularCemeteryFence />
       <CemeteryGroundDetails />
+      <CemeteryMemorials />
       <ScatteredGraves />
       <DeadTreeCluster />
       <CemeteryGate />

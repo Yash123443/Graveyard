@@ -5,6 +5,8 @@ import * as THREE from 'three'
 import { seq, smoothstep } from '../animations/sequence'
 import { createFogTexture, createGlowTexture, createStoneTextures } from '../utils/proceduralTextures'
 import { playMainGraveRumble } from '../audio/audioManager'
+import { SoulMagic } from './SoulMagic'
+import { GraveInscription } from './GraveInscription'
 import { AnalystCharacter, FixerCharacter, TesterCharacter } from './SpectreCharacters'
 
 const GRAVE = new THREE.Vector3(0, 0, -83)
@@ -52,42 +54,9 @@ function MainStone() {
   })), [])
   const reveal = useRef<THREE.Group>(null)
   const slab = useRef<THREE.Group>(null)
-  const inscriptionMaterial = useRef<THREE.MeshBasicMaterial>(null)
   const halo = useRef<THREE.SpriteMaterial>(null)
   const burialLight = useRef<THREE.PointLight>(null)
   const rumbleArmed = useRef(true)
-  const inscription = useMemo(() => {
-    const canvas = document.createElement('canvas')
-    canvas.width = 1024
-    canvas.height = 512
-    const ctx = canvas.getContext('2d')!
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.textAlign = 'center'
-    ctx.fillStyle = '#91a2a5'
-    ctx.shadowColor = '#dae8eb'
-    ctx.shadowBlur = 5
-    ctx.font = '600 30px Georgia, serif'
-    ctx.fillText('R . I . P .', 512, 58)
-    ctx.shadowBlur = 8
-    ctx.fillStyle = '#c7d4d3'
-    ctx.font = '500 78px Georgia, serif'
-    ctx.fillText('OLD-PORTFOLIO', 512, 156)
-    ctx.shadowBlur = 0
-    ctx.fillStyle = '#829195'
-    ctx.font = '25px Georgia, serif'
-    ctx.fillText('LAST ALIVE: 2019', 512, 222)
-    ctx.fillText('STATUS: ABANDONED', 512, 265)
-    ctx.fillText('CAUSE OF DEATH: UNKNOWN', 512, 308)
-    ctx.strokeStyle = 'rgba(184, 202, 201, .48)'
-    ctx.lineWidth = 2
-    ctx.beginPath(); ctx.moveTo(250, 334); ctx.lineTo(774, 334); ctx.stroke()
-    ctx.fillStyle = '#9aacae'
-    ctx.font = 'italic 28px Georgia, serif'
-    ctx.fillText('IT WASN\'T ABANDONED. IT WAS BROKEN.', 512, 386)
-    const texture = new THREE.CanvasTexture(canvas)
-    texture.colorSpace = THREE.SRGBColorSpace
-    return texture
-  }, [])
   useFrame(({ clock }) => {
     const found = seq.exploration.nearMain
     if (found > 0.58 && rumbleArmed.current) {
@@ -104,7 +73,7 @@ function MainStone() {
       // A distant silhouette and its cold beacon give the visitor a landmark
       // before the clearing's fog parts near the grave.
       reveal.current.visible = true
-      reveal.current.scale.setScalar(0.42 + found * 0.58)
+      reveal.current.scale.setScalar(1)
       reveal.current.position.x = Math.sin(clock.elapsedTime * 39) * shake * 0.09
       reveal.current.rotation.z = Math.sin(clock.elapsedTime * 32) * shake * 0.018
     }
@@ -114,7 +83,6 @@ function MainStone() {
     }
     material.color.copy(stoneColor).multiplyScalar(0.12 + found * 0.88)
     material.emissive.setRGB(0.009 + found * 0.028, 0.012 + found * 0.035, 0.014 + found * 0.032)
-    if (inscriptionMaterial.current) inscriptionMaterial.current.opacity = 0.08 + found * 0.92
     if (halo.current) halo.current.opacity = 0.045 + found * (0.13 + Math.sin(clock.elapsedTime * 2.1) * 0.025)
     if (burialLight.current) burialLight.current.intensity = 0.12 + found * (0.45 + Math.sin(clock.elapsedTime * 2.4) * 0.08)
   })
@@ -145,10 +113,7 @@ function MainStone() {
         <mesh position={[0, -0.2, 0.015]}><torusGeometry args={[0.31, 0.045, 8, 24]} /><meshStandardMaterial color="#626c6d" roughness={0.92} /></mesh>
         {[0, Math.PI / 2].map((rotation) => <mesh key={rotation} position={[0, -0.2, 0.04]} rotation={[0, 0, rotation]}><boxGeometry args={[0.45, 0.035, 0.05]} /><meshStandardMaterial color="#596367" roughness={0.92} /></mesh>)}
       </group>
-      <mesh position={[0, 2.14, 0.64]}>
-        <planeGeometry args={[2.72, 1.48]} />
-        <meshBasicMaterial ref={inscriptionMaterial} map={inscription} transparent opacity={0.38} depthWrite={false} toneMapped={false} />
-      </mesh>
+      <GraveInscription />
       <mesh position={[0, 0.46, 0.82]} rotation={[0, 0, Math.PI / 2]}><torusGeometry args={[0.2, 0.045, 7, 16]} /><meshStandardMaterial color="#242a2d" metalness={0.72} roughness={0.82} /></mesh>
       <mesh position={[0.32, 0.46, 0.82]} rotation={[0, 0, Math.PI / 2]}><torusGeometry args={[0.2, 0.045, 7, 16]} /><meshStandardMaterial color="#242a2d" metalness={0.72} roughness={0.82} /></mesh>
     </group>
@@ -584,36 +549,6 @@ function GraveMist() {
   </group>
 }
 
-function ResurrectionStreams() {
-  const refs = useRef<(THREE.MeshBasicMaterial | null)[]>([])
-  const streams = useMemo(() => [
-    new THREE.CatmullRomCurve3([new THREE.Vector3(-2.5, 2.2, 2.4), new THREE.Vector3(-1.8, 2.9, 1.5), new THREE.Vector3(-0.5, 3.8, 0.7), new THREE.Vector3(0, 3.9, 0.65)]),
-    new THREE.CatmullRomCurve3([new THREE.Vector3(2.5, 2.2, 2.4), new THREE.Vector3(1.8, 2.9, 1.5), new THREE.Vector3(0.5, 3.7, 0.7), new THREE.Vector3(0, 3.9, 0.65)]),
-    new THREE.CatmullRomCurve3([new THREE.Vector3(0, 3.4, 2.5), new THREE.Vector3(0, 3.5, 1.7), new THREE.Vector3(0, 3.8, 1), new THREE.Vector3(0, 3.9, 0.65)]),
-  ], [])
-  useFrame(({ clock }) => {
-    const p = seq.ending.progress
-    const active = seq.ending.outcome === 'success'
-    const levels = [smoothstep(0.13, 0.2, p) * (1 - smoothstep(0.38, 0.48, p)), smoothstep(0.23, 0.3, p) * (1 - smoothstep(0.4, 0.5, p)), smoothstep(0.33, 0.4, p) * (1 - smoothstep(0.42, 0.52, p))]
-    const story = seq.exploration.storyProgress
-    const attempt = [
-      smoothstep(0.72, 0.77, story),
-      smoothstep(0.79, 0.84, story),
-      smoothstep(0.86, 0.91, story),
-    ]
-    refs.current.forEach((mat, i) => {
-      if (!mat) return
-      // The spirits visibly attempt repair before the backend responds. Only
-      // verified success may progress to a cracked, opened grave.
-      const ritual = attempt[i] * (0.72 + Math.sin(clock.elapsedTime * 13 + i) * 0.18)
-      mat.opacity = active ? Math.max(levels[i], ritual * (1 - smoothstep(0.35, 0.55, p))) : ritual
-    })
-  })
-  return <group position={GRAVE}>
-    {streams.map((curve, i) => <mesh key={i}><tubeGeometry args={[curve, 48, 0.075, 7, false]} /><meshBasicMaterial ref={(el) => { refs.current[i] = el }} color={['#b178ff', '#ff554b', '#67ff9b'][i]} transparent opacity={0} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>)}
-  </group>
-}
-
 function RepairAttemptPulse() {
   const halo = useRef<THREE.SpriteMaterial>(null)
   const light = useRef<THREE.PointLight>(null)
@@ -713,7 +648,7 @@ export function GraveStory() {
     <FinalGraveBeacon />
     <MainStone />
     <EnergyAcrossStone />
-    <ResurrectionStreams />
+    <SoulMagic />
     <RepairAttemptPulse />
     <ResurrectionLight />
     <ResurrectionParticles />

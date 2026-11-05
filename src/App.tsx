@@ -6,6 +6,8 @@ import { LoadingScreen } from './components/LoadingScreen'
 import { OpeningOverlay } from './components/OpeningOverlay'
 import { useExperienceInput } from './hooks/useExperienceInput'
 import { preloadAudio } from './audio/audioManager'
+import { AdaptiveRendering } from './components/AdaptiveRendering'
+import { ScenePreview } from './components/ScenePreview'
 
 preloadAudio()
 
@@ -18,7 +20,7 @@ export default function App() {
     <main className="experience-shell">
       <Canvas
         shadows={{ type: PCFSoftShadowMap }}
-        dpr={[1, 1.25]}
+        dpr={1}
         camera={{ position: [0, 2.1, 37], fov: 46, near: 0.1, far: 700 }}
         gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
         onCreated={({ gl, scene }) => {
@@ -29,9 +31,11 @@ export default function App() {
         }}
       >
         <color attach="background" args={['#000000']} />
-        <fogExp2 attach="fog" args={['#120d08', 0.0105]} />
+        <fogExp2 attach="fog" args={['#101922', 0.013]} />
+        <AdaptiveRendering />
         <Suspense fallback={null}>
           <GraveyardScene />
+          {import.meta.env.DEV && <ScenePreview />}
         </Suspense>
       </Canvas>
       <OpeningOverlay ready={ready} />

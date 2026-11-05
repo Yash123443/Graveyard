@@ -1,4 +1,5 @@
 import gsap from 'gsap'
+import { advanceStoryProgress } from './soulChoreography'
 import { fadeAmbience, getCreakDuration, playGateCreak, stopGateCreak, swellAmbience } from '../audio/audioManager'
 import { getRepairResult, isVerifiedRepair, RepairResult } from '../integrations/repairResult'
 
@@ -253,12 +254,15 @@ export function startFinalGraveStory() {
   const exploration = seq.exploration
   if (exploration.storyStarted) return
   exploration.storyStarted = true
-  gsap.to(exploration, {
-    storyProgress: 1,
-    duration: 24,
-    ease: 'none',
-    onComplete: beginEnding,
-  })
+  Object.keys(seq.roam.input).forEach(key => { seq.roam.input[key as keyof typeof seq.roam.input] = false })
+  seq.roam.velocityX = seq.roam.velocityZ = 0
+}
+
+/** The render clock owns both characters and captions; stalled/hidden frames cannot skip dialogue. */
+export function advanceFinalGraveStory(delta: number) {
+  if (!seq.exploration.storyStarted || seq.ending.started) return
+  seq.exploration.storyProgress = advanceStoryProgress(seq.exploration.storyProgress, delta)
+  if (seq.exploration.storyProgress >= 1) beginEnding()
 }
 
 export function moveRoam(dx: number, dz: number) {
