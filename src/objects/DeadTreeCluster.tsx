@@ -1,6 +1,6 @@
 import { useGLTF } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { seq } from '../animations/sequence'
 
@@ -24,8 +24,9 @@ interface Tinted {
 
 /** Dead trees: one GLB, many placements. They surface from the dark by scaling surface colour. */
 export function DeadTreeCluster() {
-  const { scene } = useGLTF('/models/dead-tree.glb')
+  const { scene } = useGLTF('/models/dead-tree-background.glb')
   const tint = useMemo(() => new THREE.Color(), [])
+  const lastReveal = useRef(-1)
 
   const { instanceGroup, tinted } = useMemo(() => {
     const instanceGroup = new THREE.Group()
@@ -76,6 +77,8 @@ export function DeadTreeCluster() {
 
   useFrame(() => {
     const k = seq.reveal.trees
+    if (k === lastReveal.current) return
+    lastReveal.current = k
     tint.setRGB(k, k, k)
     tinted.forEach(({ mesh }) => {
       for (let i = 0; i < mesh.count; i += 1) mesh.setColorAt(i, tint)
@@ -86,4 +89,4 @@ export function DeadTreeCluster() {
   return <primitive object={instanceGroup} />
 }
 
-useGLTF.preload('/models/dead-tree.glb')
+useGLTF.preload('/models/dead-tree-background.glb')

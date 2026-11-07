@@ -186,6 +186,7 @@ export function ScatteredGraves() {
   const engravingMaterials = useRef<(THREE.MeshStandardMaterial | null)[]>([])
   const graveLight = useRef<THREE.PointLight>(null)
   const activeGrave = useRef(-1)
+  const mainDwell = useRef(0)
   const fogTexture = useMemo(() => createFogTexture(77), [])
   const catSoundArmed = useRef(false)
   const nextCatSound = useRef(0)
@@ -302,10 +303,14 @@ export function ScatteredGraves() {
     const mainDistance = Math.hypot(camera.position.x, camera.position.y - 2.5, camera.position.z + 83)
     // The central grave stays a distant landmark, but its record and story
     // remain dormant until the visitor reaches its own clearing.
-    seq.exploration.nearMain = smoothstep(14, 6, mainDistance) * Number(seq.exploration.entered)
+    const mainFocus = seq.exploration.storyStarted ? 1 : smoothstep(17, 8.2, mainDistance) * Number(seq.exploration.entered)
+    seq.exploration.nearMain = THREE.MathUtils.damp(seq.exploration.nearMain, mainFocus, 4, Math.min(delta, 0.05))
     // Nearby ordinary graves must never start the final cinematic. The
     // landmark can be seen from afar, but it is only activated at its own plot.
-    if (mainDistance < 7.5) startFinalGraveStory()
+    if (seq.exploration.entered && mainDistance < 8.2 && !seq.exploration.storyStarted) {
+      mainDwell.current += Math.min(delta, 0.05)
+      if (mainDwell.current >= 4) startFinalGraveStory()
+    } else mainDwell.current = 0
     const dt = Math.min(delta, 0.05)
     specs.forEach((grave, index) => {
       const mist = graveMists.current[index]

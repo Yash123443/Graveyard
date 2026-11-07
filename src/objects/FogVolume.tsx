@@ -37,14 +37,14 @@ export function FogVolume() {
 
   const groundBanks = useMemo<Bank[]>(
     () =>
-      Array.from({ length: 34 }, (_, i) => ({
+      Array.from({ length: 18 }, (_, i) => ({
         x: (rand(i, 1) - 0.5) * 120,
         y: 0.5 + rand(i, 2) * 1.6,
         z: 30 - rand(i, 3) * 105,
         w: 22 + rand(i, 4) * 30,
         h: 3.2 + rand(i, 5) * 3.4,
         speed: (rand(i, 6) < 0.5 ? -1 : 1) * (0.18 + rand(i, 7) * 0.4),
-        base: 0.025 + rand(i, 8) * 0.04,
+        base: 0.04 + rand(i, 8) * 0.045,
         tex: i % 3,
         phase: rand(i, 9) * 6.28,
       })),
@@ -53,7 +53,7 @@ export function FogVolume() {
 
   const gateBanks = useMemo<Bank[]>(
     () =>
-      Array.from({ length: 20 }, (_, i) => ({
+      Array.from({ length: 8 }, (_, i) => ({
         x: (rand(i, 11) - 0.5) * 11,
         y: 0.7 + rand(i, 12) * 1.8,
         z: -22 + rand(i, 13) * 26,
@@ -84,6 +84,7 @@ export function FogVolume() {
       s.position.y = b.y + Math.sin(t * 0.12 + b.phase) * 0.12
       const mat = s.material as THREE.SpriteMaterial
       mat.opacity = b.base * fog * (1 - seq.ending.fogFade) * (0.85 + Math.sin(t * 0.2 + b.phase) * 0.15) * nearFade(s, camera)
+      s.visible = mat.opacity > 0.002 && s.position.distanceToSquared(camera.position) < 6400
     })
 
     // mist rolling out of the entrance: strength follows the gate and keeps flowing while it's open
@@ -99,6 +100,7 @@ export function FogVolume() {
       const edge = Math.sin(Math.min(1, Math.max(0, travel)) * Math.PI)
       const mat = s.material as THREE.SpriteMaterial
       mat.opacity = b.base * fog * (1 - seq.ending.fogFade) * (0.3 + flow * 0.9) * edge * nearFade(s, camera)
+      s.visible = mat.opacity > 0.002 && s.position.distanceToSquared(camera.position) < 2500
     })
   })
 
@@ -113,7 +115,7 @@ export function FogVolume() {
           position={[b.x, b.y, b.z]}
           scale={[b.w, b.h, 1]}
         >
-          <spriteMaterial map={textures[b.tex]} color="#9c9282" transparent opacity={0} depthWrite={false} />
+          <spriteMaterial map={textures[b.tex]} color="#819ba7" transparent opacity={0} depthWrite={false} />
         </sprite>
       ))}
       {gateBanks.map((b, i) => (
@@ -125,7 +127,7 @@ export function FogVolume() {
           position={[b.x, b.y, b.z]}
           scale={[b.w, b.h, 1]}
         >
-          <spriteMaterial map={textures[b.tex]} color="#a49b8b" transparent opacity={0} depthWrite={false} />
+          <spriteMaterial map={textures[b.tex]} color="#90a8b2" transparent opacity={0} depthWrite={false} />
         </sprite>
       ))}
     </group>

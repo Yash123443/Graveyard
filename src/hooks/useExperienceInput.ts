@@ -23,7 +23,7 @@ export function useExperienceInput() {
         // the look direction instead of scrubbing the gate camera rail.
         // Scrolling down walks forward into the cemetery. The opening rail is
         // locked at the threshold, so a fast wheel cannot skip the discovery.
-        moveRoam(0, -delta * 0.008)
+        moveRoam(0, delta * 0.008)
         return
       }
       nudgeScroll(delta * 0.00055)
