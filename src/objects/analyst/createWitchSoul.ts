@@ -14,7 +14,7 @@ function cloth(bottom: number, top: number, height: number, phase = 0, arc = Mat
     const v = j / rows
     for (let i = 0; i <= columns; i++) {
       const u = i / columns, a = u * arc + phase
-      const fold = Math.sin(a * 8 + v * 1.5) * 0.05 + Math.sin(a * 15 - v * 2) * 0.009
+      const fold = Math.sin(a * 6 + v * 1.5) * 0.035 + Math.sin(a * 12 - v * 2) * 0.005
       const radius = THREE.MathUtils.lerp(bottom, top, v) + fold * (1.2 - v * 0.6)
       const torn = (Math.sin(a * 7) * 0.025 + Math.sin(a * 11 + 1) * 0.012) * Math.pow(1 - v, 6)
       vertices.push(Math.sin(a) * radius, v * height + torn, Math.cos(a) * radius * 0.72)
@@ -96,7 +96,7 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
   const torsoPositions = torsoGeometry.attributes.position
   for (let i = 0; i < torsoPositions.count; i++) {
     const x = torsoPositions.getX(i), y = torsoPositions.getY(i), z = torsoPositions.getZ(i)
-    const a = Math.atan2(x, z), pleat = 1 + Math.sin(a * 10 + y * 0.6) * 0.1 + Math.sin(a * 18 - y) * 0.02
+    const a = Math.atan2(x, z), pleat = 1 + Math.sin(a * 8 + y * 0.6) * 0.055 + Math.sin(a * 14 - y) * 0.008
     torsoPositions.setXYZ(i, x * pleat, y, z * pleat * 0.72)
   }
   torsoGeometry.computeVertexNormals()
@@ -130,16 +130,17 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
   }
 
   // Open hood with a pointed crown. The opening faces +Z; no sphere covers the face.
-  const hoodVertices: number[] = [], hoodIndices: number[] = []
+  const hoodVertices: number[] = [], hoodIndices: number[] = [], hoodUV: number[] = []
   for (let j = 0; j <= 24; j++) for (let i = 0; i <= 64; i++) {
     const v = j / 24, a = i / 64 * Math.PI * 2
+    hoodUV.push(i / 64, v)
     const arch = Math.cos(a), r = 1 - v * 0.94
     const pleat = Math.sin(a * 7 + v * 2) * 0.006
-    hoodVertices.push(Math.sin(a) * (0.3 * r + pleat), 2.06 + arch * 0.43 * r + v * 0.43 + Math.max(0, arch) ** 8 * 0.13 * (1 - v), 0.26 - v * 0.62 - Math.max(0, arch) * 0.06)
+    hoodVertices.push(Math.sin(a) * (0.3 * r + pleat), 2.06 + arch * 0.43 * r + v * 0.43 + Math.max(0, arch) ** 4 * 0.08 * (1 - v), 0.26 - v * 0.62 - Math.max(0, arch) * 0.06)
     if (j < 24 && i < 64) { const n = j * 65 + i; hoodIndices.push(n, n + 65, n + 1, n + 1, n + 65, n + 66) }
   }
   const hoodGeometry = new THREE.BufferGeometry()
-  hoodGeometry.setAttribute('position', new THREE.Float32BufferAttribute(hoodVertices, 3)); hoodGeometry.setIndex(hoodIndices); hoodGeometry.computeVertexNormals()
+  hoodGeometry.setAttribute('position', new THREE.Float32BufferAttribute(hoodVertices, 3)); hoodGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(hoodUV, 2)); hoodGeometry.setIndex(hoodIndices); hoodGeometry.computeVertexNormals()
   mesh(hoodGeometry, mantle, [0, 0, 0])
   const hoodEdge: number[][] = []
   for (let i = 0; i <= 64; i++) hoodEdge.push(hoodVertices.slice(i * 3, i * 3 + 3))
@@ -156,6 +157,7 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
   for (let i = 0; i < 3; i++) {
     tube([[-0.2, 1.9 - i * 0.045, 0.17], [0, 1.84 - i * 0.04, 0.22], [0.2, 1.9 - i * 0.045, 0.17]], 0.018, mantle)
   }
+  const pagePivot = new THREE.Group(), performance = new THREE.Group()
   const prop = new THREE.Group(); prop.position.set(0, 1.18, 0.75); body.add(prop)
   if (variant === 'analyst') {
     for (const side of [-1, 1]) {
@@ -164,6 +166,9 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
       mesh(new THREE.BoxGeometry(0.41, 0.045, 0.39), standard('#c5b8a0'), [0, 0.048, 0], half)
       for (let line = 0; line < 7; line++) tube([[-0.15, 0.074, -0.14 + line * 0.045], [0.13, 0.074, -0.14 + line * 0.045]], 0.003, glow, half)
     }
+    prop.add(pagePivot)
+    pagePivot.position.y = 0.09
+    mesh(new THREE.PlaneGeometry(0.4, 0.37, 8, 1), standard('#d3c6a9'), [0.2, 0, 0], pagePivot).rotation.x = -Math.PI / 2
   } else if (variant === 'fixer') {
     prop.rotation.z = -0.55
     mesh(new THREE.BoxGeometry(0.095, 1.05, 0.075), metal, [0.12, 0.18, 0], prop)
@@ -172,6 +177,11 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
     jaw.lineTo(0.09, 0.1); jaw.lineTo(0.18, 0.26); jaw.lineTo(0.23, 0.09); jaw.lineTo(0.14, -0.06); jaw.closePath()
     mesh(new THREE.ExtrudeGeometry(jaw, { depth: 0.065, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.018, bevelThickness: 0.012 }), metal, [0.12, 0.68, -0.03], prop)
     tube([[0.12, -0.3, 0.045], [0.12, 0.63, 0.045]], 0.009, glow, prop)
+  }
+  if (variant === 'fixer') {
+    performance.position.set(0, 1.5, 0.95); body.add(performance)
+    mesh(new THREE.TorusGeometry(0.27, 0.012, 8, 48), glow, [0, 0, 0], performance)
+    const rune = mesh(new THREE.OctahedronGeometry(0.13), glow, [0, 0, 0], performance); rune.scale.z = 0.2
   }
   // Floating glass displays are actual world-space objects, with role-specific diagrams.
   const display = new THREE.Group(); display.position.set(variant === 'tester' ? 0 : 0.85, variant === 'tester' ? 1.42 : 1.72, 0.58)
@@ -186,7 +196,7 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
   }
   if (variant === 'analyst') tube([[-0.28, -0.2, 0.02], [-0.1, 0.02, 0.02], [0.05, -0.1, 0.02], [0.28, 0.21, 0.02]], 0.009, glow, display)
   if (variant === 'tester') {
-    const seal = new THREE.Group(); seal.position.set(0.83, 1.94, 0.22); body.add(seal)
+    const seal = performance; seal.position.set(0.83, 1.94, 0.22); body.add(seal)
     mesh(new THREE.TorusGeometry(0.23, 0.008, 6, 64), glow, [0, 0, 0], seal)
     tube([[-0.12, 0, 0], [-0.025, -0.085, 0], [0.14, 0.12, 0]], 0.018, glow, seal)
   }
@@ -211,15 +221,31 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
   materials.push(smokeMaterial)
   const wisps = Array.from({ length: 5 }, (_, i) => { const sprite = new THREE.Sprite(smokeMaterial); sprite.scale.set(1.6, 0.75, 1); sprite.position.set(Math.sin(i * 2.4) * 0.7, 0.15 + i * 0.08, Math.cos(i * 2.4) * 0.5); body.add(sprite); return sprite })
   batchStaticMeshes(display)
-  batchStaticMeshes(body, new Set<THREE.Object3D>([display, ...tatters]))
+  batchStaticMeshes(prop, new Set<THREE.Object3D>([pagePivot]))
+  batchStaticMeshes(performance)
+  batchStaticMeshes(body, new Set<THREE.Object3D>([display, prop, performance, ...tatters]))
   let timeline = 0, elapsed = 0
   let previousTime: number | undefined, motionTime = 0
-  const set = (T: number, time: number, _pose = 1, fade = 1) => {
+  const set = (T: number, time: number, _pose = 1, fade = 1, local = -1) => {
     timeline = T; elapsed = time
     motionTime += Math.min(0.05, Math.max(0, time - (previousTime ?? time)))
     previousTime = time
     time = motionTime
     clothTime.value = time
+    const gesture = smooth((local - 0.07) / 0.045) * (1 - smooth((local - 0.19) / 0.045))
+    if (variant === 'analyst') {
+      pagePivot.rotation.z = smooth((local - 0.08) / 0.09) * Math.PI
+      prop.position.y = 1.18 + gesture * 0.08
+      prop.rotation.x = -gesture * 0.1
+    } else if (variant === 'fixer') {
+      prop.rotation.z = -0.55 + Math.sin(gesture * Math.PI * 0.75) * 0.28
+      performance.scale.setScalar(Math.max(0.001, gesture))
+      performance.rotation.z = time * 0.45
+    } else {
+      performance.scale.setScalar(0.7 + gesture * 0.3)
+      performance.rotation.y = (1 - smooth((local - 0.06) / 0.1)) * Math.PI / 2
+      display.rotation.z = -0.1 + gesture * 0.1
+    }
     const appear = smooth((T - 4.8) / 4.5) * THREE.MathUtils.clamp(fade, 0, 1)
     materials.forEach(material => { material.opacity = appear * (material === glass ? 0.65 : material === smokeMaterial ? 0.25 : material === particleMaterial ? 0.65 : 1) })
     light.intensity = appear * (options.lightIntensity ?? 1.15) * 3; rim.intensity = appear * 0.75

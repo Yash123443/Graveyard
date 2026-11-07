@@ -3,8 +3,11 @@ import { useMemo } from 'react'
 import * as THREE from 'three'
 import { advanceFinalGraveStory, cameraLimit, seq, smoothstep } from './sequence'
 import { CEMETERY_CENTER_Z, CEMETERY_ROAM_RADIUS } from '../objects/CircularCemeteryFence'
+import { ritualCameraDistance } from './ritualFraming'
 import { groundHeight } from '../objects/Ground'
 import { memorialObstacles } from '../objects/CemeteryMemorials'
+import { lanternObstacles } from '../objects/LanternAvenue'
+import { witchObstacles } from '../objects/WitchCorners'
 
 /**
  * The camera is on a rail. Scroll scrubs along it, but the rail is critically
@@ -56,8 +59,8 @@ export function CameraRig() {
   const railDirection = useMemo(() => new THREE.Vector3(), [])
   const lookTarget = useMemo(() => new THREE.Vector3(), [])
   const up = useMemo(() => new THREE.Vector3(0, 1, 0), [])
-  const finalShotPosition = useMemo(() => new THREE.Vector3(0, 2.9, -69.5), [])
-  const finalShotLook = useMemo(() => new THREE.Vector3(0, 3.25, -83), [])
+  const finalShotPosition = useMemo(() => new THREE.Vector3(0, 3.5, -68.5), [])
+  const finalShotLook = useMemo(() => new THREE.Vector3(0, 4.5, -83), [])
   const gateObstacles = useMemo(() => [
     { x: -6.15, z: -8, radius: 1.45 }, { x: 6.15, z: -8, radius: 1.45 },
   ], [])
@@ -98,9 +101,16 @@ export function CameraRig() {
         && !seq.exploration.obstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
         && !gateObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
         && !memorialObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
+        && !lanternObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
+        && !witchObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
     }
     if (roamAllowed > 0) {
-      const forward = Number(roam.input.forward) - Number(roam.input.back)
+      const touring = seq.guided && !seq.exploration.storyStarted
+      if (touring) {
+        roam.targetYaw = Math.atan2(-roam.x, 83 + roam.z)
+        roam.targetPitch = 0.08
+      }
+      const forward = touring ? (roam.z > -71.5 ? 0.85 : 0) : Number(roam.input.forward) - Number(roam.input.back)
       const strafe = Number(roam.input.right) - Number(roam.input.left)
       const turn = Number(roam.input.turnRight) - Number(roam.input.turnLeft)
       roam.targetYaw += turn * dt * 1.2
@@ -158,6 +168,7 @@ export function CameraRig() {
     // Ordinary graves never redirect the visitor. The central grave alone
     // takes over once its dedicated apparition sequence has begun.
     const storyShot = smoothstep(0.01, 0.1, seq.exploration.storyProgress) * (1 - seq.ending.cameraBack)
+    finalShotPosition.z = -83 + ritualCameraDistance((camera as THREE.PerspectiveCamera).aspect)
     if (storyShot > 0) camera.position.lerp(finalShotPosition, storyShot)
     lookTarget.copy(camera.position).add(direction)
     if (storyShot > 0) lookTarget.lerp(finalShotLook, storyShot)

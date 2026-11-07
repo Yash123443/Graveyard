@@ -71,6 +71,22 @@ function makePlot(index: number) {
     const board = box([0.16, 0.055, 1.35], wood, [-1.2 + i * 0.15, 0.12 + i * 0.03, 1.25])
     board.rotation.y = i * 0.25 - 0.3
   }
+  // Small offerings: melted votives, fallen flowers, and weathered memorial urns.
+  for (let i = 0; i < 3; i++) {
+    const cx = -1.8 + i * 0.22, cz = 1.65 + Math.sin(i * 2) * 0.12
+    const h = 0.12 + i * 0.07
+    add(new THREE.CylinderGeometry(0.06, 0.075, h, 10), wax, [cx, h / 2 + 0.06, cz])
+    const tip = add(new THREE.SphereGeometry(0.025, 8, 6), fire, [cx, h + 0.09, cz]); tip.scale.y = 1.7
+    const stem = box([0.016, 0.016, 0.6], leaf, [0.5 + i * 0.09, 0.12, 1.7]); stem.rotation.y = i * 0.24
+    for (let petal = 0; petal < 5; petal++) {
+      const angle = petal / 5 * Math.PI * 2
+      const flower = add(new THREE.SphereGeometry(0.06, 8, 6), leaf, [0.5 + i * 0.09 + Math.cos(angle) * 0.04, 0.14, 1.98 + Math.sin(angle) * 0.04])
+      flower.scale.y = 0.3
+    }
+  }
+  const urn = add(new THREE.LatheGeometry([new THREE.Vector2(0.16, 0), new THREE.Vector2(0.12, 0.12), new THREE.Vector2(0.26, 0.32), new THREE.Vector2(0.29, 0.46), new THREE.Vector2(0.23, 0.49)], 16), stone, [2.0, 0.06, -0.9])
+  urn.rotation.z = index % 2 ? 0.12 : -0.08
+  add(new THREE.CylinderGeometry(0.22, 0.22, 0.03, 16), earth, [2.0, 0.53, -0.9])
   batchStaticMeshes(root)
   return { root, materials }
 }

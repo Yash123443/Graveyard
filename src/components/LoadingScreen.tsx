@@ -2,7 +2,7 @@ import { useProgress } from '@react-three/drei'
 import { useEffect, useState } from 'react'
 
 export function LoadingScreen({ onDone }: { onDone: () => void }) {
-  const { active, progress, item } = useProgress()
+  const { active, progress } = useProgress()
   const [visible, setVisible] = useState(true)
 
   useEffect(() => {
@@ -25,7 +25,7 @@ export function LoadingScreen({ onDone }: { onDone: () => void }) {
   }, [onDone])
 
   const pct = Math.min(100, Math.max(0, Math.round(progress)))
-  const asset = item ? item.split('/').pop() : 'Preparing the grounds'
+  const asset = pct < 35 ? 'Gathering the mist' : pct < 75 ? 'Lighting the lanterns' : 'The gates are waiting'
 
   return (
     <div className={`loading-screen ${visible ? '' : 'is-complete'}`} aria-hidden={!visible}>

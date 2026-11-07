@@ -1,5 +1,5 @@
 import { useFrame } from '@react-three/fiber'
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { seq } from '../animations/sequence'
 import { createGlowTexture, createMoonDetailTexture, createMoonTexture } from '../utils/proceduralTextures'
@@ -19,6 +19,8 @@ export function Moon() {
   const moonMap = useMemo(() => createMoonTexture(1024, 512), [])
   const detailMap = useMemo(() => createMoonDetailTexture(1024, 512), [])
   const glowMap = useMemo(() => createGlowTexture(), [])
+
+  useEffect(() => () => { moonMap.dispose(); detailMap.dispose(); glowMap.dispose() }, [moonMap, detailMap, glowMap])
 
   useFrame(({ camera, clock }) => {
     const r = seq.reveal.moon * (1 - seq.ending.moonFade)
