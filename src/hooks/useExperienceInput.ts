@@ -30,6 +30,7 @@ export function useExperienceInput() {
     }
 
     const onKey = (e: KeyboardEvent) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target instanceof HTMLElement && e.target.closest('button, a, input, select, textarea')) return
       const movement: Record<string, keyof typeof seq.roam.input> = {
         w: 'forward', s: 'back', a: 'left', d: 'right',
         arrowleft: 'turnLeft', arrowright: 'turnRight',
@@ -40,6 +41,7 @@ export function useExperienceInput() {
       if (input && (seq.exploration.entered || (seq.scroll >= 0.18 && seq.gateOpen > 0.3))) {
         e.preventDefault()
         unlockAudio()
+        seq.guided = false
         seq.roam.input[input] = true
         return
       }

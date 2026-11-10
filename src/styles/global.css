@@ -54,7 +54,7 @@ button { font: inherit; color: inherit; }
 .screen-grade {
   position: fixed; inset: 0; z-index: 4; pointer-events: none;
   background:
-    radial-gradient(ellipse at 50% 46%, transparent 38%, rgba(0, 2, 6, 0.55) 78%, rgba(0, 0, 3, 0.88) 100%),
+    radial-gradient(ellipse at 50% 46%, transparent 38%, rgba(0, 2, 6, 0.32) 78%, rgba(0, 0, 3, 0.65) 100%),
     linear-gradient(to top, rgba(0, 3, 8, 0.55), transparent 34%);
 }
 
@@ -66,7 +66,7 @@ button { font: inherit; color: inherit; }
 }
 .opening-copy h1 {
   margin: 0; padding-left: 0.34em;
-  font-family: var(--serif); font-weight: 500; font-size: clamp(40px, 8.4vw, 132px); line-height: 1;
+  font-family: var(--serif); font-weight: 500; font-size: clamp(30px, 8.4vw, 132px); line-height: 1;
   letter-spacing: 0.34em; color: #e9f2f9; opacity: 0;
   text-shadow: 0 0 40px rgba(150, 190, 225, 0.35), 0 2px 30px rgba(0, 0, 0, 0.9);
 }
@@ -80,11 +80,11 @@ button { font: inherit; color: inherit; }
 }
 .opening-copy__cue {
   margin-top: clamp(22px, 4.2vh, 46px); display: flex; flex-direction: column; align-items: center; gap: 12px;
-  background: none; border: 0; cursor: pointer; pointer-events: auto; opacity: 0;
-  font-family: var(--label); font-size: 10px; font-weight: 600; letter-spacing: 0.5em; padding-left: 0.5em; color: var(--mist);
+  background: linear-gradient(135deg, rgba(39, 30, 22, 0.86), rgba(9, 15, 22, 0.92)); border: 1px solid rgba(204, 162, 101, 0.5); cursor: pointer; pointer-events: auto; opacity: 0;
+  font-family: var(--label); font-size: 10px; font-weight: 600; letter-spacing: 0.28em; padding: 17px 24px; color: #e4c79c; transition: border-color 180ms, background 180ms, box-shadow 180ms;
 }
 .opening-copy__cue-line {
-  position: relative; width: 1px; height: 46px; overflow: hidden; background: rgba(158, 185, 204, 0.18);
+  position: absolute; top: calc(100% + 12px); width: 1px; height: 24px; overflow: hidden; background: rgba(158, 185, 204, 0.18);
 }
 .opening-copy__cue-line::after {
   content: ""; position: absolute; left: 0; top: -50%; width: 1px; height: 50%; background: #cfe6f7;
@@ -233,3 +233,64 @@ button { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .opening-copy__cue-line::after, .audio-control--locked, .audio-control--on .audio-control__bars i { animation: none; }
 }
+
+/* Candlelight accents frame the scene without obscuring its details. */
+.opening-copy__edition { display: block; margin-bottom: 24px; padding-right: .34em; font-family: var(--label); font-size: clamp(8px, 1vw, 11px); font-weight: 500; line-height: 1.5; letter-spacing: .32em; color: #d8b584; text-shadow: 0 2px 12px #000; }
+.opening-copy__cue { position: relative; }
+.opening-copy__cue:hover { border-color: #e4c79c; background: rgba(64, 43, 25, .92); box-shadow: 0 0 28px rgba(219, 145, 58, .13); }
+button:focus-visible { outline: 2px solid #e4c79c; outline-offset: 5px; }
+.chrome__chapter::before { content: '✦'; color: #cba36d; margin-right: 12px; }
+.loading-meter__fill { background: #d6b17d; box-shadow: 0 0 14px rgba(214, 177, 125, .4); }
+@media (max-width: 600px) { .opening-copy__edition { letter-spacing: .18em; margin-bottom: 18px; } .opening-copy__cue { font-size: 9px; padding: 15px 18px; letter-spacing: .18em; } }
+
+/* Keep movement available without covering the epitaph during the reading pause. */
+.explore-pad.is-reading { top: 16px; bottom: auto; left: 50%; right: auto; transform: translateX(-50%); padding: 7px; }
+.explore-pad.is-reading .explore-pad__title, .explore-pad.is-reading .explore-pad__guide { display: none; }
+.explore-pad.is-reading .explore-pad__keys { display: flex; gap: 5px; }
+.explore-pad.is-reading .explore-pad__keys button { width: 32px; height: 32px; }
+
+.guided-entry { pointer-events: auto; margin-top: 30px; padding: 8px 16px; border: 0; background: transparent; color: #d2c3aa; cursor: pointer; font: 600 9px/1.5 var(--label); letter-spacing: .2em; }
+.guided-entry span { display: block; margin-top: 5px; font: italic 15px/1.4 var(--body); letter-spacing: .03em; color: #a4b6c0; }
+.guided-entry:hover, .replay-experience:hover { color: #fff1d8; }
+.opening-copy__cue-line { display: none; }
+.tour-controls { position: fixed; z-index: 12; top: 18px; right: 18px; }
+.tour-controls button, .replay-experience { border: 1px solid #95806466; background: #091018cc; padding: 11px 15px; color: #d6c5a9; cursor: pointer; font: 500 10px/1.4 var(--label); letter-spacing: .12em; }
+.replay-experience { display: block; margin: 14px auto 0; }
+
+.guided-entry { visibility: hidden; }
+.opening-copy.is-ready .guided-entry { visibility: visible; }
+
+.replay-experience { pointer-events: auto; }
+
+.opening-copy.is-ready .guided-entry { visibility: inherit; }
+
+
+/* Reading feedback and restrained editorial panels keep the scene in view. */
+.reading-cue { margin-top: 11px; max-width: 290px; color: #d4b68a; font-size: 8px; line-height: 1.6; letter-spacing: .12em; }
+.reading-cue i { display: block; height: 2px; margin-top: 9px; background: #d4b68a22; overflow: hidden; }
+.reading-cue i span { display: block; height: 100%; background: #d4b68a; transform: scaleX(0); transform-origin: left; }
+.explore-pad__hint { color: #d2bd9a; font: italic 14px/1.35 var(--body); }
+.explore-pad.is-reading .explore-pad__hint { display: none; }
+.agent-dialogue { border-radius: 2px; background: linear-gradient(105deg, rgba(5, 10, 16, .93), rgba(5, 10, 16, .73)); box-shadow: 0 8px 32px #0003; }
+.grave-story-line { padding: 12px 18px; background: linear-gradient(90deg, transparent, #03090fd9 20%, #03090fd9 80%, transparent); }
+.finale { overflow-y: auto; justify-content: safe center; }
+@media (max-width: 640px) {
+  .grave-epitaph { bottom: 174px; font-size: 22px; }
+  .grave-story-line { bottom: 76px; font-size: 14px; padding: 10px 12px; }
+  .grave-story-line small { font-size: 7px; letter-spacing: .1em; }
+  .agent-dialogue { bottom: 66px; max-height: 28vh; }
+  .dependency-timeline { bottom: 235px; width: calc(100vw - 40px); left: 20px; }
+  .dependency-timeline__title { font-size: 8px; letter-spacing: .12em; }
+  .finale__last-word { margin-top: 28px; }
+}
+@media (max-height: 520px) {
+  .opening-copy { bottom: 38px; }
+  .opening-copy__supporting { display: none; }
+  .opening-copy__edition { margin-bottom: 12px; }
+  .guided-entry { margin-top: 12px; }
+  .opening-copy__cue { margin-top: 16px; }
+  .grave-record { top: 64px; padding: 10px 14px; gap: 5px; }
+  .grave-record strong { font-size: 22px; }
+}
+
+.dependency-timeline { padding: 12px 14px; border-left: 1px solid #ad89d95c; background: linear-gradient(100deg, #050a10eb, #050a1099); }

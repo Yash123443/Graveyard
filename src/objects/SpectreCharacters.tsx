@@ -46,7 +46,7 @@ function Spectre({ variant, position, rotY, scale, start }: SpectreProps) {
     if (!a.group.visible) return
     a.group.position.y = seq.ending.gather * 0.35
     const cue = soulCue(seq.exploration.storyProgress, start)
-    a.set(cue.actorTime, clock.elapsedTime, cue.entrance, fade)
+    a.set(cue.actorTime, clock.elapsedTime, cue.entrance, fade, local)
   })
 
   return <group ref={holder} position={position} />
@@ -64,5 +64,5 @@ export function FixerCharacter() {
 
 /** Emerald verification specialist: hooded occult soul with green eyes and a restrained spectral orbit. Rises behind the grave. */
 export function TesterCharacter() {
-  return <Spectre variant="tester" position={[0, 2.2, -85.2]} rotY={0} scale={1.58} start={0.48} />
+  return <Spectre variant="tester" position={[0, 5.0, -84.4]} rotY={0} scale={1.58} start={0.48} />
 }

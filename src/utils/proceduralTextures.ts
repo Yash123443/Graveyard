@@ -270,9 +270,9 @@ export function createMoonTexture(width = 2048, height = 1024) {
     for (let x = 0; x < width; x += 1) {
       const nx = x / width
       const ny = y / height
-      const base = fbm(nx, ny, 3, 6, 16, 8, false)
-      const maria = smooth(0.48, 0.64, fbm(nx, ny, 21, 5, 11, 7, false))
-      const fine = fbm(nx, ny, 8, 4, 145, 74, false)
+      const base = fbm(nx, ny, 3, 6, 16, 8, true)
+      const maria = smooth(0.48, 0.64, fbm(nx, ny, 21, 5, 11, 7, true))
+      const fine = fbm(nx, ny, 8, 4, 145, 74, true)
       let lum = 0.9 + (base - 0.5) * 0.42 + (fine - 0.5) * 0.2
       lum -= maria * 0.18
       const i = (y * width + x) * 4
@@ -332,7 +332,7 @@ export function createMoonDetailTexture(width = 2048, height = 1024) {
   const { canvas, ctx } = makeCanvas(width, height)
   const data = ctx.createImageData(width, height)
   for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
-    const n = fbm(x / width, y / height, 119, 5, 82, 41, false)
+    const n = fbm(x / width, y / height, 119, 5, 82, 41, true)
     const i = (y * width + x) * 4
     const v = 170 + n * 85
     data.data[i] = v; data.data[i + 1] = v; data.data[i + 2] = v; data.data[i + 3] = 255

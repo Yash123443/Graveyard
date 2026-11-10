@@ -6,6 +6,8 @@ import { GATE_Z } from './CemeteryGate'
 import { groundHeight } from './Ground'
 import { newGhostEncounter, updateGhostEncounter } from './ghostEncounter'
 import { TreeOfferings } from './TreeOfferings'
+import { createCobwebGeometry } from '../utils/cobwebGeometry'
+import { WitchCorners } from './WitchCorners'
 import { TreeCanopyDecor } from './TreeCanopyDecor'
 
 const pumpkinSpots: [number, number, number][] = [
@@ -100,25 +102,8 @@ function Raven({ position, rotation = 0 }: { position: [number, number, number];
 }
 
 function TreeWeb({ position, rotation = 0 }: { position: [number, number, number]; rotation?: number }) {
-  const web = useMemo(() => new THREE.LineBasicMaterial({ color: '#c4cbd0', transparent: true, opacity: 0.42 }), [])
-  const geometry = useMemo(() => {
-    const points: number[] = []
-    const spokes = 10
-    for (let spoke = 0; spoke < spokes; spoke += 1) {
-      const a = (spoke / spokes) * Math.PI * 2
-      points.push(0, 0, 0, Math.cos(a) * 0.7, Math.sin(a) * 0.7, 0)
-    }
-    for (const radius of [0.2, 0.38, 0.56, 0.7]) {
-      for (let i = 0; i < spokes; i += 1) {
-        const a0 = (i / spokes) * Math.PI * 2
-        const a1 = ((i + 1) / spokes) * Math.PI * 2
-        points.push(Math.cos(a0) * radius, Math.sin(a0) * radius, 0, Math.cos(a1) * radius, Math.sin(a1) * radius, 0)
-      }
-    }
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.Float32BufferAttribute(points, 3))
-    return g
-  }, [])
+  const web = useMemo(() => new THREE.LineBasicMaterial({ color: '#b9cbd5', vertexColors: true, transparent: true, opacity: 0.48, depthWrite: false }), [])
+  const geometry = useMemo(() => createCobwebGeometry(position[0] + position[2], 0.8), [position[0], position[2]])
   return <group position={position} rotation={[0, rotation, 0]}><lineSegments geometry={geometry} material={web} /></group>
 }
 
@@ -159,6 +144,7 @@ const groundSpiders: [number, number][] = [[-8.6, -23], [11.2, -39], [-7.5, -54]
 
 export function HalloweenProps() {
   return <group>
+    <WitchCorners />
     <pointLight color="#ff9b51" intensity={1.5} distance={8} position={[-6.7, 0.8, GATE_Z - 0.7]} />
     <pointLight color="#ff9b51" intensity={1.2} distance={8} position={[6.7, 0.8, GATE_Z - 0.7]} />
     {pumpkinSpots.map(([x, z, r], i) => {

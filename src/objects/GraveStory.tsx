@@ -1,10 +1,11 @@
 import { useGLTF } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { seq, smoothstep } from '../animations/sequence'
 import { createFogTexture, createGlowTexture, createStoneTextures } from '../utils/proceduralTextures'
 import { playMainGraveRumble } from '../audio/audioManager'
+import { RitualAtmosphere } from './RitualAtmosphere'
 import { SoulMagic } from './SoulMagic'
 import { GraveInscription } from './GraveInscription'
 import { AnalystCharacter, FixerCharacter, TesterCharacter } from './SpectreCharacters'
@@ -18,13 +19,16 @@ function Candle({ position }: { position: [number, number, number] }) {
   useFrame(({ clock }) => {
     const t = clock.elapsedTime
     const found = seq.exploration.nearMain
+    const ignition = seq.exploration.storyStarted ? smoothstep(0.01 + (position[0] + 2) * 0.008, 0.05 + (position[0] + 2) * 0.008, seq.exploration.storyProgress) : 0
+    const quiet = seq.ending.outcome === 'failure' ? 1 - smoothstep(0.1, 0.55, seq.ending.progress) * 0.8 : 1
+    const strength = (0.35 + ignition * 0.65) * quiet
     const flicker = 0.82 + Math.sin(t * 19) * 0.09 + Math.sin(t * 31) * 0.045
     if (flame.current) {
-      flame.current.scale.set(1 + Math.sin(t * 23) * 0.09, flicker, 1 + Math.cos(t * 17) * 0.08)
+      flame.current.scale.set(1 + Math.sin(t * 23) * 0.09, flicker * strength, 1 + Math.cos(t * 17) * 0.08)
       flame.current.rotation.z = Math.sin(t * 13) * 0.08
     }
-    if (light.current) light.current.intensity = (0.38 + found * 2.45) * flicker
-    if (glow.current) glow.current.opacity = (0.08 + found * 0.36) * flicker
+    if (light.current) light.current.intensity = (0.38 + found * 2.45) * flicker * strength
+    if (glow.current) glow.current.opacity = (0.08 + found * 0.36) * flicker * strength
   })
   return <group position={position}>
     <mesh castShadow><cylinderGeometry args={[0.12, 0.15, 0.72, 12]} /><meshStandardMaterial color="#b8a88a" roughness={0.92} /></mesh>
@@ -35,6 +39,8 @@ function Candle({ position }: { position: [number, number, number] }) {
 }
 
 function MainStone() {
+  const crackMaterial = useMemo(() => new THREE.MeshStandardMaterial({ color: '#101518', emissive: '#83ffba', roughness: 1, emissiveIntensity: 0 }), [])
+  useEffect(() => () => crackMaterial.dispose(), [crackMaterial])
   const materials = useMemo(() => createStoneTextures(512), [])
   const material = useMemo(() => new THREE.MeshStandardMaterial({ map: materials.map, bumpMap: materials.bumpMap, bumpScale: 0.65, roughness: 0.95, color: '#b9c2c8' }), [materials])
   const stoneColor = useMemo(() => new THREE.Color('#b9c2c8'), [])
@@ -65,6 +71,7 @@ function MainStone() {
     }
     if (found < 0.16) rumbleArmed.current = true
     const success = seq.ending.outcome === 'success'
+    crackMaterial.emissiveIntensity = success ? smoothstep(0.45, 0.8, seq.ending.progress) * 2.2 : 0
     const opening = success ? smoothstep(0.7, 0.86, seq.ending.progress) : 0
     const verifiedShake = success ? smoothstep(0.44, 0.53, seq.ending.progress) * (1 - smoothstep(0.68, 0.73, seq.ending.progress)) : 0
     const attemptShake = smoothstep(0.72, 0.91, seq.exploration.storyProgress) * (1 - smoothstep(0.985, 1, seq.exploration.storyProgress)) * 0.28
@@ -104,7 +111,7 @@ function MainStone() {
       <mesh castShadow receiveShadow material={material}>
         <extrudeGeometry args={[(() => { const s = new THREE.Shape(); s.moveTo(-1.28, 0); s.lineTo(-1.42, 2.75); s.lineTo(-1.18, 3.15); s.lineTo(-0.78, 3.62); s.lineTo(-0.42, 3.48); s.lineTo(0.1, 4.2); s.lineTo(0.48, 3.58); s.lineTo(0.94, 3.72); s.lineTo(1.38, 3.15); s.lineTo(1.3, 0); s.closePath(); return s })(), { depth: 0.52, bevelEnabled: true, bevelSegments: 3, steps: 1, bevelSize: 0.09, bevelThickness: 0.1 }]} />
       </mesh>
-      {cracks.map((geometry, i) => <mesh key={`crack-${i}`} geometry={geometry}><meshStandardMaterial color="#101518" emissive="#161e20" roughness={1} /></mesh>)}
+      {cracks.map((geometry, i) => <mesh key={`crack-${i}`} geometry={geometry} material={crackMaterial} />)}
       {moss.map((m, i) => <mesh key={`moss-${i}`} position={[m.x, m.y, m.z]} scale={[m.s * 1.8, m.s, 0.05]} rotation={[0, 0, Math.sin(i) * 0.35]}><sphereGeometry args={[1, 9, 7]} /><meshStandardMaterial color={i % 3 ? '#344b35' : '#536448'} roughness={1} /></mesh>)}
       {/* Carved gothic crown: cross, rose window and pointed arch detail. */}
       <group position={[0, 3.42, 0.64]}>
@@ -166,6 +173,10 @@ function GiantTree() {
     })
     return clone
   }, [scene])
+  useFrame(({ clock }) => {
+    const wind = smoothstep(0.72, 0.9, seq.exploration.storyProgress) * (1 - smoothstep(0.35, 0.8, seq.ending.progress))
+    tree.rotation.z = Math.sin(clock.elapsedTime * 0.7) * wind * 0.003
+  })
   // Keep the full dead-tree silhouette in frame behind the main grave.
   return <primitive object={tree} position={[5.5, 12.1, -94]} scale={25} rotation={[0, 0.3, 0]} />
 }
@@ -569,6 +580,8 @@ function RepairAttemptPulse() {
 }
 
 function ResurrectionParticles() {
+  const particleMap = useMemo(() => createGlowTexture(32), [])
+  useEffect(() => () => particleMap.dispose(), [particleMap])
   const points = useRef<THREE.Points>(null)
   const data = useMemo(() => {
     const positions = new Float32Array(260 * 3)
@@ -594,7 +607,7 @@ function ResurrectionParticles() {
     if (material.current) material.current.opacity = rise * 0.95
   })
   return <points ref={points} geometry={data} position={GRAVE} visible={false}>
-    <pointsMaterial ref={material} color="#c3ffd8" size={0.105} transparent opacity={0} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} />
+    <pointsMaterial ref={material} map={particleMap} color="#c3ffd8" size={0.08} transparent opacity={0} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} />
   </points>
 }
 
@@ -617,7 +630,7 @@ function ReturningSoul() {
     const rise = smoothstep(0.81, 0.96, progress)
     if (root.current) {
       root.current.visible = emergence > 0.005
-      root.current.position.set(0, 0.42 + rise * 4.3, 0.42)
+      root.current.position.set(GRAVE.x, 0.42 + rise * 2.6, GRAVE.z + 0.42)
       root.current.rotation.y = Math.sin(clock.elapsedTime * 0.7) * 0.16
       root.current.scale.setScalar(0.76 + emergence * 0.24)
     }
@@ -649,6 +662,7 @@ export function GraveStory() {
     <MainStone />
     <EnergyAcrossStone />
     <SoulMagic />
+    <RitualAtmosphere />
     <RepairAttemptPulse />
     <ResurrectionLight />
     <ResurrectionParticles />

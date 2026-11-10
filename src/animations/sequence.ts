@@ -19,6 +19,7 @@ export const seq = {
   /** Scene 1 — each element fades up out of darkness in its own time. */
   reveal: { veil: 1, light: 0, moon: 0, clouds: 0, trees: 0, fog: 0, gate: 0, stars: 0 },
   introDone: false,
+  guided: false,
   /** Scene 2 — user scroll intent (target) and its GSAP-smoothed value. */
   scrollTarget: 0,
   scroll: 0,
@@ -36,7 +37,7 @@ export const seq = {
     velocityX: 0, velocityZ: 0, entryBlend: 0, initialized: false,
     input: { forward: false, back: false, left: false, right: false, turnLeft: false, turnRight: false },
   },
-  exploration: { nearGrave: -1, graveFocus: 0, nearMain: 0, entered: false, storyProgress: 0, storyStarted: false, obstacles: [] as { x: number; z: number; radius: number }[] },
+  exploration: { nearGrave: -1, graveFocus: 0, nearMain: 0, readingSeconds: 0, entered: false, storyProgress: 0, storyStarted: false, obstacles: [] as { x: number; z: number; radius: number }[] },
   ending: {
     started: false,
     outcome: 'pending' as 'pending' | 'success' | 'failure',
@@ -87,7 +88,7 @@ function playEnding(result: RepairResult | null) {
     endingTimeline.to(e, { progress: 0.62, duration: 6, ease: 'sine.inOut' }, 4.2)
     endingTimeline.to(e, { progress: 1, duration: 7, ease: 'power1.inOut' }, 10.2)
   }
-  endingTimeline.to(e, { cameraBack: 1, duration: 13, ease: 'sine.inOut' }, success ? 8 : 4)
+  endingTimeline.to(e, { cameraBack: 1, duration: 13, ease: 'sine.inOut' }, success ? 22 : 7)
   endingTimeline.to(e, { fogFade: 1, duration: 5, ease: 'sine.inOut' }, success ? 13 : 8)
   endingTimeline.to(e, { moonFade: 1, duration: 7, ease: 'sine.inOut' }, success ? 17 : 13)
 }
@@ -158,7 +159,7 @@ export function playIntro(dom: { title: HTMLElement | null; tagline: HTMLElement
   if (dom.cue) tl.fromTo(dom.cue, { opacity: 0 }, { opacity: 1, duration: 2 }, 15.2)
 
   tl.set({}, {}, 16.2) // pad so onComplete lands after the last fade
-  if (reduced) tl.timeScale(3)
+  tl.timeScale(reduced ? 3 : 1.55)
   return tl
 }
 
@@ -265,7 +266,20 @@ export function advanceFinalGraveStory(delta: number) {
   if (seq.exploration.storyProgress >= 1) beginEnding()
 }
 
+export function startGuidedTour() {
+  introTimeline?.progress(1)
+  seq.guided = true
+  nudgeScroll(1)
+}
+
+export function skipToEnding() {
+  if (!seq.exploration.storyStarted || seq.ending.started) return
+  seq.exploration.storyProgress = 1
+  beginEnding()
+}
+
 export function moveRoam(dx: number, dz: number) {
+  seq.guided = false
   if (seq.exploration.storyStarted) return
   const r = seq.roam
   const yaw = r.targetYaw
@@ -275,6 +289,7 @@ export function moveRoam(dx: number, dz: number) {
 }
 
 export function turnRoam(yaw: number, pitch = 0) {
+  seq.guided = false
   if (seq.exploration.storyStarted) return
   seq.roam.targetYaw += yaw
   seq.roam.targetPitch = Math.max(-1.15, Math.min(1.15, seq.roam.targetPitch + pitch))

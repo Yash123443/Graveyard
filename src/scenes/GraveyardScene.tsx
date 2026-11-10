@@ -20,6 +20,8 @@ import { ScatteredGraves } from '../objects/ScatteredGraves'
 import { LeafLitter } from '../objects/LeafLitter'
 import { MOON_POSITION, Moon } from '../objects/Moon'
 import { Sky } from '../objects/Sky'
+import { LanternAvenue } from '../objects/LanternAvenue'
+import { ProcessionalPath } from '../objects/ProcessionalPath'
 import { CemeteryMemorials } from '../objects/CemeteryMemorials'
 
 /** Light rig whose intensity is driven by the scene-1 reveal, so the world starts in near-total darkness. */
@@ -32,8 +34,8 @@ function Lights() {
   useFrame(() => {
     const k = seq.reveal.light
     if (moonLight.current) moonLight.current.intensity = 2.35 * k
-    if (fill.current) fill.current.intensity = 0.82 * k
-    if (hemi.current) hemi.current.intensity = 0.42 * k
+    if (fill.current) fill.current.intensity = 1.02 * k
+    if (hemi.current) hemi.current.intensity = 0.54 * k
     if (ambient.current) ambient.current.intensity = 0.16 * k
   })
 
@@ -74,9 +76,11 @@ export function GraveyardScene() {
       <Moon />
       <CloudLayers />
       <Ground />
+      <ProcessionalPath />
       <CircularCemeteryFence />
       <CemeteryGroundDetails />
       <CemeteryMemorials />
+      <LanternAvenue />
       <ScatteredGraves />
       <DeadTreeCluster />
       <CemeteryGate />

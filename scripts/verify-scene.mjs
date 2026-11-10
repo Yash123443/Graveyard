@@ -18,6 +18,45 @@ async function compile(sourcePath, outputName, replace = text => text) {
   return import(pathToFileURL(file).href)
 }
 try {
+  const { ritualCameraDistance } = await compile('src/animations/ritualFraming.ts', 'framing.mjs')
+  for (const aspect of [0.45, 0.56, 0.75, 1, 1.78, 2.2]) {
+    const distance = ritualCameraDistance(aspect)
+    assert.ok(distance >= 14.5 && Number.isFinite(distance))
+    assert.ok(distance * Math.tan(53 * Math.PI / 360) * aspect >= 6.4 - 0.00001, 'All three souls fit the horizontal field of view')
+  }
+  const sceneSource = await readFile('src/scenes/GraveyardScene.tsx', 'utf8')
+  const overlaySource = await readFile('src/components/OpeningOverlay.tsx', 'utf8')
+  assert.ok(!sceneSource.includes('MourningApparition') && !overlaySource.includes('scare-control'), 'Jumpscare must not remain in the experience')
+  console.log('Responsive ritual framing and jumpscare removal passed.')
+  const { isVerifiedRepair } = await compile('src/integrations/repairResult.ts', 'repair-result.mjs')
+  assert.equal(isVerifiedRepair(null), false, 'Missing data must never show a revival')
+  const verified = { finalStatus: 'success', buildResult: 'passed', testResult: 'passed', verificationResult: 'passed' }
+  assert.equal(isVerifiedRepair(verified), true)
+  for (const key of ['buildResult', 'testResult', 'verificationResult']) {
+    assert.equal(isVerifiedRepair({ ...verified, [key]: 'not-run' }), false)
+    assert.equal(isVerifiedRepair({ ...verified, [key]: 'failed' }), false)
+  }
+  console.log('Revival requires verified repair, build, and test success.')
+  const { advanceGraveReading, GRAVE_READING_SECONDS } = await compile('src/animations/graveEncounter.ts', 'encounter.mjs')
+  assert.equal(advanceGraveReading(5, 16, 1, 0, 0.05), 0, 'Leaving the clearing resets reading')
+  assert.equal(advanceGraveReading(5, 11, 0.2, 0, 0.05), 5, 'Looking away pauses reading')
+  assert.equal(advanceGraveReading(5, 11, 1, 3, 0.05), 5, 'Walking past cannot trigger the ritual')
+  assert.equal(advanceGraveReading(0, 11, 1, 0, 5), 0.05, 'A stalled frame cannot skip reading')
+  for (const fps of [30, 60, 120]) {
+    let elapsed = 0
+    for (let frame = 0; frame < fps * 13; frame++) elapsed = advanceGraveReading(elapsed, 11.5, 1, 0, 1 / fps)
+    assert.equal(elapsed, GRAVE_READING_SECONDS, 'Ritual starts after reading at a comfortable distance')
+  }
+  console.log('Reading distance, gaze, movement, and frame pacing passed.')
+  const { createCobwebGeometry } = await compile('src/utils/cobwebGeometry.ts', 'cobweb.mjs')
+  const web = createCobwebGeometry(7, 1.6), repeat = createCobwebGeometry(7, 1.6), different = createCobwebGeometry(8, 1.6)
+  assert.deepEqual(web.attributes.position.array, repeat.attributes.position.array, 'Web placement must be stable across reloads')
+  assert.notDeepEqual(web.attributes.position.array, different.attributes.position.array, 'Trees should not all carry identical webs')
+  assert.ok(Array.from(web.attributes.position.array).every(Number.isFinite))
+  assert.equal(web.attributes.position.count, web.attributes.color.count)
+  assert.ok(web.attributes.position.count < 3500, 'Silk geometry must remain lightweight')
+  web.dispose(); repeat.dispose(); different.dispose()
+  console.log('Cobweb variation, stable geometry, and silk budget passed.')
   const { ritualPower } = await compile('src/animations/ritualPower.ts', 'ritual.mjs')
   for (let i = 0; i < 3; i++) {
     assert.equal(ritualPower(i, 0, 0, 'pending', false), 0, 'Magic must not appear before the encounter')
