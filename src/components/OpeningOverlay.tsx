@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
 import { moveRoam, startGuidedTour, skipToEnding, nudgeScroll, playIntro, seq, smoothstep, turnRoam } from '../animations/sequence'
 import { getAudioStatus, subscribeAudio, toggleAudio, unlockAudio } from '../audio/audioManager'
 import { getRepairResult } from '../integrations/repairResult'
@@ -33,7 +33,6 @@ function SoundControl() {
 
 /** DOM layer: darkness veil, title typography, chapter marks. Everything is driven by refs, not React state. */
 export function OpeningOverlay({ ready }: { ready: boolean }) {
-  const [githubNotice, setGithubNotice] = useState('')
   const veil = useRef<HTMLDivElement>(null)
   const copy = useRef<HTMLElement>(null)
   const title = useRef<HTMLHeadingElement>(null)
@@ -59,7 +58,6 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
   const finaleHeadline = useRef<HTMLHeadingElement>(null)
   const finaleSubhead = useRef<HTMLParagraphElement>(null)
   const finaleStatus = useRef<HTMLParagraphElement>(null)
-  const authNotice = useRef<HTMLParagraphElement>(null)
   const tourControls = useRef<HTMLDivElement>(null)
   const explorePad = useRef<HTMLDivElement>(null)
   const nearbyTrace = useRef<HTMLDivElement>(null)
@@ -288,22 +286,8 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
         <h2 ref={finaleHeadline}>THE GRAVE REMAINS CLOSED</h2>
         <p ref={finaleSubhead}>No verified repair result was received.</p>
         <div className="finale__last-word">EVERY DEAD REPO HAS A CAUSE OF DEATH.<span>Some deserve a second life.</span></div>
-        <button className="github-connect" type="button" onClick={() => {
-          const authUrl = import.meta.env.VITE_GITHUB_AUTH_URL
-          if (!authUrl) {
-            setGithubNotice('GitHub authentication is not configured yet.')
-            return
-          }
-          try {
-            const target = new URL(authUrl, window.location.origin)
-            if (target.protocol !== 'https:' && target.origin !== window.location.origin) throw new Error('Unsupported authentication URL')
-            window.location.assign(target.href)
-          } catch {
-            setGithubNotice('The configured GitHub authentication URL is invalid.')
-          }
-        }}>CONNECT WITH GITHUB</button>
+        <a className="github-connect" href="#/workspace">OPEN REPAIR WORKSPACE</a>
         <button className="replay-experience" type="button" onClick={() => window.location.assign(window.location.pathname)}>EXPLORE AGAIN</button>
-        <p ref={authNotice} className="finale__auth-notice">{githubNotice}</p>
       </section>
       <SoundControl />
     </>

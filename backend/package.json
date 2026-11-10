@@ -1,0 +1,27 @@
+{
+  "name": "graveyard-backend",
+  "version": "0.2.0",
+  "description": "GRAVEYARD backend API — Node.js/TypeScript/Fastify",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.12.1",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "start": "node --env-file=.env dist/server.js",
+    "start:example": "node --env-file=.env.example dist/server.js",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.js",
+    "dev": "node --env-file=.env --watch dist/server.js"
+  },
+  "dependencies": {
+    "fastify": "5.12.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "typescript": "5.8.3"
+  }
+}

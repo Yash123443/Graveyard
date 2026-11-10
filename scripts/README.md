@@ -13,3 +13,5 @@ Run `node scripts/verify-scene.mjs` for geometry regression checks. These verify
 The checks also cover soul/caption synchronization at 30–120 FPS, stalled-frame limits, and ghost peek/approach/stare/permanent-disappearance behavior. The final encounter now uses a shared 36-second render-paced clock after a four-second reading pause near the main grave. Tree lanterns and bone mobiles use material batches without additional lights.
 
 The power ritual uses six GPU particle batches for vapor and sparks, with no tube beams. Tests cover individual casting, combined casting, and proper success/failure fade-out. For development-only visual QA, open `/?scenePreview=ritual` or `/?scenePreview=trees`. These deterministic camera setups are disabled in production builds.
+
+Run `node scripts/verify-workspace.mjs` for the repair-workspace checks: the incremental SSE parser (LF/CRLF/CR, every chunk boundary, multiline data, comments, BOM, sticky ids), retry classification (only network failures and 5xx are transient), and URL/token validation. It needs no dependencies beyond the existing `typescript` dev dependency.

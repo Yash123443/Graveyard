@@ -294,3 +294,12 @@ button:focus-visible { outline: 2px solid #e4c79c; outline-offset: 5px; }
 }
 
 .dependency-timeline { padding: 12px 14px; border-left: 1px solid #ad89d95c; background: linear-gradient(100deg, #050a10eb, #050a1099); }
+
+/* ---------- routing helpers (intro skip link, workspace chunk fallback) ---------- */
+.github-connect { display: inline-block; box-sizing: border-box; text-align: center; text-decoration: none; }
+.skip-intro {
+  position: fixed; left: 12px; top: -64px; z-index: 200; padding: 10px 16px;
+  background: #ece6d6; color: #141418; font: 600 12px/1.2 var(--label); letter-spacing: .06em; text-decoration: none; border-radius: 3px;
+}
+.skip-intro:focus, .skip-intro:focus-visible { top: 12px; outline: 2px solid #fff; outline-offset: 2px; }
+.route-loading { position: fixed; inset: 0; display: grid; place-items: center; margin: 0; background: #141418; color: #a8a396; font: 13px var(--label); }
