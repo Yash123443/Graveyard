@@ -97,6 +97,28 @@ One bounded request, frontend and `.kiro/` only; no shell commands, no backend e
 
 The code, type-check, build and the verification script were NOT executed by Kiro; results pending external verification.
 
+### External verification of the frontend workspace (2026-11-14)
+
+Docs-only request; Kiro ran no commands and edited no source or dependencies. Recorded from the user's external checks:
+
+- Frontend TypeScript + Vite production build passed.
+- `scripts/verify-workspace.mjs` passed parser and error-classification checks.
+- Local Vite proxy real smoke passed: health, create, metadata read, cancel, SSE replay; no token in the event response.
+- Backend `tsc` production and test configurations pass; full suite 162 tests, 0 failures, run outside the sandbox because of its ephemeral localhost restriction.
+- Workspace and API launched locally on ports 3000 and 3002.
+- Not verified: browser visual interaction (local browser automation was disabled).
+- Still outstanding: execution worker, sandbox runner, result and patch endpoints, frontend visual test.
+
+This supersedes the "NOT executed" note in the frontend workspace entry (2026-11-11), which is left unedited as history.
+
+### Docker fixture sandbox and external verification (2026-11-14)
+
+Kiro wrote `src/docker-sandbox.ts` and its mock tests, and later the `json-file` log driver fix, in bounded requests without a shell. This docs-only update records the user's external results: Docker Desktop 29.9.2, local `alpine:3.21`, echo fixture exit 0 with `fixture-ok` under network `none`, read-only bind mount listing of `backend/src/test`, cleanup confirmed in both, test compile passed, 91 mock sandbox tests passed. The earlier real failure was fixed by the explicit `json-file` driver. This is not evidence of production safety for arbitrary repositories; there is no worker integration, clone or agent runtime. Kiro ran no commands for this update.
+
+### Steering documents (2026-11-14)
+
+One bounded, docs-only request. Kiro read `.kiro/PROJECT.md` and `.kiro/specs/backend-foundation/design.md` and created `.kiro/steering/product.md`, `tech.md` and `structure.md`. No shell commands were run, and `backend/`, `src/` and `scripts/` were not touched. Nothing was built or tested.
+
 ## Prompting guidelines
 
 - Provide a single, bounded implementation request per session.

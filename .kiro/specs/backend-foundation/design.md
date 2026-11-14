@@ -40,6 +40,20 @@ Preserve the EARS structure. Corrected defaults to apply only to missing configu
 
 Claims use BEGIN IMMEDIATE with per-claim random lease tokens; the deadline (15 min) is set on first claim only and attempts are bounded (default 2). Expired leases are fenced (token voided, `recovery_required` set, recovery token issued) and never auto-requeued; `confirmRecoveryCleanup` requeues, fails (attempts exhausted) or times out the job with infrastructure metadata only. The module cannot itself prove containers stopped; that remains the job of the future recovery coordinator/sandbox. Pending external verification.
 
+## Execution worker foundation (unverified, unwired)
+
+`worker.ts` coordinates one job at a time against an injected `JobRunner` (`run`, `cleanup`). Terminal and recovery writes are fenced by lease token, unexpired lease and deadline (`finishLeasedJob`); voluntary release goes through `fenceOwnLease` then `confirmRecoveryCleanup`. Completion, failure, requeue and timeout need runner cleanup proof for the exact execution id (`jobId:attempt`); without it the job stays fenced and blocked with a single `cleanup-unconfirmed` record. The production runner (`UnavailableRunner`) fails closed: jobs end `failed` with `infrastructure-unavailable`, never `completed`, and recovery of executions it did not create stays blocked. Not yet built: sandbox runner, poll loop/process entry, periodic recovery, running-job cancellation, result data. Code was written without running the compiler or tests.
+
+## Docker fixture sandbox adapter (unverified, unwired)
+
+`docker-sandbox.ts` runs fixed commands from a construction-time registry in a disposable container, through an injectable subprocess executor with argument arrays and no shell. It creates the container, reads back `docker inspect` and refuses to start on any isolation mismatch, then proves cleanup by inspect and label query, returning the `CleanupProof` shape the worker expects. Docker unavailability fails closed. It is limited to controlled local fixtures, does not implement `JobRunner`, and is not production safe. Written without running the compiler, tests or Docker; see backend/DEVELOPMENT.md for limitations.
+
+## Acquisition foundations (unverified, unwired, disabled)
+
+`acquisition-policy.ts` holds pure policy; `git-acquisition.ts` is the clone adapter over the same injectable `ProcessExecutor` as the Docker sandbox (argument arrays, no shell). Source identity is the canonical `https://github.com/owner/repo` URL plus a full lowercase 40-hex SHA. Git runs inside a disposable container with hooks, prompts, credential helpers, non-HTTPS protocols, submodule recursion, LFS smudge, redirects and real symlink creation disabled, and bounded depth, output, time and disk (a size-limited tmpfs `/work`). The commit's tree is listed and checked (symlinks, path escape, `.git` components, case collisions, file count, size) before checkout; the HEAD identity is verified again after.
+
+Network: this follows review decision 2 (no unrestricted egress). The adapter runs only when an injected `EgressGuard` attests a dedicated network and an HTTP proxy allowing exactly `github.com`, and `docker network inspect` shows that network as `Internal`. The default guard never attests, so acquisition fails closed. The proxy and its allowlist are not implemented and cannot be verified by this code; the default bridge is never used and never described as secured. Successful acquisition currently ends in a tmpfs that disappears with the container; an export step and `JobRunner` integration are not built. Written without running the compiler, tests, Docker or git.
+
 ## First implementation milestone
 
 Create the independent backend package with a health endpoint, configuration validation, structured errors and compile/run instructions. Confirm runtime/tool versions before choosing package versions. Do not accept or execute repository jobs in this milestone.

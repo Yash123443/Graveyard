@@ -241,6 +241,53 @@ Limitations:
 - `stage` is not advanced by claims; `running` jobs are not cancellable via the API (409).
 - Tests were written but not yet executed by this workflow; pending external verification.
 
+## Execution worker foundation (library only, not wired, unverified)
+
+`src/worker.ts` (`JobWorker`) and `src/runner.ts` (runner contract,
+`UnavailableRunner`) add a single-job coordinator. Nothing in the server, no
+process entry point and no polling loop instantiates it. It executes no
+repository code, spawns nothing and uses no network.
+
+- **Runner interface.** `JobRunner.run(ctx)` and `JobRunner.cleanup(req)` are
+  injected. Cleanup must return `{ confirmed: true, executionId, evidence }`
+  for that exact execution id; anything else (false, thrown, timed out,
+  wrong id, empty evidence) counts as unproven.
+- **Fenced writes.** `finishLeasedJob` (in `leases.ts`) requires the current
+  lease token, an unexpired lease and an unpassed deadline. `fenceOwnLease`
+  lets a holder void its own lease. Stale, fenced, expired or past-deadline
+  writers are rejected with no side effects.
+- **Heartbeat, deadline, shutdown.** Heartbeats run on an injected timer; a
+  rejected heartbeat, the deadline or `shutdown()` aborts the runner's
+  `AbortSignal`. After an abort the runner's result is discarded, even
+  `completed`. A runner that ignores the abort is given a grace period, then
+  cleanup is demanded anyway.
+- **Cleanup before consequence.** Completion, failure, requeue and timeout are
+  recorded only after valid cleanup proof. Without proof the job is fenced
+  (`recovery_required`), blocked from claims, and gets one `cleanup-unconfirmed`
+  event plus `infra_error`. `recoverOnce()` asks the runner for proof for every
+  fenced job and calls `confirmRecoveryCleanup` only when proof is valid.
+- **Atomic state and events.** Each transition commits job state and its event
+  in one `BEGIN IMMEDIATE` transaction.
+- **Production runner fails closed.** `UnavailableRunner.run` never starts
+  anything and reports `infrastructure-unavailable`; the job ends `failed` with
+  that infrastructure metadata and is never `completed`. Its `cleanup` proves
+  "nothing started" only for execution ids it refused itself in the same
+  process. For any other job (a crashed worker, an earlier process) it cannot
+  prove cleanup, so such jobs stay blocked until a real sandbox runner exists.
+
+Limitations:
+
+- No sandbox exists. The `completed` path is exercised only with a fake runner
+  in tests; no real analysis, result object or patch is produced, and a
+  `completed` job has no result data.
+- `completed` jobs get `stage = done`; no result endpoint exists yet.
+- Running-job cancellation is not implemented.
+- No poll loop, no periodic `recoverOnce`, no process signal handling.
+- With the unavailable runner a job fails on its first attempt instead of
+  being retried.
+- `src/test/worker.test.ts` was written without running `tsc` or the tests
+  (no shell was available). Pending external verification.
+
 ## Not yet implemented
 
 The following features from `requirements.md` / `design.md` are **deferred to
@@ -248,7 +295,7 @@ future milestones** and are intentionally absent:
 
 - `GET /api/jobs/:id/result` — RepairResult compatible with frontend
 - `GET /api/jobs/:id/patch` — downloadable unified diff
-- Worker process — no polling loop or execution exists; only lease primitives (see below)
+- Worker process — no polling loop or entry point; only lease primitives and the unwired `JobWorker` coordinator (see above)
 - Sandbox — disposable Docker execution, resource limits, timeout (15 min default)
 - Agent adapter — Analyst / Fixer / Tester phases; Kiro runtime feasibility outstanding
 - Bounded log storage and truncation indicators
@@ -268,6 +315,8 @@ backend/
 │   ├── server.ts           # Entry point: loadConfig → buildApp → listen
 │   ├── db.ts               # node:sqlite DatabaseSync lifecycle, WAL, migrations
 │   ├── leases.ts           # Worker lease primitives (claim, heartbeat, fence, recovery)
+│   ├── worker.ts           # JobWorker coordinator (unwired; injected runner)
+│   ├── runner.ts           # Runner contract + fail-closed UnavailableRunner
 │   ├── token.ts            # Cryptographic token utilities (generate, hash, verify)
 │   ├── url.ts              # Strict GitHub HTTPS URL validator
 │   ├── jobs.ts             # Jobs repository (prepared statements, transactions)

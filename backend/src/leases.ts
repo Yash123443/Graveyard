@@ -74,7 +74,11 @@ export type ConfirmCleanupResult =
 
 /** Infrastructure metadata for terminal failures — not a repository diagnosis. */
 export interface InfraError {
-  kind: "deadline-exceeded" | "attempts-exhausted";
+  kind:
+    | "deadline-exceeded"
+    | "attempts-exhausted"
+    | "infrastructure-unavailable"
+    | "cleanup-unconfirmed";
   message: string;
   attemptCount: number;
   maxAttempts: number;
@@ -392,4 +396,200 @@ export function expireQueuedDeadlines(db: DatabaseSync, params: ClockOption = {}
     }
     return expired;
   });
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Fenced worker writes (execution worker foundation)
+// ---------------------------------------------------------------------------
+
+/** Deterministic id of one execution attempt; runners key their cleanup on it. */
+export function executionIdFor(jobId: string, attemptCount: number): string {
+  return `${jobId}:${attemptCount}`;
+}
+
+const MAX_TEXT = 300;
+function bounded(text: string): string {
+  return text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}…` : text;
+}
+
+export interface FinishLeasedJobParams extends ClockOption {
+  jobId: string;
+  leaseToken: string;
+  outcome: "completed" | "failed";
+  /** Required when outcome is "failed". Infrastructure metadata only. */
+  failure?: { kind: InfraError["kind"]; message: string };
+  /** Runner-supplied proof that this execution was cleaned up (stored in the event). */
+  cleanupEvidence: string;
+}
+
+/**
+ * Terminal write by the current lease holder. Fenced three ways: the lease
+ * token must match, the lease must be unexpired, and the deadline must not
+ * have passed. A stale, fenced, expired or past-deadline writer is rejected
+ * with no side effects. State and event commit in one transaction.
+ */
+export function finishLeasedJob(db: DatabaseSync, params: FinishLeasedJobParams): { accepted: boolean } {
+  if (params.outcome === "failed" && params.failure === undefined) {
+    throw new Error("failure metadata is required when outcome is failed");
+  }
+  if (typeof params.cleanupEvidence !== "string" || params.cleanupEvidence.trim() === "") {
+    throw new Error("cleanupEvidence is required");
+  }
+  const now = (params.now ?? new Date()).toISOString();
+
+  return immediate(db, () => {
+    const row = db.prepare(`
+      SELECT stage, attempt_count, max_attempts, deadline_at FROM jobs
+      WHERE id = ? AND status = 'running' AND recovery_required = 0
+        AND lease_token = ? AND lease_expires_at > ? AND deadline_at > ?
+    `).get(params.jobId, params.leaseToken, now, now) as Row | undefined;
+    if (row === undefined) return { accepted: false };
+
+    const attemptCount = row["attempt_count"] as number;
+    const maxAttempts = row["max_attempts"] as number;
+    const infra: InfraError | null =
+      params.outcome === "failed" && params.failure !== undefined
+        ? {
+            kind: params.failure.kind,
+            message: bounded(params.failure.message),
+            attemptCount, maxAttempts,
+            deadlineAt: row["deadline_at"] as string,
+            at: now,
+          }
+        : null;
+    const stage = params.outcome === "completed" ? "done" : (row["stage"] as string);
+
+    const res = db.prepare(`
+      UPDATE jobs
+      SET status = ?, stage = ?, infra_error = ?, lease_token = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = ? AND status = 'running' AND recovery_required = 0 AND lease_token = ?
+    `).run(params.outcome, stage, infra === null ? null : JSON.stringify(infra), now, params.jobId, params.leaseToken);
+    if (Number(res.changes) !== 1) return { accepted: false };
+
+    insertEvent(db, params.jobId, params.outcome, {
+      jobId: params.jobId,
+      stage,
+      status: params.outcome,
+      attemptCount,
+      cleanupEvidence: bounded(params.cleanupEvidence.trim()),
+      ...(infra === null ? {} : { infrastructure: infra }),
+    }, now);
+    return { accepted: true };
+  });
+}
+
+export interface FenceOwnLeaseParams extends ClockOption {
+  jobId: string;
+  leaseToken: string;
+  reason: string;
+}
+
+/**
+ * The lease holder voluntarily voids its own lease and moves the job to
+ * recovery_required (same state fenceExpiredLeases produces). The job is then
+ * blocked from claims until confirmRecoveryCleanup resolves it. Works even if
+ * the lease has already expired, as long as nobody else fenced it first.
+ * Returns null when the token no longer matches.
+ */
+export function fenceOwnLease(db: DatabaseSync, params: FenceOwnLeaseParams): FencedJob | null {
+  const now = (params.now ?? new Date()).toISOString();
+
+  return immediate(db, () => {
+    const row = db.prepare(`
+      SELECT stage, attempt_count FROM jobs
+      WHERE id = ? AND status = 'running' AND recovery_required = 0 AND lease_token = ?
+    `).get(params.jobId, params.leaseToken) as Row | undefined;
+    if (row === undefined) return null;
+
+    const recoveryToken = newToken();
+    const res = db.prepare(`
+      UPDATE jobs SET lease_token = NULL, recovery_required = 1, recovery_token = ?, updated_at = ?
+      WHERE id = ? AND lease_token = ?
+    `).run(recoveryToken, now, params.jobId, params.leaseToken);
+    if (Number(res.changes) !== 1) return null;
+
+    insertEvent(db, params.jobId, "recovery-required", {
+      jobId: params.jobId,
+      stage: row["stage"],
+      status: "running",
+      recoveryRequired: true,
+      reason: bounded(params.reason),
+      attemptCount: row["attempt_count"],
+    }, now);
+    return { jobId: params.jobId, recoveryToken };
+  });
+}
+
+export interface RecordCleanupUnconfirmedParams extends ClockOption {
+  jobId: string;
+  recoveryToken: string;
+  message: string;
+}
+
+/**
+ * Records, once, that cleanup could not be proven for a fenced job: sets
+ * infra_error and appends a "cleanup-unconfirmed" event. The job stays blocked.
+ * Idempotent: repeated recovery passes do not append duplicate events.
+ * Returns true only when a new record was written.
+ */
+export function recordCleanupUnconfirmed(db: DatabaseSync, params: RecordCleanupUnconfirmedParams): boolean {
+  const now = (params.now ?? new Date()).toISOString();
+
+  return immediate(db, () => {
+    const row = db.prepare(`
+      SELECT stage, attempt_count, max_attempts, deadline_at, infra_error FROM jobs
+      WHERE id = ? AND status = 'running' AND recovery_required = 1 AND recovery_token = ?
+    `).get(params.jobId, params.recoveryToken) as Row | undefined;
+    if (row === undefined) return false;
+
+    const existing = row["infra_error"] as string | null;
+    if (existing !== null) {
+      try {
+        if ((JSON.parse(existing) as { kind?: string }).kind === "cleanup-unconfirmed") return false;
+      } catch { /* unparsable metadata is overwritten below */ }
+    }
+
+    const infra: InfraError = {
+      kind: "cleanup-unconfirmed",
+      message: bounded(params.message),
+      attemptCount: row["attempt_count"] as number,
+      maxAttempts: row["max_attempts"] as number,
+      deadlineAt: row["deadline_at"] as string | null,
+      at: now,
+    };
+    db.prepare("UPDATE jobs SET infra_error = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(infra), now, params.jobId);
+    insertEvent(db, params.jobId, "cleanup-unconfirmed", {
+      jobId: params.jobId,
+      stage: row["stage"],
+      status: "running",
+      recoveryRequired: true,
+      infrastructure: infra,
+    }, now);
+    return true;
+  });
+}
+
+/** Internal recovery view including the attempt needed to derive the execution id. */
+export interface RecoveryTarget extends RecoveryRequiredJob {
+  attemptCount: number;
+  executionId: string;
+}
+
+/** Like listRecoveryRequired plus attempt/execution id. Contains tokens: internal use only. */
+export function listRecoveryTargets(db: DatabaseSync): RecoveryTarget[] {
+  const rows = db.prepare(`
+    SELECT id, recovery_token, worker_id, attempt_count FROM jobs
+    WHERE status = 'running' AND recovery_required = 1 AND recovery_token IS NOT NULL
+    ORDER BY created_at, id
+  `).all() as Row[];
+  return rows.map((r) => ({
+    jobId: r["id"] as string,
+    recoveryToken: r["recovery_token"] as string,
+    workerId: (r["worker_id"] as string | null) ?? null,
+    attemptCount: r["attempt_count"] as number,
+    executionId: executionIdFor(r["id"] as string, r["attempt_count"] as number),
+  }));
 }
