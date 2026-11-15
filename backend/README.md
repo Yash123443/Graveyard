@@ -370,6 +370,52 @@ running Docker daemon, local `node:22-alpine` and git images (nothing is pulled)
 `github.com:443`; it fails closed otherwise. No registry, no agents, no repository code is executed. See
 `DEVELOPMENT.md` ("GitHub flow end-to-end harness").
 
+#### Supported public fixture mode (opt-in)
+
+The harness compiles. Verification of this mode requires a matching public fixture commit. The default mode
+runs when neither variable below is set.
+
+```powershell
+$env:GRAVEYARD_GITHUB_E2E_SUPPORTED_URL = "https://github.com/<owner>/<repo>"
+$env:GRAVEYARD_GITHUB_E2E_SUPPORTED_COMMIT = "<full 40-character lowercase commit SHA>"
+pnpm run test:github-e2e
+```
+
+Both variables are required together. Setting only one, a non-canonical URL, or an abbreviated SHA fails closed
+before Docker is contacted. You supply the repository: it must be public, and the harness cannot check that. Pin the
+exact commit you inspected.
+
+The harness uses these four files from the commit's root:
+
+| File | Required content |
+|---|---|
+| `package.json` | Valid, with no `scripts` |
+| `package-lock.json` | `lockfileVersion` 3 with one dependency, `is-number@7.0.0` from `registry.npmjs.org` (the lock must pass the lock policy) |
+| `build.mjs` | Your build script, run by `node` in the offline container |
+| `test.mjs` | Your tests, run in the same offline container. Required here: the harness asserts that the test stage passed |
+
+Without those files the job completes as `unsupported-repository` or fails, and the harness reports a problem.
+The harness runs the repository as it is. It does not edit, patch or replace any file.
+
+What changes against the default mode:
+
+- A second per-run `--internal` network and a second hardened proxy container for `registry.npmjs.org` are created
+  with the same helper as the github.com ones, and removed by the same label-checked cleanup. Each proxy must answer
+  `403` to `CONNECT example.com:443` and to the other proxy's host.
+- The worker gets the three `GRAVEYARD_REGISTRY_EGRESS_*` variables for that topology. Agents stay `off`.
+- Expected result: `completed` at stage `done`, outcome `passing`, verdict `verified`, source kind `github-pinned`
+  with your URL and commit, pipeline `passed` with install, build and test stages `passed` and one package added,
+  Tester `passed`, no Analyst or Fixer output, `repair.verified` and `repair.patchApplied` both `false`, no
+  infrastructure record, 401 and 403 on the result route without or with another token, `no-store`, and no token in
+  any body or in the worker log.
+- Cleanup also queries, by label and by name, the registry acquisition containers of the derived execution ids
+  (`<uuid>-npm:<attempt>`) next to the git acquisition and sandbox containers, and reports any leftover, proxy,
+  network or temporary directory as a problem.
+
+Extra requirements: outbound access to `registry.npmjs.org:443` from the Docker host's default bridge, and the
+`node:22-alpine` image. Nothing is pulled and nothing is published. A pass would show only what is listed above for
+that one repository and commit on your machine.
+
 ## Local worker (opt-in, separate process; tested with mocked Docker, and verified end to end once on real Docker for one controlled fixture, 2026-11-15)
 
 The API server never starts a worker. Jobs stay `queued` until an operator

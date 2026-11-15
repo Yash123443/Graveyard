@@ -60,6 +60,32 @@
  *
  * Fail closed: if Docker, an image, the network, the proxy or GitHub access fails, the harness throws
  * and prints FAIL-CLOSED. It then makes no claim about the worker, the proxy or GitHub.
+ *
+ * SUPPORTED FIXTURE MODE (added later by Kiro; written without being compiled or run, UNVERIFIED).
+ * Opt-in on top of the opt-in above: set BOTH
+ *   GRAVEYARD_GITHUB_E2E_SUPPORTED_URL     canonical public URL, https://github.com/<owner>/<repo>
+ *   GRAVEYARD_GITHUB_E2E_SUPPORTED_COMMIT  full lowercase 40-hex commit of that repository
+ * Setting only one, or an invalid value, fails closed before anything is created. Without either
+ * variable the default Hello-World mode above runs unchanged. The harness cannot check that the
+ * repository is public or that its root files fit the supported class; the operator supplies a
+ * fixture whose root holds exactly package.json (no scripts), package-lock.json (lockfileVersion 3,
+ * one is-number@7.0.0 entry), build.mjs and test.mjs (see backend/README.md).
+ * Differences from the default mode:
+ *   - a SECOND per-run `--internal` network (adjacent /24) and a SECOND hardened proxy container
+ *     for registry.npmjs.org only (label graveyard.egress-proxy=registry.npmjs.org), created by the
+ *     same helper and rolled back by the same label-checked cleanup. Each proxy must answer 403 to
+ *     CONNECT example.com:443 and to the other proxy's host;
+ *   - the worker environment adds GRAVEYARD_REGISTRY_EGRESS_NETWORK / _PROXY_CONTAINER / _PROXY_URL
+ *     and the pin catalog holds exactly the supplied URL and commit. Agents stay off;
+ *   - expected result: completed, done, outcome passing, verdict verified, sourceKind github-pinned
+ *     with the supplied URL and commit, pipeline passed with install, build and test stages all
+ *     passed, Tester report passed, no analyst or fixer output, repair.verified and
+ *     repair.patchApplied false, no infrastructure record, 401 and 403 auth checks, no token leak;
+ *   - cleanup additionally queries, by label and by name, the registry acquisition containers of the
+ *     registry execution ids derived from each attempt's execution id (`<uuid>-npm:<n>`), besides
+ *     the git acquisition and sandbox containers, and removes both proxies and both networks.
+ * It does not modify production policy and publishes nothing. A pass would show only what the
+ * assertions list, on this machine, for this one repository and commit.
  */
 
 import { randomBytes, randomInt } from "node:crypto";
@@ -71,6 +97,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../app.js";
+import { GIT_SHA_RE } from "../acquisition-policy.js";
+import { deriveRegistryExecutionId } from "../github-runner.js";
+import { NPM_ACQ_LABEL_ID, npmAcquisitionContainerName } from "../npm-registry-acquisition.js";
 import { ACQ_LABEL_ID, acquisitionContainerName } from "../git-acquisition.js";
 import { EGRESS_PROXY_LABEL, PROBE_SCRIPT } from "../egress-guard.js";
 import { LABEL_EXECUTION, containerNameFor, spawnExecutor } from "../docker-sandbox.js";
@@ -97,10 +126,17 @@ const GIT_IMAGE_RE =
   /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$/;
 const LABEL = "graveyard.manual-github-e2e";
 const PROXY_PORT = "3128";
-const SETUP_MS = 120_000;
-/** Upper bound for the job to reach a terminal state (the acquisition budget is 300 s). */
-const JOB_DEADLINE_MS = 360_000;
 const POLL_MS = 500;
+
+const SUPPORTED_URL_VAR = "GRAVEYARD_GITHUB_E2E_SUPPORTED_URL";
+const SUPPORTED_COMMIT_VAR = "GRAVEYARD_GITHUB_E2E_SUPPORTED_COMMIT";
+/** Supported mode is requested when either variable is set (even empty), so a half-set pair fails closed. */
+const SUPPORTED_REQUESTED = process.env[SUPPORTED_URL_VAR] !== undefined || process.env[SUPPORTED_COMMIT_VAR] !== undefined;
+const SETUP_MS = SUPPORTED_REQUESTED ? 240_000 : 120_000;
+/** Upper bound for the job to reach a terminal state (default mode: the acquisition budget is 300 s). */
+const JOB_DEADLINE_MS = SUPPORTED_REQUESTED ? 720_000 : 360_000;
+const REGISTRY_HOST = "registry.npmjs.org";
+const GITHUB_HOST = "github.com";
 
 class FailClosed extends Error {}
 
@@ -171,7 +207,7 @@ const HARDENING: readonly string[] = [
 ];
 
 const PROXY_SCRIPT = `import { EgressProxy } from "/app/egress-proxy.js";
-const proxy = new EgressProxy({ target: "github.com", bindHost: process.env.GRAVEYARD_PROXY_BIND, port: ${PROXY_PORT}, onEvent: (e) => console.log(JSON.stringify(e)) });
+const proxy = new EgressProxy({ target: process.env.GRAVEYARD_PROXY_TARGET, bindHost: process.env.GRAVEYARD_PROXY_BIND, port: ${PROXY_PORT}, onEvent: (e) => console.log(JSON.stringify(e)) });
 const a = await proxy.start();
 console.log(JSON.stringify({ kind: "listening", host: a.host, port: a.port }));
 for (const s of ["SIGTERM", "SIGINT"]) process.on(s, () => { proxy.close().finally(() => process.exit(0)); });
@@ -182,15 +218,24 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 test(
   "manual GitHub worker end-to-end harness (opt-in: GRAVEYARD_MANUAL_GITHUB_E2E=1; real Docker, real API, real worker, real github.com)",
-  { skip: OPT_IN ? false : "set GRAVEYARD_MANUAL_GITHUB_E2E=1 (use `pnpm run test:github-e2e`) to run against real Docker and github.com", timeout: 600_000 },
+  { skip: OPT_IN ? false : "set GRAVEYARD_MANUAL_GITHUB_E2E=1 (use `pnpm run test:github-e2e`) to run against real Docker and github.com", timeout: SUPPORTED_REQUESTED ? 1_200_000 : 600_000 },
   async () => {
     const runId = randomBytes(6).toString("hex");
-    const names = { net: `graveyard-ghe2e-net-${runId}`, proxy: `graveyard-ghe2e-proxy-${runId}` };
-    const attempted = { net: false, proxy: false };
+    const names = {
+      net: `graveyard-ghe2e-net-${runId}`, proxy: `graveyard-ghe2e-proxy-${runId}`,
+      regNet: `graveyard-ghe2e-regnet-${runId}`, regProxy: `graveyard-ghe2e-regproxy-${runId}`,
+    };
+    const attempted = { net: false, proxy: false, regNet: false, regProxy: false };
     const octetA = 200 + randomInt(40);
     const octetB = randomInt(256);
+    const octetC = (octetB + 1) % 256; // adjacent /24 for the registry network (supported mode only)
     const subnet = `10.${octetA}.${octetB}.0/24`;
     const proxyIp = `10.${octetA}.${octetB}.10`;
+    const regSubnet = `10.${octetA}.${octetC}.0/24`;
+    const regProxyIp = `10.${octetA}.${octetC}.10`;
+    let supported = false;
+    let targetUrl = PINNED_URL;
+    let targetCommit = PINNED_COMMIT;
     const deadline = Date.now() + SETUP_MS;
     const labelArgs = ["--label", `${LABEL}=${runId}`];
     const log: string[] = [];
@@ -223,7 +268,10 @@ test(
 
     const removeOwned = async (): Promise<string[]> => {
       const out: string[] = [];
-      for (const [kind, name, was] of [["container", names.proxy, attempted.proxy], ["network", names.net, attempted.net]] as const) {
+      for (const [kind, name, was] of [
+        ["container", names.proxy, attempted.proxy], ["container", names.regProxy, attempted.regProxy],
+        ["network", names.net, attempted.net], ["network", names.regNet, attempted.regNet],
+      ] as const) {
         if (!was) continue;
         const own = await owned(kind, name);
         if (own === "absent") continue;
@@ -240,6 +288,23 @@ test(
       if (gitImage.length > 255 || !GIT_IMAGE_RE.test(gitImage)) throw new FailClosed("GRAVEYARD_GITHUB_E2E_GIT_IMAGE is not a valid image reference");
       const canonical = validateGithubUrl(PINNED_URL);
       if (!canonical.ok || canonical.url !== PINNED_URL) throw new FailClosed("the pinned URL is not in canonical form");
+
+      // Supported mode: both values are explicit operator input and are validated before Docker is contacted.
+      if (SUPPORTED_REQUESTED) {
+        const u = process.env[SUPPORTED_URL_VAR] ?? "";
+        const c = process.env[SUPPORTED_COMMIT_VAR] ?? "";
+        if (u === "" || c === "") throw new FailClosed(`supported mode needs both ${SUPPORTED_URL_VAR} and ${SUPPORTED_COMMIT_VAR}, non-empty`);
+        const v = validateGithubUrl(u);
+        if (!v.ok || v.url !== u) throw new FailClosed(`${SUPPORTED_URL_VAR} is not a canonical public GitHub repository URL`);
+        if (!GIT_SHA_RE.test(c)) throw new FailClosed(`${SUPPORTED_COMMIT_VAR} is not a full lowercase 40-hex commit SHA`);
+        if (u === PLACEHOLDER_URL) throw new FailClosed(`${SUPPORTED_URL_VAR} must not be the placeholder URL`);
+        supported = true;
+        targetUrl = u;
+        targetCommit = c;
+        log.push(`mode: supported fixture ${targetUrl} @ ${targetCommit}`);
+      } else {
+        log.push("mode: default pinned Hello-World");
+      }
 
       await must("docker daemon check", ["version", "--format", "{{.Server.Version}}"], 15_000).then((r) => log.push(`docker server ${r.stdout.trim()}`));
       for (const img of new Set([PROXY_IMAGE, gitImage, NODE_FIXTURE_IMAGE])) {
@@ -260,37 +325,55 @@ test(
       const appDir = resolve(tmpApp);
       if (/[,"'\r\n]/.test(appDir)) throw new FailClosed("temporary directory path is unusable for a bind mount");
 
-      attempted.net = true;
-      await must("create internal network", ["network", "create", "--driver", "bridge", "--internal", "--subnet", subnet, ...labelArgs, names.net]);
-      const netInfo = JSON.parse((await must("inspect network", ["network", "inspect", names.net])).stdout) as Array<{ Internal?: boolean }>;
-      if (netInfo[0]?.Internal !== true) throw new FailClosed("network is not Internal");
+      const provision = async (p: {
+        host: string; net: string; proxy: string; subnet: string; ip: string; netKey: "net" | "regNet"; proxyKey: "proxy" | "regProxy";
+      }): Promise<void> => {
+        attempted[p.netKey] = true;
+        await must(`create internal network ${p.net}`, ["network", "create", "--driver", "bridge", "--internal", "--subnet", p.subnet, ...labelArgs, p.net]);
+        const netInfo = JSON.parse((await must(`inspect network ${p.net}`, ["network", "inspect", p.net])).stdout) as Array<{ Internal?: boolean }>;
+        if (netInfo[0]?.Internal !== true) throw new FailClosed(`network ${p.net} is not Internal`);
 
-      attempted.proxy = true;
-      await must("create proxy container", [
-        "create", "--name", names.proxy, "--network", names.net, "--ip", proxyIp, ...HARDENING, ...labelArgs,
-        "--label", `${EGRESS_PROXY_LABEL}=github.com`,
-        "--mount", `type=bind,source=${appDir},target=/app,readonly`, "--env", `GRAVEYARD_PROXY_BIND=${proxyIp}`,
-        PROXY_IMAGE, "node", "/app/run.mjs",
-      ]);
-      await must("connect proxy to default bridge (upstream)", ["network", "connect", "bridge", names.proxy]);
-      const pj = JSON.parse((await must("inspect proxy", ["inspect", "--type", "container", names.proxy])).stdout) as Array<{ NetworkSettings?: { Networks?: Record<string, unknown> } }>;
-      const pn = Object.keys(pj[0]?.NetworkSettings?.Networks ?? {}).sort().join();
-      if (pn !== ["bridge", names.net].sort().join()) throw new FailClosed(`proxy networks are [${pn}]`);
-      await must("start proxy", ["start", names.proxy]);
+        attempted[p.proxyKey] = true;
+        await must(`create proxy container ${p.proxy}`, [
+          "create", "--name", p.proxy, "--network", p.net, "--ip", p.ip, ...HARDENING, ...labelArgs,
+          "--label", `${EGRESS_PROXY_LABEL}=${p.host}`,
+          "--mount", `type=bind,source=${appDir},target=/app,readonly`, "--env", `GRAVEYARD_PROXY_BIND=${p.ip}`,
+          "--env", `GRAVEYARD_PROXY_TARGET=${p.host}`,
+          PROXY_IMAGE, "node", "/app/run.mjs",
+        ]);
+        await must(`connect ${p.proxy} to default bridge (upstream)`, ["network", "connect", "bridge", p.proxy]);
+        const pj = JSON.parse((await must(`inspect ${p.proxy}`, ["inspect", "--type", "container", p.proxy])).stdout) as Array<{ NetworkSettings?: { Networks?: Record<string, unknown> } }>;
+        const pn = Object.keys(pj[0]?.NetworkSettings?.Networks ?? {}).sort().join();
+        if (pn !== ["bridge", p.net].sort().join()) throw new FailClosed(`proxy ${p.proxy} networks are [${pn}]`);
+        await must(`start ${p.proxy}`, ["start", p.proxy]);
 
-      let listening = false;
-      for (let i = 0; i < 20 && !listening; i += 1) {
-        const l = await docker(["logs", "--tail", "20", names.proxy], 10_000);
-        listening = (l.stdout + l.stderr).includes('"kind":"listening"');
-        if (!listening) await delay(500);
+        let listening = false;
+        for (let i = 0; i < 20 && !listening; i += 1) {
+          const l = await docker(["logs", "--tail", "20", p.proxy], 10_000);
+          listening = (l.stdout + l.stderr).includes('"kind":"listening"');
+          if (!listening) await delay(500);
+        }
+        if (!listening) throw new FailClosed(`proxy ${p.proxy} did not report listening`);
+      };
+
+      const refuses = async (proxy: string, ip: string, authority: string): Promise<void> => {
+        const probe = await must(`proxy policy probe ${proxy} -> ${authority}`, [
+          "exec", "--env", `GRAVEYARD_PROXY_BIND=${ip}`, "--env", `GRAVEYARD_PROBE_PORT=${PROXY_PORT}`, "--env", `GRAVEYARD_PROBE_AUTHORITY=${authority}`,
+          proxy, "node", "-e", PROBE_SCRIPT,
+        ], 15_000);
+        if (!/^HTTP\/1\.1 403/.test(probe.stdout.trim())) throw new FailClosed(`proxy ${proxy} did not refuse ${authority} (got: ${probe.stdout.trim().slice(0, 80)})`);
+        log.push(`proxy ${proxy} refused CONNECT ${authority} (403)`);
+      };
+
+      await provision({ host: GITHUB_HOST, net: names.net, proxy: names.proxy, subnet, ip: proxyIp, netKey: "net", proxyKey: "proxy" });
+      await refuses(names.proxy, proxyIp, "example.com:443");
+      if (supported) {
+        // Second per-run topology, same helper and same rollback, for registry.npmjs.org only.
+        await provision({ host: REGISTRY_HOST, net: names.regNet, proxy: names.regProxy, subnet: regSubnet, ip: regProxyIp, netKey: "regNet", proxyKey: "regProxy" });
+        await refuses(names.regProxy, regProxyIp, "example.com:443");
+        await refuses(names.proxy, proxyIp, `${REGISTRY_HOST}:443`);
+        await refuses(names.regProxy, regProxyIp, `${GITHUB_HOST}:443`);
       }
-      if (!listening) throw new FailClosed("proxy did not report listening");
-      const probe = await must("proxy policy probe", [
-        "exec", "--env", `GRAVEYARD_PROXY_BIND=${proxyIp}`, "--env", `GRAVEYARD_PROBE_PORT=${PROXY_PORT}`, "--env", "GRAVEYARD_PROBE_AUTHORITY=example.com:443",
-        names.proxy, "node", "-e", PROBE_SCRIPT,
-      ], 15_000);
-      if (!/^HTTP\/1\.1 403/.test(probe.stdout.trim())) throw new FailClosed(`proxy did not refuse example.com (got: ${probe.stdout.trim().slice(0, 80)})`);
-      log.push("proxy refused CONNECT example.com:443 (403)");
 
       // ---- Temporary workspace under backend/.tmp-fixtures only (five separate sibling directories). ----
       parent = ensureOwnedParent(root);
@@ -309,7 +392,7 @@ test(
       });
       const cfgDir = writeFixture(dataDir, "cfg", {
         "catalog.json": JSON.stringify({ [PLACEHOLDER_URL]: PLACEHOLDER_FIXTURE }),
-        "github-pins.json": JSON.stringify({ [PINNED_URL]: PINNED_COMMIT }),
+        "github-pins.json": JSON.stringify({ [targetUrl]: targetCommit }),
       });
       const databasePath = join(dataDir, "ghe2e.sqlite");
       log.push(`temporary workspace: ${dirs.join(", ")}`);
@@ -337,6 +420,13 @@ test(
           GRAVEYARD_GITHUB_EGRESS_NETWORK: names.net,
           GRAVEYARD_GITHUB_EGRESS_PROXY_CONTAINER: names.proxy,
           GRAVEYARD_GITHUB_EGRESS_PROXY_URL: `http://${proxyIp}:${PROXY_PORT}`,
+          ...(supported
+            ? {
+                GRAVEYARD_REGISTRY_EGRESS_NETWORK: names.regNet,
+                GRAVEYARD_REGISTRY_EGRESS_PROXY_CONTAINER: names.regProxy,
+                GRAVEYARD_REGISTRY_EGRESS_PROXY_URL: `http://${regProxyIp}:${PROXY_PORT}`,
+              }
+            : {}),
           GRAVEYARD_WORKER_ID: `ghe2e-${randomBytes(3).toString("hex")}`,
           GRAVEYARD_WORKER_POLL_MS: "250",
           GRAVEYARD_WORKER_AGENTS: "off",
@@ -348,13 +438,20 @@ test(
       const gh = worker.composed.config.github;
       if (worker.composed.config.agents !== "off") throw new FailClosed("agents must be off in this harness");
       if (gh === null || gh === undefined) throw new FailClosed("worker started without the GitHub flow");
-      if (gh.registryEgress !== null) throw new FailClosed("registry egress must not be configured in this harness");
+      if (supported) {
+        const re = gh.registryEgress;
+        if (re === null || re === undefined || re.network !== names.regNet || re.proxyContainer !== names.regProxy || re.proxyUrl !== `http://${regProxyIp}:${PROXY_PORT}`) {
+          throw new FailClosed("registry egress is not configured exactly as provisioned");
+        }
+      } else if (gh.registryEgress !== null) {
+        throw new FailClosed("registry egress must not be configured in the default mode");
+      }
       const pinKeys = Object.keys(gh.pins);
-      if (pinKeys.length !== 1 || gh.pins[PINNED_URL] !== PINNED_COMMIT) throw new FailClosed("the worker's pin catalog is not exactly the one expected pin");
-      log.push("worker started (real GithubJobRunner and OperatorEgressGuard, real Docker executor, agents off, no registry egress)");
+      if (pinKeys.length !== 1 || gh.pins[targetUrl] !== targetCommit) throw new FailClosed("the worker's pin catalog is not exactly the one expected pin");
+      log.push(`worker started (real GithubJobRunner and OperatorEgressGuard, real Docker executor, agents off, ${supported ? "registry egress configured" : "no registry egress"})`);
 
       // ---- Authorized job creation. ----
-      const created = await httpCall(port, "POST", "/api/jobs", {}, JSON.stringify({ repoUrl: PINNED_URL, consent: true }));
+      const created = await httpCall(port, "POST", "/api/jobs", {}, JSON.stringify({ repoUrl: targetUrl, consent: true }));
       if (created.status !== 202) throw new FailClosed(`job creation returned ${String(created.status)}`);
       const createdBody = JSON.parse(created.body) as { jobId?: unknown; token?: unknown };
       if (typeof createdBody.jobId !== "string" || typeof createdBody.token !== "string" || !/^[0-9a-f]{64}$/.test(createdBody.token)) {
@@ -362,7 +459,7 @@ test(
       }
       jobId = createdBody.jobId;
       token = createdBody.token;
-      log.push(`job ${jobId} created for the pinned URL (token withheld from output)`);
+      log.push(`job ${jobId} created for the ${supported ? "supplied" : "pinned"} URL (token withheld from output)`);
 
       const resultPath = `/api/jobs/${jobId}/result`;
       const noAuth = await httpCall(port, "GET", resultPath, {});
@@ -393,7 +490,8 @@ test(
         log.push(`terminal: status=${view.status} stage=${view.stage} outcome=${view.outcome}`);
         if (view.status !== "completed") problems.push(`status ${view.status}, expected completed`);
         if (view.stage !== "done") problems.push(`stage ${view.stage}, expected done`);
-        if (view.outcome !== "unsupported-repository") problems.push(`outcome ${view.outcome}, expected unsupported-repository`);
+        const expectedOutcome = supported ? "passing" : "unsupported-repository";
+        if (view.outcome !== expectedOutcome) problems.push(`outcome ${view.outcome}, expected ${expectedOutcome}`);
         if (view.repair.verified !== false || view.repair.patchApplied !== false) problems.push("repair.verified or repair.patchApplied is not false");
         if (view.repair.patchProposed !== false || view.repair.diagnosed !== false) problems.push("a patch proposal or diagnosis is present, expected none");
         if (view.infrastructure !== null) {
@@ -402,6 +500,41 @@ test(
         const res = view.result;
         if (res === null) {
           problems.push("no stored result");
+        } else if (supported) {
+          // The fixture is run unmodified: nothing here edits, patches or substitutes any repository file.
+          if (res["verdict"] !== "verified") problems.push(`stored result verdict is ${String(res["verdict"])}, expected verified`);
+          if (res["sourceKind"] !== "github-pinned") problems.push("stored result sourceKind is not github-pinned");
+          const src = res["source"];
+          if (!isObj(src) || src["repoUrl"] !== targetUrl || src["commit"] !== targetCommit) problems.push("stored result source is not the supplied URL and commit");
+          const pipe = res["pipeline"];
+          if (!isObj(pipe)) {
+            problems.push("stored result has no pipeline record");
+          } else {
+            if (pipe["status"] !== "passed") problems.push(`pipeline status ${String(pipe["status"])}, expected passed`);
+            if (pipe["failedStage"] !== null) problems.push(`pipeline failedStage ${String(pipe["failedStage"])}, expected null`);
+            if (pipe["packagesAdded"] !== 1 || pipe["expectedPackages"] !== 1) {
+              problems.push(`pipeline packages added/expected ${String(pipe["packagesAdded"])}/${String(pipe["expectedPackages"])}, expected 1/1 (one is-number@7.0.0 lock)`);
+            }
+            const stages = Array.isArray(pipe["stages"]) ? pipe["stages"] : [];
+            for (const name of ["install", "build", "test"]) {
+              const s = stages.find((x) => isObj(x) && x["stage"] === name);
+              if (!isObj(s) || s["status"] !== "passed") problems.push(`pipeline stage ${name} is not passed (${isObj(s) ? String(s["status"]) : "missing"})`);
+            }
+            log.push(`pipeline: ${String(pipe["status"])} stages=[${stages.map((x) => (isObj(x) ? `${String(x["stage"])}:${String(x["status"])}` : "?")).join(",")}]`);
+          }
+          const tester = res["tester"];
+          if (!isObj(tester) || tester["status"] !== "passed" || tester["reason"] !== "all-stages-passed") {
+            problems.push("Tester report is not passed/all-stages-passed");
+          } else {
+            for (const name of ["build", "test"]) {
+              const t = tester[name];
+              if (!isObj(t) || t["status"] !== "passed") problems.push(`Tester ${name} stage is not passed`);
+            }
+          }
+          const analyst = res["analyst"];
+          const fixer = res["fixer"];
+          if (!isObj(analyst) || analyst["status"] !== "not-configured") problems.push("analyst is not not-configured (agents must be off)");
+          if (!isObj(fixer) || fixer["status"] !== "not-configured") problems.push("fixer is not not-configured (agents must be off)");
         } else {
           if (res["verdict"] !== "unsupported-repository") problems.push("stored result verdict is not unsupported-repository");
           if (res["sourceKind"] !== "github-pinned") problems.push("stored result sourceKind is not github-pinned");
@@ -441,6 +574,18 @@ test(
             ["sandbox label", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_EXECUTION}=${id}`]],
             ["sandbox name", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `name=${containerNameFor(id)}`]],
           ];
+          if (supported) {
+            // Registry acquisition runs under the derived id `<uuid>-npm:<n>`, which has its own labels and names.
+            const regId = deriveRegistryExecutionId(id);
+            if (regId === null) {
+              problems.push(`could not derive the registry execution id for ${id}; registry containers were not queried`);
+            } else {
+              queries.push(
+                ["registry acquisition label", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${NPM_ACQ_LABEL_ID}=${regId}`]],
+                ["registry acquisition name", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `name=${npmAcquisitionContainerName(regId)}`]],
+              );
+            }
+          }
           for (const [what, args] of queries) {
             const q = await docker(args);
             if (!q.ok) { problems.push(`could not query leftover containers (${what}) for attempt ${String(attempt)}`); continue; }
@@ -453,7 +598,7 @@ test(
             }
           }
         }
-        log.push("independent docker ps: queried leftover acquisition and sandbox containers for this job's execution ids");
+        log.push(`independent docker ps: queried leftover acquisition${supported ? ", registry acquisition" : ""} and sandbox containers for this job's execution ids`);
       }
       if (token !== undefined && workerLog.some((l) => l.includes(token as string))) problems.push("the worker log contains the job token");
       try { problems.push(...(await removeOwned())); } catch (e) { problems.push(`cleanup threw: ${e instanceof Error ? e.message : String(e)}`); }

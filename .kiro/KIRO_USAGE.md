@@ -257,3 +257,16 @@ Kiro read the worker composition and config, `pipeline-runner.ts`, `git-acquisit
 ## 2026-11-15: GitHub flow end-to-end harness and stale-status fix (source and docs only, no shell)
 
 Kiro read `manual-clone-check.ts` (topology and cleanup pattern), `manual-worker-e2e-check.ts` (API plus worker plus result polling), `worker-config.ts`, `worker-compose.ts`, `egress-guard.ts`, `github-runner.ts`, `github-source.ts`, `github-analysis.ts`, `result-view.ts`, `fixture-workspace.ts` and the proxy options. It then wrote `backend/src/test/manual-github-e2e-check.ts`, `backend/github-e2e.env` and the `test:github-e2e` script, corrected the stale "not compiled or run" wording of the GitHub flow in `backend/DEVELOPMENT.md`, `backend/README.md`, `.kiro/PROJECT.md`, this file, the steering files and the header comments of five GitHub-flow modules, and added the harness record to `backend/DEVELOPMENT.md` and `.kiro/PROJECT.md`. The shell was unavailable and the harness was told not to be run: **the harness was not compiled and not run, and no result exists.** The corrected status (compiled and unit-tested, no real run) rests on the user's report of an external run, not on anything Kiro observed.
+
+
+### Supported public fixture mode for the GitHub e2e harness (2026-11-16, NOT compiled or run)
+
+One bounded request, no shell and no git. Kiro extended `backend/src/test/manual-github-e2e-check.ts` with an opt-in supported mode, enabled by `GRAVEYARD_GITHUB_E2E_SUPPORTED_URL` and `GRAVEYARD_GITHUB_E2E_SUPPORTED_COMMIT` (both required, canonical URL and full SHA validated before Docker is contacted). Without them the default pinned Hello-World mode is unchanged. Changes:
+
+- The proxy creation code became one `provision` helper, reused for a second per-run `--internal` network and a registry.npmjs.org-only proxy container. The proxy script now reads its target from an environment variable. The existing label-checked rollback covers both proxies and both networks.
+- The real worker gets the `GRAVEYARD_REGISTRY_EGRESS_*` variables. The pin catalog holds only the supplied URL and commit. Agents stay `off`.
+- Assertions: completed, done, outcome `passing`, verdict `verified`, `github-pinned` source with the supplied URL and commit, pipeline passed with install, build and test stages passed and one package added, Tester passed, Analyst and Fixer not configured, `repair.verified` and `repair.patchApplied` false, 401 and 403 auth checks, `no-store`, no token leak.
+- Cleanup also queries registry acquisition containers by label and name for the derived execution ids (`deriveRegistryExecutionId`).
+- `backend/README.md` documents both modes and the required root files (an is-number@7.0.0 lock, `build.mjs`, `test.mjs`).
+
+No production policy changed, no dependency was added and nothing was published. Not compiled and not run: every behavior above is unverified until an operator runs `tsc -p tsconfig.test.json` and `pnpm run test:github-e2e` (with the variables set) and logs the output in `.kiro/PROJECT.md` and `backend/DEVELOPMENT.md`.
