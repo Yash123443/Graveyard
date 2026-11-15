@@ -194,8 +194,15 @@ export interface ValidEgress {
   evidence: string;
 }
 
-/** Structural checks on an attestation. Does not and cannot prove the proxy enforces anything. */
-export function validateEgressAttestation(a: unknown): Validated<ValidEgress> {
+/**
+ * Structural checks on an attestation. Does not and cannot prove the proxy enforces anything.
+ * `allowedHosts` is what the attestation must list, exactly. It defaults to github.com so the git
+ * acquisition behaves as before; the npm registry acquisition passes `["registry.npmjs.org"]`.
+ */
+export function validateEgressAttestation(
+  a: unknown,
+  expectedHosts: readonly string[] = ALLOWED_EGRESS_HOSTS,
+): Validated<ValidEgress> {
   if (typeof a !== "object" || a === null) return { ok: false, reason: "egress attestation missing" };
   const r = a as Record<string, unknown>;
   if (r["verified"] !== true) {
@@ -216,10 +223,10 @@ export function validateEgressAttestation(a: unknown): Validated<ValidEgress> {
   const hosts = r["allowedHosts"];
   if (
     !Array.isArray(hosts) ||
-    hosts.length !== ALLOWED_EGRESS_HOSTS.length ||
-    !hosts.every((h, i) => h === ALLOWED_EGRESS_HOSTS[i])
+    hosts.length !== expectedHosts.length ||
+    !hosts.every((h, i) => h === expectedHosts[i])
   ) {
-    return { ok: false, reason: "egress allowlist must be exactly github.com" };
+    return { ok: false, reason: `egress allowlist must be exactly ${expectedHosts.join(", ")}` };
   }
   const evidence = r["evidence"];
   if (typeof evidence !== "string" || evidence.trim() === "") {

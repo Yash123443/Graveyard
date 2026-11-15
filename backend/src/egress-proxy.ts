@@ -13,7 +13,9 @@
  *  - Written without running anything. Not production ready, not a security
  *    review.
  *
- * What the core does:
+ * What the core does (shown for the default target `github.com`; the optional `target` option
+ * selects exactly one other host from the closed set EGRESS_TARGET_HOSTS, currently
+ * `registry.npmjs.org`, and then every rule below applies to that host instead, unchanged):
  *  - Binds only to a configured private or loopback IP literal. There is no
  *    default bind address. 0.0.0.0, ::, public addresses and host names are
  *    refused.
@@ -59,12 +61,28 @@ import { ALLOWED_EGRESS_HOSTS, type Validated } from "./acquisition-policy.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const TARGET_HOST = "github.com";
+/**
+ * The complete, closed set of hosts any proxy instance may be configured for. One instance tunnels
+ * to exactly ONE of them (never a list, never a pattern, never a caller-supplied name). The default
+ * is github.com, so existing callers behave exactly as before. `registry.npmjs.org` serves the
+ * controlled npm registry acquisition (npm-registry-acquisition.ts).
+ */
+export const EGRESS_TARGET_HOSTS = Object.freeze(["github.com", "registry.npmjs.org"] as const);
+export type EgressTargetHost = (typeof EGRESS_TARGET_HOSTS)[number];
+
+const TARGET_HOST: EgressTargetHost = "github.com";
 const TARGET_PORT = 443;
-const TARGET_AUTHORITY = `${TARGET_HOST}:${TARGET_PORT}`;
+const authorityFor = (host: EgressTargetHost): string => `${host}:${TARGET_PORT}`;
 
 if (ALLOWED_EGRESS_HOSTS.length !== 1 || ALLOWED_EGRESS_HOSTS[0] !== TARGET_HOST) {
-  throw new Error("egress-proxy target must match ALLOWED_EGRESS_HOSTS");
+  throw new Error("egress-proxy default target must match ALLOWED_EGRESS_HOSTS");
+}
+
+/** `undefined` selects the github.com default. Anything outside the closed set throws. */
+export function checkEgressTarget(target: unknown): EgressTargetHost {
+  if (target === undefined) return TARGET_HOST;
+  for (const h of EGRESS_TARGET_HOSTS) if (h === target) return h;
+  throw new Error("unsupported egress target host");
 }
 
 /**
@@ -74,7 +92,7 @@ if (ALLOWED_EGRESS_HOSTS.length !== 1 || ALLOWED_EGRESS_HOSTS[0] !== TARGET_HOST
  * captures the raw bytes before the parser sees them and compares them to
  * this string.
  */
-const EXPECTED_REQUEST_LINE = `CONNECT ${TARGET_AUTHORITY} HTTP/1.1`;
+const requestLineFor = (host: EgressTargetHost): string => `CONNECT ${authorityFor(host)} HTTP/1.1`;
 
 const MIB = 1024 * 1024;
 
@@ -268,9 +286,9 @@ export type AuthorityVerdict =
   | { ok: true }
   | { ok: false; status: 400 | 403; code: "malformed-authority" | "authority-not-allowed" };
 
-/** The CONNECT target must be exactly `github.com:443`. Nothing else passes. */
-export function validateConnectAuthority(raw: unknown): AuthorityVerdict {
-  if (raw === TARGET_AUTHORITY) return { ok: true };
+/** The CONNECT target must be exactly `<target>:443` (default `github.com:443`). Nothing else passes. */
+export function validateConnectAuthority(raw: unknown, target: EgressTargetHost = TARGET_HOST): AuthorityVerdict {
+  if (raw === authorityFor(target)) return { ok: true };
   if (typeof raw === "string" && WELL_FORMED_AUTHORITY_RE.test(raw)) {
     return { ok: false, status: 403, code: "authority-not-allowed" };
   }
@@ -296,12 +314,16 @@ export interface ConnectRequestView {
 
 export type RequestVerdict = { ok: true } | { ok: false; status: number; code: string };
 
-export function validateConnectRequest(view: ConnectRequestView, limits: { maxHeaders: number }): RequestVerdict {
+export function validateConnectRequest(
+  view: ConnectRequestView,
+  limits: { maxHeaders: number },
+  target: EgressTargetHost = TARGET_HOST,
+): RequestVerdict {
   if (view.method !== "CONNECT") return { ok: false, status: 405, code: "method-not-allowed" };
   if (view.httpVersion !== "1.1") return { ok: false, status: 400, code: "http-version" };
-  const auth = validateConnectAuthority(view.url);
+  const auth = validateConnectAuthority(view.url, target);
   if (!auth.ok) return { ok: false, status: auth.status, code: auth.code };
-  if (view.rawRequestLine !== undefined && view.rawRequestLine !== EXPECTED_REQUEST_LINE) {
+  if (view.rawRequestLine !== undefined && view.rawRequestLine !== requestLineFor(target)) {
     return { ok: false, status: 400, code: "request-line" };
   }
   if (view.rawHeaders.length % 2 !== 0 || view.rawHeaders.length / 2 > limits.maxHeaders) {
@@ -320,7 +342,7 @@ export function validateConnectRequest(view: ConnectRequestView, limits: { maxHe
     if (FORBIDDEN_HEADERS.has(lower)) return { ok: false, status: 400, code: "forbidden-header" };
     if (lower === "host") {
       hosts += 1;
-      if (hosts > 1 || value !== TARGET_AUTHORITY) return { ok: false, status: 400, code: "host-mismatch" };
+      if (hosts > 1 || value !== authorityFor(target)) return { ok: false, status: 400, code: "host-mismatch" };
     }
   }
   if (view.headBytes > 0) return { ok: false, status: 400, code: "early-data" };
@@ -333,13 +355,13 @@ export function validateConnectRequest(view: ConnectRequestView, limits: { maxHe
 
 /** What the connector receives: an IP literal that already passed validation. Never a name to resolve. */
 export interface PinnedTarget {
-  readonly hostname: typeof TARGET_HOST;
+  readonly hostname: EgressTargetHost;
   readonly address: string;
   readonly family: 4 | 6;
   readonly port: typeof TARGET_PORT;
 }
 
-/** Resolves `hostname` (always "github.com") to IP literals. Must honour `signal`. */
+/** Resolves `hostname` (always the configured target) to IP literals. Must honour `signal`. */
 export type EgressResolver = (hostname: string, signal: AbortSignal) => Promise<readonly string[]>;
 
 /** Opens a raw byte stream to exactly the pinned IP. Must not resolve names and must honour `signal`. */
@@ -402,6 +424,11 @@ export function checkEgressProxyLimits(partial?: Partial<EgressProxyLimits>): Eg
 }
 
 export interface EgressProxyOptions {
+  /**
+   * The single host this instance tunnels to. Default `github.com`. Must be one of
+   * EGRESS_TARGET_HOSTS; anything else makes the constructor throw. Port is always 443.
+   */
+  target?: EgressTargetHost;
   /** Private or loopback IP literal. No default: the proxy never picks an interface for you. */
   bindHost: string;
   /** 0 selects an ephemeral port. */
@@ -462,6 +489,7 @@ interface Tunnel {
 }
 
 export class EgressProxy {
+  private readonly target: EgressTargetHost;
   private readonly bindHost: string;
   private readonly port: number;
   private readonly limits: EgressProxyLimits;
@@ -479,6 +507,7 @@ export class EgressProxy {
   private closing = false;
 
   constructor(opts: EgressProxyOptions) {
+    this.target = checkEgressTarget(opts?.target);
     const bind = validateBindHost(opts?.bindHost);
     if (!bind.ok) throw new Error(bind.reason);
     this.bindHost = bind.value;
@@ -706,6 +735,7 @@ export class EgressProxy {
         rawRequestLine: this.requestLines.get(socket) ?? null,
       },
       { maxHeaders: this.limits.maxHeaders },
+      this.target,
     );
     if (!verdict.ok) {
       this.rejectSocket(socket, verdict.status, verdict.code);
@@ -741,7 +771,7 @@ export class EgressProxy {
       let answers: readonly string[];
       try {
         answers = await this.bounded(this.limits.resolveTimeoutMs, life.signal, (sig) =>
-          this.resolver(TARGET_HOST, sig),
+          this.resolver(this.target, sig),
         );
       } catch (e) {
         this.failStage(socket, e, "dns-failed", "dns-timeout");
@@ -777,7 +807,7 @@ export class EgressProxy {
         return;
       }
       const target: PinnedTarget = Object.freeze({
-        hostname: TARGET_HOST,
+        hostname: this.target,
         address: pin.address,
         family: pin.family,
         port: TARGET_PORT,

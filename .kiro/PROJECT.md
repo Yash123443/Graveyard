@@ -240,3 +240,37 @@ Docs-only update; Kiro ran no commands and changed no source (no shell). Recorde
 Authorship: Kiro wrote the source; an external assistant reviewed and ran the tests.
 
 Limits: controlled generated fixtures only. No live jobs, no repository acquisition integration, no registry download (the cache was prepopulated outside the sandbox), no runtime agents. Not wired to the server, worker or jobs. Not production safe and not evidence for arbitrary repositories.
+
+
+
+
+## 2026-11-15: controlled npm registry acquisition (written by Kiro, NOT compiled or run)
+
+Kiro made file edits only (no shell, no dependency or frontend changes). Nothing is wired to the server, worker or any job, and default egress stays unavailable (`UnavailableEgressGuard` never attests).
+
+Added a registry-only variant of the CONNECT proxy (`egress-proxy.ts` option `target: "registry.npmjs.org"`, same rules as the GitHub proxy; GitHub behaviour unchanged), an acquisition class for the single fixed fixture `is-number@7.0.0` (`npm-registry-acquisition.ts`: requires an injected attestation, an `Internal` Docker network whose subnet holds the proxy, isolation read back from `docker inspect` before start, proven cleanup before the output is trusted), an in-container driver (`npm-acquire-driver.ts`: `npm ci --ignore-scripts --no-audit --no-fund` through the proxy), a verified cache handoff (`npm-registry-cache.ts`: no mount, no tar; exact cacache paths, content hashes equal to their paths and to the lockfile integrity, bounded, host-written, lstat-audited, re-read), a composition with the existing network-none pipeline (`registry-pipeline.ts`), mock tests and the opt-in harness `manual-registry-acquisition-check.ts` (`GRAVEYARD_MANUAL_REGISTRY_ACQUISITION=1`).
+
+Status: UNVERIFIED. Pending external `tsc` (both configs), the full suite and the opt-in run. The pinned is-number integrity was written from memory and must be confirmed with `npm view is-number@7.0.0 dist.integrity`. Assumptions about npm's proxy flags, the CONNECT headers it sends, its `added N packages` line and its cache layout are unobserved and fail closed. Details, limits and the run command are in `backend/DEVELOPMENT.md`. Not covered even if it passes: arbitrary repositories, a production egress guard, worker or job wiring.
+
+
+
+
+## 2026-11-15: controlled npm registry acquisition (externally verified, narrow)
+
+Docs-only update; Kiro ran no commands and changed no source (no shell). Recorded from the user's external checks. This supersedes the "written by Kiro, NOT compiled or run" and "UNVERIFIED" status of the registry acquisition section above, which is left as history. Earlier "pending" notes for it are superseded, including the unconfirmed pinned-integrity note.
+
+- Test `tsc` passed. Focused registry and GitHub proxy tests passed, and the full backend suite passed (counts not supplied to Kiro).
+- `npm view is-number@7.0.0` confirmed the pinned sha512 integrity.
+- Real Docker 29.9.2 with `node:22-alpine`, through the opt-in registry integration:
+  - the default guard refused (never attests);
+  - the isolated client could not reach 1.1.1.1 or 8.8.8.8 directly;
+  - the proxy rejected github.com, example.com, private addresses, the metadata endpoint and a wrong port;
+  - the proxy permitted registry.npmjs.org on port 443;
+  - the fixed `is-number@7` fetch passed its integrity check;
+  - 2 cache files (4404 bytes) were handed off;
+  - offline install, build and test then passed on that cache;
+  - all labelled containers, the network and temp directories were confirmed cleaned up.
+
+Authorship: Kiro wrote the source; an external assistant reviewed and ran the tests.
+
+Limits: one controlled fixture (`is-number@7.0.0`) on this machine. It does not show behavior for arbitrary repositories or general production isolation. No production `EgressGuard` exists, and nothing is wired to the server, worker or jobs. The default guard still never attests, so acquisition stays disabled in the product.

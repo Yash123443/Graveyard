@@ -720,3 +720,73 @@ Authorship: Kiro wrote the source; an external assistant reviewed and tested it.
 1. Controlled registry-only dependency acquisition design (no unrestricted egress).
 2. Integrate acquisition handoff with the pipeline.
 3. Worker integration.
+
+
+
+
+## 2026-11-15: controlled npm registry acquisition (written by Kiro, NOT compiled or run)
+
+Kiro made file edits only: no shell, no dependency or frontend changes, nothing wired to the server, worker or any job. Goal: a real-Docker, opt-in path for the single fixed public fixture `is-number@7.0.0` (not arbitrary repositories), from registry download to the existing network-none build/test.
+
+Written:
+- `backend/src/egress-proxy.ts`: new optional `target` (closed set `github.com` default, `registry.npmjs.org`). The registry proxy applies exactly the GitHub proxy's rules to its one host: CONNECT only, exact `registry.npmjs.org:443`, exact request line and Host header, no credentials, IPv4-only resolution with every answer required public (private, link-local, metadata, loopback and mixed v4/v6 sets are refused), one pinned IP. GitHub behaviour and its tests are unchanged; the two now share one implementation.
+- `backend/src/acquisition-policy.ts`: `validateEgressAttestation` takes an expected host list (default still `github.com`).
+- `backend/src/npm-acquire-driver.ts`, `npm-registry-cache.ts`, `npm-registry-acquisition.ts`, `registry-pipeline.ts`: the acquisition container, the verified cache handoff, the host class and the composition with `ControlledPipeline`.
+- Tests: `npm-registry-cache.test.ts`, `npm-acquire-driver.test.ts`, `npm-registry-acquisition.test.ts`, `registry-pipeline.test.ts`, and registry-target cases appended to `egress-proxy.test.ts`; opt-in harness `src/test/manual-registry-acquisition-check.ts`.
+
+Design, in order:
+1. The acquisition class never attests. It needs an injected `EgressGuard`; the default `UnavailableEgressGuard` never attests, so by default no container is created. The attestation must list exactly `registry.npmjs.org`, a dedicated network, and an `http://<private IPv4>:<port>` proxy.
+2. `docker network inspect` must show that network as `Internal`, a bridge, IPv4-only, with the proxy address inside its subnet and not the gateway.
+3. The container is on that network only (never the default bridge), non-root, all capabilities dropped, read-only root, bounded tmpfs/memory/pids/time/output, `--pull never`, no published ports, no extra mount besides the read-only staged directory, no credential or host environment variable. Isolation is read back from `docker inspect` before start (network, attachments, env, mounts, tmpfs, limits, labels).
+4. The only command is the compiled driver: `npm ci --ignore-scripts --no-audit --no-fund` with the registry pinned to `https://registry.npmjs.org/`, the proxy on the command line, `strict-ssl=true`, two distinct empty npm configs, and the cache on a tmpfs.
+5. Handoff: the container prints the cache files (base64, one JSON line). It never writes to a host mount. After container cleanup and staging removal are proven, the host parses strictly, requires npm's `added 1 package`, and verifies the cache: exact cacache paths only, SHA-512 of each content file equals its path, the tarball is present under exactly the hash the lockfile names, index lines carry their SHA-1 and bucket path equals SHA-256 of the key, keys limited to the expected registry URLs, no unreferenced or dangling entries, bounded counts and bytes. The host writes the files itself into a new directory (confined sink, exclusive create), audits it with lstat (no symlinks) and re-reads every file. A link cannot be handed over because the format cannot express one.
+6. The existing `ControlledPipeline` (network `none`) then mounts that directory read-only and runs `npm ci --offline`, build and test. Overall success needs acquisition `acquired` and pipeline `success`.
+
+If any step cannot be satisfied the result is a refusal (`network-unavailable`, `isolation-violation`, `install-failed`, `protocol-error`, `summary-mismatch`, `handoff-rejected`, `cleanup-unconfirmed`, ...). None of them is a verdict on the package.
+
+Status: UNVERIFIED. Nothing was compiled or run. Unobserved assumptions that fail closed if wrong: npm's `--proxy/--https-proxy` behaviour and the `CONNECT` headers it sends (the strict proxy requires `Host: registry.npmjs.org:443`); npm's `added N packages in T` line; the cacache layout and index-line format assumed by the verifier; `npm ci` working with a tmpfs cache; node and npm on a noexec tmpfs as uid 65532; Docker Desktop reporting bind sources in host form. The `integrity` constant for `is-number@7.0.0` in `npm-registry-acquisition.ts` was written from memory (web access was unavailable); confirm it with `npm view is-number@7.0.0 dist.integrity`. A wrong value cannot make a run succeed.
+
+What a future pass would and would not show: it would show that this fixed fixture was fetched through a registry-only proxy on an internal network during that run and built offline from a host-verified cache. It would not show that `--internal` blocks every escape path, that the proxy is safe on other hosts, anything about other packages or repositories, or that install scripts are sandbox-proof (they are disabled by flag and absent from the fixed lock).
+
+Pending external: `pnpm exec tsc -p tsconfig.json`, `pnpm exec tsc -p tsconfig.test.json`, the full suite (existing GitHub proxy tests must still pass), then the opt-in run:
+```
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_REGISTRY_ACQUISITION = "1"
+node --test dist-test/test/manual-registry-acquisition-check.js
+```
+It needs local `node:22-alpine` only. Record the output here and in `.kiro/PROJECT.md`.
+
+What remains after this milestone, even if everything passes: acquisition of arbitrary repositories (git source plus lockfile resolution plus install in one flow), a real production `EgressGuard` (the harness issues a per-run attestation only for its own test), worker and job wiring, results and patch endpoints, real agents.
+
+
+
+
+## 2026-11-15: controlled npm registry acquisition: external verification (docs only)
+
+Kiro ran no commands and changed no source (no shell). Recorded from the user's external checks. This supersedes the "written by Kiro, NOT compiled or run" section above, which is left as history. Its pending items are resolved as below, including the pinned integrity, which was written from memory and is now confirmed.
+
+Results:
+- Test `tsc` passed.
+- Focused registry and GitHub proxy tests passed.
+- The full backend suite passed (counts not supplied to Kiro).
+- `npm view is-number@7.0.0` confirmed the pinned sha512 integrity.
+- Real Docker 29.9.2 with `node:22-alpine`, opt-in registry integration:
+  - the default guard refused (never attests);
+  - the isolated client could not reach 1.1.1.1 or 8.8.8.8 directly;
+  - the proxy rejected github.com, example.com, private addresses, the metadata endpoint and a wrong port;
+  - the proxy permitted registry.npmjs.org on port 443;
+  - the fixed `is-number@7` fetch passed its integrity check;
+  - 2 cache files (4404 bytes) were handed off;
+  - offline install, build and test passed on the handed-off cache;
+  - all labelled containers, the network and temp directories were confirmed cleaned up.
+
+This resolves the earlier assumptions about npm's proxy flags, CONNECT headers and cache layout for this one fixture on this machine.
+
+Authorship: Kiro wrote the source; an external assistant reviewed and ran the tests.
+
+Limits:
+- Controlled fixture only, on this machine. Not evidence for arbitrary repositories or general production isolation.
+- No production `EgressGuard`. The default guard never attests, so acquisition stays disabled in the product.
+- No worker integration. Nothing is wired to the server, `JobWorker`, `JobRunner` or any job. No real agents.
+
+Next: a production `EgressGuard` design, then worker integration.

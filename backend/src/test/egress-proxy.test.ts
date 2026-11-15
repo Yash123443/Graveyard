@@ -15,6 +15,7 @@ import type { Duplex } from "node:stream";
 import {
   EgressProxy,
   checkEgressProxyLimits,
+  checkEgressTarget,
   classifyIp,
   validateBindHost,
   validateConnectAuthority,
@@ -22,6 +23,7 @@ import {
   type EgressConnector,
   type EgressProxyLimits,
   type EgressResolver,
+  type EgressTargetHost,
   type PinnedTarget,
   type ProxyEvent,
 } from "../egress-proxy.js";
@@ -51,7 +53,7 @@ afterEach(async () => {
 });
 
 async function harness(
-  over: { resolver?: EgressResolver; connector?: EgressConnector; limits?: Partial<EgressProxyLimits>; upstream?: (s: net.Socket) => void } = {},
+  over: { resolver?: EgressResolver; connector?: EgressConnector; limits?: Partial<EgressProxyLimits>; upstream?: (s: net.Socket) => void; target?: EgressTargetHost } = {},
 ): Promise<Harness> {
   const upstreamReceived: Buffer[] = [];
   const upstreamSockets = new Set<net.Socket>();
@@ -86,6 +88,7 @@ async function harness(
   const proxy = new EgressProxy({
     bindHost: "127.0.0.1",
     port: 0,
+    ...(over.target === undefined ? {} : { target: over.target }),
     limits: over.limits ?? {},
     resolver: (h, sig) => {
       resolverCalls.n += 1;
@@ -953,5 +956,186 @@ describe("EgressProxy shutdown", () => {
     await sleep(100);
     assert.equal(late === undefined || late.destroyed, true);
     assert.equal(await closedWithin(s, 1000), true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// registry.npmjs.org target (same rules as github.com, one host per instance)
+// Written without being run. Fake resolver, connector and upstream only.
+// ---------------------------------------------------------------------------
+
+const REG = "registry.npmjs.org";
+const REG_OK = `CONNECT ${REG}:443 HTTP/1.1\r\nHost: ${REG}:443\r\n\r\n`;
+
+describe("registry target: pure checks", () => {
+  it("checkEgressTarget accepts only the closed set and defaults to github.com", () => {
+    assert.equal(checkEgressTarget(undefined), "github.com");
+    assert.equal(checkEgressTarget("github.com"), "github.com");
+    assert.equal(checkEgressTarget(REG), REG);
+    for (const t of ["example.com", "GitHub.com", "registry.npmjs.org:443", "*.npmjs.org", "", null, 5, {}, ["github.com"]]) {
+      assert.throws(() => checkEgressTarget(t), Error, JSON.stringify(t));
+    }
+  });
+
+  it("the registry target accepts exactly registry.npmjs.org:443", () => {
+    assert.equal(validateConnectAuthority(`${REG}:443`, REG).ok, true);
+    const bad = [
+      "github.com:443", `${REG}`, `${REG}:80`, `${REG}:8443`, `${REG}:0443`, `${REG}:443 `, ` ${REG}:443`,
+      `REGISTRY.NPMJS.ORG:443`, `${REG}.:443`, `evil${REG}:443`, `${REG}.evil.com:443`, `user@${REG}:443`,
+      `npmjs.org:443`, `www.npmjs.org:443`, `registry.npmjs.com:443`, "127.0.0.1:443", "169.254.169.254:80", "[::1]:443", "",
+      undefined, null, 443,
+    ];
+    for (const a of bad) assert.equal(validateConnectAuthority(a, REG).ok, false, JSON.stringify(a));
+  });
+
+  it("each target rejects the other's authority", () => {
+    assert.equal(validateConnectAuthority(`${REG}:443`).ok, false);
+    assert.equal(validateConnectAuthority("github.com:443", REG).ok, false);
+    const a = validateConnectAuthority("github.com:443", REG);
+    assert.ok(!a.ok && a.status === 403);
+  });
+
+  it("the request line and Host header are checked against the chosen target", () => {
+    const view = {
+      method: "CONNECT", url: `${REG}:443`, httpVersion: "1.1", rawHeaders: ["Host", `${REG}:443`], headBytes: 0,
+      rawRequestLine: `CONNECT ${REG}:443 HTTP/1.1`,
+    };
+    const limits = { maxHeaders: 32 };
+    assert.equal(validateConnectRequest(view, limits, REG).ok, true);
+    assert.equal(validateConnectRequest(view, limits).ok, false); // default target is github.com
+    assert.equal(validateConnectRequest({ ...view, rawRequestLine: `CONNECT  ${REG}:443 HTTP/1.1` }, limits, REG).ok, false);
+    assert.equal(validateConnectRequest({ ...view, rawHeaders: ["Host", "github.com:443"] }, limits, REG).ok, false);
+    assert.equal(validateConnectRequest({ ...view, rawHeaders: ["Host", REG] }, limits, REG).ok, false);
+    assert.equal(validateConnectRequest({ ...view, rawHeaders: ["Host", `${REG}:443`, "Proxy-Authorization", "Basic eA=="] }, limits, REG).ok, false);
+    assert.equal(validateConnectRequest({ ...view, headBytes: 1 }, limits, REG).ok, false);
+  });
+
+  it("the constructor refuses a target outside the closed set", () => {
+    assert.throws(() => new EgressProxy({ bindHost: "127.0.0.1", target: "example.com" as unknown as EgressTargetHost }));
+    assert.throws(() => new EgressProxy({ bindHost: "127.0.0.1", target: "github.com:443" as unknown as EgressTargetHost }));
+  });
+});
+
+describe("registry target: proxy behaviour", () => {
+  it("tunnels registry.npmjs.org:443, resolving and pinning only that name", async () => {
+    const names: string[] = [];
+    const h = await harness({
+      target: REG,
+      resolver: (host) => {
+        names.push(host);
+        return Promise.resolve([PUBLIC_V4]);
+      },
+    });
+    const t = await openTunnel(h.port, REG_OK);
+    assert.equal(t.statusLine, "HTTP/1.1 200 Connection Established");
+    assert.deepEqual(names, [REG]);
+    assert.equal(h.targets.length, 1);
+    assert.equal(h.targets[0]?.hostname, REG);
+    assert.equal(h.targets[0]?.address, PUBLIC_V4);
+    assert.equal(h.targets[0]?.port, 443);
+    t.socket.destroy();
+  });
+
+  it("relays bytes untouched after the 200 reply", async () => {
+    const h = await harness({ target: REG });
+    const t = await openTunnel(h.port, REG_OK);
+    t.socket.write("ping");
+    await sleep(100);
+    assert.equal(Buffer.concat(t.received).toString("latin1"), "ping"); // echo upstream
+    t.socket.destroy();
+  });
+
+  it("refuses github.com:443 on the registry proxy before any DNS or connect", async () => {
+    const h = await harness({ target: REG });
+    assert.equal(statusOf(await raw(h.port, CONNECT_OK)), 403);
+    assert.equal(h.resolverCalls.n, 0);
+    assert.equal(h.targets.length, 0);
+  });
+
+  it("refuses registry.npmjs.org:443 on the default (github) proxy before any DNS or connect", async () => {
+    const h = await harness();
+    assert.equal(statusOf(await raw(h.port, REG_OK)), 403);
+    assert.equal(h.resolverCalls.n, 0);
+    assert.equal(h.targets.length, 0);
+  });
+
+  it("refuses every other authority with no DNS and no connect", async () => {
+    const h = await harness({ target: REG });
+    const authorities = [
+      "example.com:443", "api.github.com:443", "169.254.169.254:80", "169.254.169.254:443", "10.0.0.1:443", "127.0.0.1:443",
+      "192.168.1.1:443", "[::1]:443", `${REG}:80`, `${REG}:8443`, "REGISTRY.NPMJS.ORG:443", `${REG}.:443`,
+      `www.${REG}:443`, `user@${REG}:443`, "npmjs.org:443",
+    ];
+    for (const a of authorities) {
+      const status = statusOf(await raw(h.port, `CONNECT ${a} HTTP/1.1\r\nHost: ${a}\r\n\r\n`));
+      assert.ok(status === 400 || status === 403, `${a} -> ${String(status)}`);
+    }
+    assert.equal(h.resolverCalls.n, 0);
+    assert.equal(h.targets.length, 0);
+  });
+
+  it("refuses a Host header that is not the target, a pipelined request and forbidden headers", async () => {
+    const h = await harness({ target: REG });
+    const cases: Array<[string, number[]]> = [
+      [`CONNECT ${REG}:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n`, [400]],
+      [`CONNECT ${REG}:443 HTTP/1.1\r\nHost: ${REG}\r\n\r\n`, [400]],
+      [`CONNECT ${REG}:443 HTTP/1.1\r\nHost: ${REG}:443\r\nHost: ${REG}:443\r\n\r\n`, [400]],
+      [`CONNECT ${REG}:443 HTTP/1.1\r\nHost: ${REG}:443\r\nProxy-Authorization: Basic eDp5\r\n\r\n`, [403]],
+      [`CONNECT ${REG}:443 HTTP/1.1\r\nHost: ${REG}:443\r\nAuthorization: Bearer x\r\n\r\n`, [403]],
+      [`CONNECT ${REG}:443 HTTP/1.1\r\nHost: ${REG}:443\r\nContent-Length: 4\r\n\r\nabcd`, [400]],
+      [`CONNECT  ${REG}:443 HTTP/1.1\r\nHost: ${REG}:443\r\n\r\n`, [400]],
+      [`${REG_OK}GET / HTTP/1.1\r\nHost: x\r\n\r\n`, [400]],
+      [`GET https://${REG}/is-number HTTP/1.1\r\nHost: ${REG}\r\n\r\n`, [405]],
+    ];
+    for (const [payload, wanted] of cases) {
+      const status = statusOf(await raw(h.port, payload));
+      assert.ok(status !== null && wanted.includes(status), `${JSON.stringify(payload.slice(0, 60))} -> ${String(status)}`);
+    }
+    assert.equal(h.resolverCalls.n, 0);
+    assert.equal(h.targets.length, 0);
+  });
+
+  const answerSets: Array<[string, string[], number]> = [
+    ["a private answer", ["10.0.0.5"], 403],
+    ["a loopback answer", ["127.0.0.1"], 403],
+    ["a link-local metadata answer", ["169.254.169.254"], 403],
+    ["a shared-address-space answer", ["100.64.0.1"], 403],
+    ["public then private", [PUBLIC_V4, "10.0.0.5"], 403],
+    ["private then public", ["10.0.0.5", PUBLIC_V4], 403],
+    ["public then metadata", [PUBLIC_V4, "169.254.169.254"], 403],
+    ["public v4 plus public v6 (mixed)", [PUBLIC_V4, PUBLIC_V6], 403],
+    ["public v6 then public v4 (mixed)", [PUBLIC_V6, PUBLIC_V4], 403],
+    ["v4 plus NAT64 synthesized v6", [PUBLIC_V4, "64:ff9b::8c52:7003"], 403],
+    ["v6 only", [PUBLIC_V6], 403],
+    ["an IPv4-mapped IPv6 answer", ["::ffff:140.82.112.3"], 403],
+    ["a non-IP answer", ["registry.internal"], 403],
+    ["an empty answer set", [], 502],
+  ];
+  for (const [label, answers, status] of answerSets) {
+    it(`fails closed on ${label}: ${status}, no connect`, async () => {
+      const h = await harness({ target: REG, resolver: () => Promise.resolve(answers) });
+      assert.equal(statusOf(await raw(h.port, REG_OK)), status);
+      assert.equal(h.resolverCalls.n, 1);
+      assert.equal(h.targets.length, 0);
+    });
+  }
+
+  it("pins the first validated IPv4 answer and offers no name to the connector", async () => {
+    const h = await harness({ target: REG, resolver: () => Promise.resolve([PUBLIC_V4, PUBLIC_V4_B]) });
+    const t = await openTunnel(h.port, REG_OK);
+    assert.equal(h.targets.length, 1);
+    assert.equal(h.targets[0]?.address, PUBLIC_V4);
+    assert.equal(classifyIp(h.targets[0]?.address).allowed, true);
+    t.socket.destroy();
+  });
+
+  it("emits only sanitized events", async () => {
+    const h = await harness({ target: REG });
+    await raw(h.port, `CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n`);
+    const rejected = h.events.find((e) => e.kind === "rejected");
+    assert.ok(rejected !== undefined && rejected.kind === "rejected");
+    assert.equal(rejected.code, "authority-not-allowed");
+    assert.equal(JSON.stringify(h.events).includes("evil.example"), false);
   });
 });

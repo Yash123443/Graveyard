@@ -171,3 +171,14 @@ Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `
 Reported externally: test TypeScript build passed, focused tests and the full backend suite passed. On real Docker 29.9.2 with `node:22-alpine` and an offline cached `is-number@7.0.0` fixture: install/build/test succeeded; no-tests was correctly not-run (`tests-not-run`); failed build and failed test were reported as failures; a cache miss failed; a git dependency was rejected; a pre-aborted request was not-run; cleanup was proven. An original bug that reported success for no-tests was corrected before the final verification.
 
 Not shown: live jobs, repository acquisition integration, registry download, runtime agents, production safety.
+
+
+
+
+## 2026-11-15: docs-only update, external verification of controlled npm registry acquisition
+
+Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `.kiro/KIRO_USAGE.md`, `.kiro/specs/backend-foundation/tasks.md` and `backend/DEVELOPMENT.md`. Kiro authored the registry acquisition source; an external assistant reviewed and tested it. No other provenance is claimed. This supersedes the earlier "written, not compiled or run" notes for it.
+
+Reported externally: test `tsc`, focused registry and GitHub proxy tests, and the full backend suite passed. `npm view is-number@7.0.0` confirmed the pinned sha512. On real Docker 29.9.2 with `node:22-alpine`: the default guard refused; the isolated client could not reach 1.1.1.1 or 8.8.8.8; the proxy rejected github, example, private, metadata and wrong-port targets and permitted registry port 443; the fixed `is-number@7` fetch passed its integrity check; 2 cache files (4404 bytes) were handed off; offline install, build and test passed; all labelled containers, the network and temp directories were confirmed cleaned up.
+
+Not shown: arbitrary repositories, general production isolation, a production `EgressGuard`, worker or job wiring.
