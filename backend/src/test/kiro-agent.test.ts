@@ -259,29 +259,45 @@ describe("Fixer", () => {
 });
 
 describe("process invocation", () => {
-  it("passes an argument array that trusts no tools and carries no evidence", async () => {
+  it("passes an argument array that trusts no tools, has no positional input, and sends instructions + packet on stdin", async () => {
     const ex = okExec(diagJson());
     await adapter(ex.fn, fakeDirs(), { model: "claude-x", agentName: "empty-agent" }).analyze({ evidence: EVIDENCE });
     const c = ex.calls[0];
     assert.ok(c);
     assert.equal(c.file, "kiro-cli");
     assert.ok(Array.isArray(c.args));
+    assert.deepEqual(c.args, ["chat", "--no-interactive", "--trust-tools=", "--wrap", "never", "--agent", "empty-agent", "--model", "claude-x"]);
     assert.ok(c.args.includes("--no-interactive"));
     assert.ok(c.args.includes("--trust-tools="));
     assert.ok(!c.args.some((a) => /trust-all|^-a$/.test(a)));
-    assert.ok(c.args.includes("--model") && c.args.includes("claude-x"));
-    assert.ok(c.args.includes("--agent") && c.args.includes("empty-agent"));
     const joined = c.args.join("\n");
     assert.ok(!joined.includes("Error: boom"), "evidence must not be in argv");
     assert.ok(!joined.includes("line1"), "evidence must not be in argv");
-    assert.ok(c.options.stdin.includes("Error: boom at src/a.js:2"));
-    assert.ok(joined.includes(beginMarker(NONCE)));
+    assert.ok(!joined.includes("GRAVEYARD Analyst"), "instructions must not be in argv");
+    assert.ok(!joined.includes(beginMarker(NONCE)), "instructions must not be in argv");
+    const stdin = c.options.stdin;
+    assert.ok(stdin.includes("You are the GRAVEYARD Analyst"));
+    assert.ok(stdin.includes(beginMarker(NONCE)));
+    assert.ok(stdin.includes("Error: boom at src/a.js:2"));
+    assert.ok(stdin.includes(`=== EVIDENCE ${NONCE} BEGIN id=log1`));
+    assert.ok(stdin.indexOf("You are the GRAVEYARD Analyst") < stdin.indexOf("GRAVEYARD EVIDENCE PACKET"));
     assert.equal("shell" in c.options, false);
   });
 
-  it("buildKiroArgs never emits a trust-all flag", () => {
-    const args = buildKiroArgs({}, "p");
-    assert.deepEqual(args.slice(0, 3), ["chat", "--no-interactive", "--trust-tools="]);
+  it("sends the Fixer instructions, diagnosis and evidence on stdin with no positional input", async () => {
+    const ex = okExec(patchJson(GOOD_DIFF));
+    await adapter(ex.fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence: EVIDENCE });
+    const c = ex.calls[0];
+    assert.ok(c);
+    assert.deepEqual(c.args, ["chat", "--no-interactive", "--trust-tools=", "--wrap", "never"]);
+    assert.ok(c.options.stdin.includes("You are the GRAVEYARD Fixer"));
+    assert.ok(c.options.stdin.includes(`=== DIAGNOSIS ${NONCE} BEGIN ===`));
+    assert.ok(c.options.stdin.includes("line1\nline2"));
+  });
+
+  it("buildKiroArgs never emits a trust-all flag or a positional input", () => {
+    const args = buildKiroArgs({});
+    assert.deepEqual(args, ["chat", "--no-interactive", "--trust-tools=", "--wrap", "never"]);
     assert.ok(!args.some((a) => a.includes("trust-all")));
   });
 

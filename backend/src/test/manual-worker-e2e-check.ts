@@ -53,12 +53,31 @@
  * to the scripted diff, an unchanged original fixture build.mjs, an empty staging root, no container
  * left for either execution id. A pass would show this on this machine only.
  *
+ * Third, additional opt-in scenario: LIVE KIRO (GRAVEYARD_MANUAL_WORKER_E2E=1 and
+ * GRAVEYARD_MANUAL_WORKER_E2E_LIVE_KIRO=1; `pnpm run test:worker-e2e:live-kiro`). THIS CALLS THE REAL
+ * kiro-cli AND SPENDS KIRO CREDITS: one Analyst request and one Fixer request per attempt (a job may be
+ * attempted twice after an infrastructure failure, so at most four requests). Bounded redacted evidence
+ * (the fixture's build.mjs, package.json, test.mjs and the failed stage tails) leaves the machine for
+ * Kiro's service. kiro-cli must already be installed and signed in (kiro-cli is not run by anything else
+ * in this file). The scenario is off by default and, when on, the other two scenarios are skipped.
+ * The fixture is the passing build.mjs with exactly ONE line changed (the is-number check is inverted,
+ * so the build throws); package files and test.mjs are the passing ones, unchanged. The real worker is
+ * started with GRAVEYARD_WORKER_AGENTS=kiro-v2 and NO adapter or agent object injected. Asserted:
+ * baseline failed (pipeline, Tester); Analyst and Fixer outcomes are status ok (model-authored,
+ * proposal-only); the patched disposable copy re-ran install/build/test offline and passed the ORIGINAL
+ * test.mjs; the returned verifiedDiff equals the stored Fixer proposal that was applied (and its sha256
+ * equals the verification record). The diff is NOT compared to any canned diff. Original fixture files
+ * and staging root are untouched, no container is left. When an agent fails only its fixed status and a
+ * short code are printed; model text, the diagnosis and the diff are never printed by this scenario.
+ * The model may legitimately fail to produce a valid proposal; that fails this check without implying
+ * a defect elsewhere. A pass shows one run on one machine and says nothing about model reliability.
+ *
  * What a pass shows: this controlled fixture, this operator cache and this Docker daemon produced a
  * durable `passing` result through the real API and worker on this machine. It does not show repair,
  * arbitrary-repository safety, timeout/cancel behaviour of the worker, or a production deployment.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, realpathSync, type Stats } from "node:fs";
 import { request } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -88,9 +107,16 @@ import { startWorker, type StartResult } from "../worker-process.js";
 const OPT_IN = process.env["GRAVEYARD_MANUAL_WORKER_E2E"] === "1";
 /** Second opt-in for the broken-fixture repair scenario (scripted agents). */
 const REPAIR_OPT_IN = process.env["GRAVEYARD_MANUAL_WORKER_E2E_REPAIR"] === "1";
+/** Third opt-in: real kiro-cli (spends Kiro credits). Only meaningful together with GRAVEYARD_MANUAL_WORKER_E2E=1. */
+const LIVE_KIRO_OPT_IN = process.env["GRAVEYARD_MANUAL_WORKER_E2E_LIVE_KIRO"] === "1";
 const MAX_FILE = 64 * 1024;
 /** Upper bound for the job to reach a terminal state (pipeline container limit is 120 s). */
 const JOB_DEADLINE_MS = 240_000;
+/**
+ * Live Kiro: baseline (<= 120 s) + two CLI requests (adapter default 120 s each) + patched re-run
+ * (<= 120 s) = about 480 s worst case, plus overhead. Stays below the worker's 15 minute job deadline.
+ */
+const LIVE_JOB_DEADLINE_MS = 600_000;
 const POLL_MS = 500;
 /** Catalog key only. Never fetched, cloned or contacted. */
 const CATALOG_URL = "https://github.com/graveyard-local/controlled-fixture";
@@ -195,6 +221,8 @@ interface ScenarioCtx {
   stagingDir: string;
   /** build.mjs exactly as written before the job ran. */
   originalBuild: string;
+  /** Every generated script (build.mjs, test.mjs) exactly as written before the job ran. */
+  originalScripts: Readonly<Record<string, string>>;
   problems: string[];
   log: string[];
 }
@@ -206,6 +234,12 @@ interface Scenario {
   kind: PipelineFixtureKind;
   /** Injected deterministic Analyst and Fixer (never kiro-cli). Absent: agents off, nothing injected. */
   agents?: () => AgentsLike;
+  /** Worker agent mode. Default "off". "kiro-v2" with no `agents` seam means the real kiro-cli is called. */
+  agentMode?: "off" | "kiro-v2";
+  /** Overrides the generated scripts of `kind`. */
+  scripts?: () => Record<string, string>;
+  /** Overrides JOB_DEADLINE_MS. */
+  deadlineMs?: number;
   /** Judges the terminal view; pushes into ctx.problems. */
   expect: (view: ResultView, ctx: ScenarioCtx) => void;
 }
@@ -307,6 +341,120 @@ const REPAIR_SCENARIO: Scenario = {
   },
 };
 
+/**
+ * The passing build.mjs with exactly one line changed: the is-number check is inverted, so the build
+ * throws "is-number is not working" although is-number works. Derived from the passing script and
+ * checked, so a change to the fixture source cannot silently alter more than one line.
+ */
+const LIVE_GOOD_LINE = 'if (isNumber("5") !== true) throw new Error("is-number is not working");';
+const LIVE_BAD_LINE = 'if (isNumber("5") === true) throw new Error("is-number is not working");';
+
+function liveBrokenScripts(): Record<string, string> {
+  const scripts = { ...pipelineFixtureScripts("pass") };
+  const good = scripts["build.mjs"] as string;
+  const lines = good.split("\n");
+  const at = lines.indexOf(LIVE_GOOD_LINE);
+  if (at < 0 || lines.lastIndexOf(LIVE_GOOD_LINE) !== at) {
+    throw new FailClosed("the passing build.mjs no longer contains the expected single line to change; update the live scenario");
+  }
+  lines[at] = LIVE_BAD_LINE;
+  const bad = lines.join("\n");
+  const a = good.split("\n");
+  const b = bad.split("\n");
+  if (a.length !== b.length || a.filter((l, i) => l !== b[i]).length !== 1) throw new FailClosed("the live fixture must differ from the passing build.mjs in exactly one line");
+  scripts["build.mjs"] = bad;
+  return scripts;
+}
+
+const SAFE_AGENT_STATUSES: ReadonlySet<string> = new Set([
+  "ok", "no-result", "rejected", "timed-out", "aborted", "unavailable", "failed", "not-configured", "no-diagnosis",
+]);
+
+/** Only a fixed status and a short code of the form [a-z0-9-]. Never detail, summary or model text. */
+function safeAgentState(v: unknown): string {
+  if (typeof v !== "object" || v === null) return "status=missing";
+  const o = v as Record<string, unknown>;
+  const status = typeof o["status"] === "string" && SAFE_AGENT_STATUSES.has(o["status"]) ? o["status"] : "(unrecognized)";
+  const code = typeof o["code"] === "string" && /^[a-z0-9-]{1,48}$/.test(o["code"]) ? o["code"] : undefined;
+  return code === undefined ? `status=${status}` : `status=${status} code=${code}`;
+}
+
+const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
+
+/**
+ * Live Kiro. No `agents` seam: the worker builds its own KiroAgentAdapter (GRAVEYARD_WORKER_AGENTS=kiro-v2)
+ * and runs the real kiro-cli. Nothing here compares against a canned diff; the proposal that the worker
+ * applied is whatever the model returned, read back from the stored result.
+ */
+const LIVE_KIRO_SCENARIO: Scenario = {
+  fixtureName: "broken-live",
+  kind: "pass",
+  scripts: liveBrokenScripts,
+  agentMode: "kiro-v2",
+  deadlineMs: LIVE_JOB_DEADLINE_MS,
+  expect: (view, ctx) => {
+    const r = view.result;
+    const asObj = (v: unknown): Record<string, unknown> | undefined =>
+      typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+    if (r === null) {
+      ctx.problems.push(`no stored result (outcome ${view.outcome})`);
+      return;
+    }
+    // Baseline failed, as observed by the pipeline and the Tester.
+    if (r["verdict"] !== "repository-failing") ctx.problems.push("stored baseline verdict is not repository-failing");
+    if (asObj(r["pipeline"])?.["status"] !== "failure") ctx.problems.push("baseline pipeline status is not failure");
+    if (asObj(r["tester"])?.["status"] !== "failed") ctx.problems.push("baseline Tester status is not failed");
+
+    // Analyst and Fixer produced accepted (contract-validated) responses. Only status and code are printed.
+    const analyst = asObj(r["analyst"]);
+    const fixer = asObj(r["fixer"]);
+    ctx.log.push(`analyst: ${safeAgentState(analyst)}`);
+    ctx.log.push(`fixer: ${safeAgentState(fixer)}`);
+    if (analyst?.["status"] !== "ok" || analyst["modelAuthored"] !== true) ctx.problems.push(`Analyst response not accepted (${safeAgentState(analyst)})`);
+    if (fixer?.["status"] !== "ok" || fixer["modelAuthored"] !== true || fixer["proposalOnly"] !== true || fixer["applied"] !== false) {
+      ctx.problems.push(`Fixer response not accepted (${safeAgentState(fixer)})`);
+    }
+
+    // The job's outcome and the re-run of the original tests on the patched disposable copy.
+    if (view.outcome !== "repair-verified") ctx.problems.push(`outcome ${view.outcome}, expected repair-verified`);
+    if (view.repair.verified !== true) ctx.problems.push("repair.verified is not true");
+    if (view.repair.patchApplied !== false) ctx.problems.push("repair.patchApplied is not false");
+    const v = asObj(r["verification"]);
+    if (v === undefined) {
+      ctx.problems.push("no verification record");
+    } else {
+      if (v["status"] !== "verified") ctx.problems.push(`verification status ${String(v["status"])}, expected verified`);
+      if (asObj(v["baseline"])?.["status"] !== "failure") ctx.problems.push("verification baseline status is not failure");
+      if (asObj(v["patched"])?.["status"] !== "success") ctx.problems.push("patched copy pipeline status is not success");
+      if (asObj(v["tester"])?.["status"] !== "passed") ctx.problems.push("patched copy Tester status is not passed (original tests)");
+      if (typeof v["measuredMs"] === "number") ctx.log.push(`verification measured ${String(v["measuredMs"])} ms`);
+
+      // The exact returned diff is the proposal that was applied: the stored Fixer diff, and the hash the
+      // worker recorded when it applied it.
+      const stored = fixer?.["diff"];
+      if (typeof stored !== "string" || stored === "") {
+        ctx.problems.push("no stored Fixer diff to compare with the returned diff");
+      } else {
+        if (view.verifiedDiff !== stored) ctx.problems.push("verifiedDiff is not equal to the stored Fixer proposal");
+        if (v["diffSha256"] !== sha256(stored)) ctx.problems.push("verification diffSha256 does not match the stored Fixer proposal");
+        ctx.log.push(`returned diff: ${String(Buffer.byteLength(stored, "utf8"))} bytes (content not printed)`);
+      }
+      if (view.verifiedDiff === null) ctx.problems.push("no verifiedDiff returned");
+    }
+
+    // The original fixture (including the unchanged test.mjs) and the staging root must be untouched and clean.
+    for (const [name, text] of Object.entries(ctx.originalScripts)) {
+      try {
+        if (readFileSync(join(ctx.fixtureDir, name), "utf8") !== text) ctx.problems.push(`the ORIGINAL fixture ${name} changed`);
+      } catch {
+        ctx.problems.push(`the original fixture ${name} could not be re-read`);
+      }
+    }
+    const left = readdirSync(ctx.stagingDir);
+    if (left.length !== 0) ctx.problems.push(`staging root is not empty after the job: ${left.join(", ")}`);
+  },
+};
+
 async function runScenario(scn: Scenario): Promise<void> {
   {
     const log: string[] = [];
@@ -356,7 +504,7 @@ async function runScenario(scn: Scenario): Promise<void> {
       const stagingDir = createRunDir(parent);
       dirs.push(stagingDir);
 
-      const scripts = pipelineFixtureScripts(scn.kind);
+      const scripts = scn.scripts === undefined ? pipelineFixtureScripts(scn.kind) : scn.scripts();
       const fixtureDir = writeFixture(fixturesDir, scn.fixtureName, {
         "package.json": goodPkg,
         "package-lock.json": goodLock,
@@ -387,7 +535,7 @@ async function runScenario(scn: Scenario): Promise<void> {
           GRAVEYARD_FIXTURE_CATALOG: catalogPath,
           GRAVEYARD_WORKER_ID: `e2e-${randomBytes(3).toString("hex")}`,
           GRAVEYARD_WORKER_POLL_MS: "250",
-          GRAVEYARD_WORKER_AGENTS: "off",
+          GRAVEYARD_WORKER_AGENTS: scn.agentMode ?? "off",
         },
         {
           log: (level, message, fields) => workerLog.push(`${level} ${message}${fields === undefined ? "" : ` ${JSON.stringify(fields)}`}`),
@@ -396,9 +544,12 @@ async function runScenario(scn: Scenario): Promise<void> {
       );
       if (!started.started) throw new FailClosed(`worker refused to start: ${started.message}`);
       worker = started;
-      if (worker.composed.config.agents !== "off") throw new FailClosed("agents must be off in this harness");
+      if (worker.composed.config.agents !== (scn.agentMode ?? "off")) throw new FailClosed(`worker agent mode is not ${scn.agentMode ?? "off"}`);
+      if (scn.agentMode === "kiro-v2" && scn.agents !== undefined) throw new FailClosed("the live scenario must not inject agents");
       log.push(
-        scn.agents === undefined
+        scn.agentMode === "kiro-v2"
+          ? "worker started (real ControlledPipeline, real Docker executor, GRAVEYARD_WORKER_AGENTS=kiro-v2, NO agent injected: real kiro-cli, spends Kiro credits)"
+          : scn.agents === undefined
           ? "worker started (real ControlledPipeline, real Docker executor, agents off)"
           : "worker started (real ControlledPipeline, real Docker executor, SCRIPTED Analyst and Fixer injected; live Kiro is NOT exercised)",
       );
@@ -422,7 +573,8 @@ async function runScenario(scn: Scenario): Promise<void> {
       if (wrong.status !== 403) problems.push(`GET result with another well-formed token returned ${String(wrong.status)}, expected 403`);
 
       // ---- Bounded wait for a terminal state. ----
-      const end = Date.now() + JOB_DEADLINE_MS;
+      const deadlineMs = scn.deadlineMs ?? JOB_DEADLINE_MS;
+      const end = Date.now() + deadlineMs;
       let view: ResultView | undefined;
       let lastStatus = "(none)";
       for (;;) {
@@ -442,14 +594,14 @@ async function runScenario(scn: Scenario): Promise<void> {
       }
 
       if (view === undefined) {
-        problems.push(`job did not reach a terminal state within ${String(JOB_DEADLINE_MS / 1000)} s (last: ${lastStatus})`);
+        problems.push(`job did not reach a terminal state within ${String(deadlineMs / 1000)} s (last: ${lastStatus})`);
       } else {
         log.push(`terminal: status=${view.status} stage=${view.stage} outcome=${view.outcome}`);
         if (view.status !== "completed") problems.push(`status ${view.status}, expected completed`);
         if (view.stage !== "done") problems.push(`stage ${view.stage}, expected done`);
         if (view.infrastructure !== null) problems.push(`unexpected infrastructure record: ${view.infrastructure.kind}`);
         if (view.infrastructure !== null) log.push(`infrastructure message: ${view.infrastructure.message}`);
-        scn.expect(view, { fixtureDir, stagingDir, originalBuild: scripts["build.mjs"] as string, problems, log });
+        scn.expect(view, { fixtureDir, stagingDir, originalBuild: scripts["build.mjs"] as string, originalScripts: scripts, problems, log });
       }
     } catch (e) {
       failure = e;
@@ -507,15 +659,27 @@ async function runScenario(scn: Scenario): Promise<void> {
 
 test(
   "manual worker end-to-end harness (opt-in: GRAVEYARD_MANUAL_WORKER_E2E=1; real Docker, real API, real worker)",
-  { skip: OPT_IN ? false : "set GRAVEYARD_MANUAL_WORKER_E2E=1 (use `pnpm run test:worker-e2e`) to run against real Docker", timeout: 480_000 },
+  {
+    skip: OPT_IN && !LIVE_KIRO_OPT_IN ? false : LIVE_KIRO_OPT_IN ? "skipped in live Kiro mode (only the live scenario runs)" : "set GRAVEYARD_MANUAL_WORKER_E2E=1 (use `pnpm run test:worker-e2e`) to run against real Docker",
+    timeout: 480_000,
+  },
   () => runScenario(PASS_SCENARIO),
 );
 
 test(
   "manual worker repair harness (opt-in: GRAVEYARD_MANUAL_WORKER_E2E=1 and GRAVEYARD_MANUAL_WORKER_E2E_REPAIR=1; real Docker, real API, real worker, SCRIPTED agents)",
   {
-    skip: OPT_IN && REPAIR_OPT_IN ? false : "set GRAVEYARD_MANUAL_WORKER_E2E=1 and GRAVEYARD_MANUAL_WORKER_E2E_REPAIR=1 (use `pnpm run test:worker-e2e:repair`) to run against real Docker",
+    skip: OPT_IN && REPAIR_OPT_IN && !LIVE_KIRO_OPT_IN ? false : LIVE_KIRO_OPT_IN ? "skipped in live Kiro mode (only the live scenario runs)" : "set GRAVEYARD_MANUAL_WORKER_E2E=1 and GRAVEYARD_MANUAL_WORKER_E2E_REPAIR=1 (use `pnpm run test:worker-e2e:repair`) to run against real Docker",
     timeout: 720_000,
   },
   () => runScenario(REPAIR_SCENARIO),
+);
+
+test(
+  "manual worker LIVE KIRO harness (opt-in: GRAVEYARD_MANUAL_WORKER_E2E=1 and GRAVEYARD_MANUAL_WORKER_E2E_LIVE_KIRO=1; real Docker, real API, real worker, REAL kiro-cli, spends Kiro credits)",
+  {
+    skip: OPT_IN && LIVE_KIRO_OPT_IN ? false : "set GRAVEYARD_MANUAL_WORKER_E2E=1 and GRAVEYARD_MANUAL_WORKER_E2E_LIVE_KIRO=1 (use `pnpm run test:worker-e2e:live-kiro`) to call the real kiro-cli; this spends Kiro credits",
+    timeout: 900_000,
+  },
+  () => runScenario(LIVE_KIRO_SCENARIO),
 );

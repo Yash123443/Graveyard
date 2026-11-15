@@ -276,3 +276,23 @@ No production policy changed, no dependency was added and nothing was published.
 ## 2026-11-16: Verified local repair slice (source, tests and docs only, no shell)
 
 One large request. Kiro read `pipeline-runner.ts`, `agent-contract.ts`, `controlled-pipeline.ts`, `fixture-workspace.ts`, `github-runner.ts`, `registry-pipeline.ts`, `worker-compose.ts`, `worker.ts`, `leases.ts`, `tester.ts`, `result-view.ts`, `kiro-agent.ts` (types), the existing tests, the real-Docker worker harness and the workspace sources, then wrote `repair-verifier.ts`, wired it into `pipeline-runner.ts`, `worker-compose.ts` and `github-runner.ts`, extended `result-view.ts`, added `repair-verifier.test.ts`, a second opt-in scenario in `manual-worker-e2e-check.ts`, and the workspace result view (`api.ts`, `useRepairJob.ts`, `result.ts`, `ResultPanel.tsx`, `Workspace.tsx`, `workspace.css`, `scripts/verify-workspace.mjs`). **No compiler, test or Docker run was available: all of it is unverified.** The scripted Analyst and Fixer in the harness are deterministic stand-ins; the live Kiro runtime and any model were not exercised and no claim about them is made. Record external results in `.kiro/PROJECT.md` and `backend/DEVELOPMENT.md` once an operator has run them.
+
+
+
+## 2026-11-16: opt-in live Kiro verification mode for the worker harness (source only, no shell, NOT compiled or run)
+
+One bounded request, no shell and no git. Kiro read `manual-worker-e2e-check.ts`, `controlled-pipeline-fixtures.ts`, `result-view.ts`, `pipeline-runner.ts`, `worker-compose.ts`, `kiro-agent.ts` and `package.json`, then added a third scenario to `backend/src/test/manual-worker-e2e-check.ts`, `backend/worker-e2e-live-kiro.env` and the `test:worker-e2e:live-kiro` script. The scripted and default scenarios keep their behavior; in live mode they are skipped so only the live scenario runs. No production adapter changed.
+
+**Command** (from `backend/`, with `GRAVEYARD_NPM_FIXTURE_DIR` and `GRAVEYARD_NPM_CACHE_DIR` set as for the other worker scenarios):
+
+```
+pnpm run test:worker-e2e:live-kiro
+```
+
+It needs `GRAVEYARD_MANUAL_WORKER_E2E=1` (from `worker-e2e.env`) and `GRAVEYARD_MANUAL_WORKER_E2E_LIVE_KIRO=1` (from `worker-e2e-live-kiro.env`). Without the second variable there is no extra model call. A running Docker daemon, the local `node:22-alpine` image, and an installed, signed-in `kiro-cli` (generation v2) are required.
+
+**Credit use.** This mode calls the real `kiro-cli`: one Analyst request and one Fixer request per job attempt, so two requests in a normal run. A job can be attempted twice after an infrastructure failure, which would make up to four requests. Each request has the adapter's 120 s default timeout. Bounded, redacted fixture evidence (build.mjs, package.json, test.mjs and failed stage tails) is sent to Kiro's service. Run it deliberately and sparingly, in line with the credit policy above. The harness waits up to 600 s for the job (about 480 s worst case for the baseline, two requests and the patched re-run).
+
+**What it checks.** The fixture is the passing `build.mjs` with exactly one line changed (the `is-number` check is inverted so the build throws); the package files and `test.mjs` are unchanged. The worker runs with `GRAVEYARD_WORKER_AGENTS=kiro-v2` and no injected agent. Asserted: baseline pipeline and Tester failed; Analyst and Fixer responses accepted; the patched disposable copy passed the original tests offline; the returned `verifiedDiff` equals the stored Fixer proposal that was applied, and its sha256 equals the verification record (no canned diff is used); original fixture files unchanged; staging root empty; no leftover containers. If an agent fails, only its fixed status and a short code are printed. The model may fail to give a valid proposal, which fails this check.
+
+Codex compiled and ran the harness. The first live run exposed a CLI input issue. Kiro updated the adapter to send the entire request through stdin. The final standalone run used the live Kiro Analyst and Fixer for a controlled broken fixture and returned `repair-verified` after the real Docker rerun. See `backend/DEVELOPMENT.md` for the verification scope.
