@@ -854,3 +854,166 @@ Authorship: Kiro wrote the changes; an external assistant reviewed and tested th
 - Limited controlled fixtures: flat unscoped packages, at most 8, lockfile v3 only.
 - No arbitrary user repository, no production `EgressGuard`, no live worker. Nothing is wired to the server, `JobWorker`, `JobRunner` or jobs. The default guard still never attests, so acquisition stays disabled in the product.
 - No claim about package contents, scoped or nested packages, or general production isolation.
+
+
+
+
+---
+
+## 2026-11-15: agent foundation (Analyst, Fixer, Tester): compile fix and focused tests (written by Kiro, NOT compiled or run)
+
+Kiro had no working shell for this request (the shell tool was refused), so `tsc` and the tests were **not run**. Everything below is unverified until an operator runs it and logs the result here and in `.kiro/PROJECT.md`. Edits are under `backend/` and `.kiro/` only. No live wiring, no shell or dependency changes, no frontend.
+
+Modules (existing, read again this session): `src/agent-contract.ts` (evidence bounding, marker extraction, closed-schema diagnosis and strict unified-diff validation), `src/kiro-agent.ts` (injectable adapter around `kiro-cli chat --no-interactive --trust-tools=`), `src/tester.ts` (verdict derived only from runner `StageResult`s). Nothing instantiates them outside tests; no job, worker or route uses them.
+
+### Compile fix (`src/kiro-agent.ts`, TS2367)
+
+The error was reported at line 503, which does not exist in the file as read (about 480 lines), so the exact line was not confirmed by a compiler. Cause by inspection: `invoke` returns early on `signal?.aborted === true`; after that TypeScript narrows `signal.aborted` to `false`, so the later post-`await` comparison `signal?.aborted === true` is a no-overlap comparison (TS2367). Fix: a helper `isAborted(signal)` reads the state through a function, and both checks use it (before start, and after the executor returns). The behaviour is unchanged. Unverified until `tsc` runs.
+
+### Tests added
+
+- `src/test/kiro-agent.test.ts` (fake executor and fake working directories; kiro-cli is never started):
+  - Analyst: valid diagnosis; `unknown` becomes `no-result`; malformed outputs (not JSON, extra key, bad category, wrong role, unsupplied evidence id, unsupplied or unsafe file, overlong summary); missing, wrong-nonce and duplicate markers; output over 64 KiB; executor-reported truncation; invalid or too many evidence items and nonce collision without calling the executor.
+  - Fixer: valid bounded patch (`proposalOnly`, context verified); `unknown` is `no-result`; malformed JSON and extra keys; an invalid input diagnosis and missing file evidence are rejected before the executor runs.
+  - Dangerous patches, all rejected with a specific code and the working directory still removed: `.git`, `.github`, traversal, absolute path, unsupplied file, new, deleted and renamed files, git extended headers, context mismatch, hunk-count mismatch, control characters, oversize.
+  - Invocation: argv carries `--no-interactive` and `--trust-tools=`, never a trust-all flag, and no evidence text (evidence is on stdin only); no `shell` option is passed; cwd is a fresh controlled directory (not `process.cwd()`), removed afterwards; files left in that directory cause `workspace-modified`; an unsafe directory (ancestor with `.kiro`/`.git`) fails closed without running; unstartable binary is `unavailable`; nonzero exit is `failed`. A source scan asserts the non-comment code contains no `trust-all-tools`, `shell: true` or `exec*`/`spawnSync` call.
+  - Timeout and abort: executor timeout becomes `timed-out`; a pre-aborted signal never starts the executor; a signal that aborts during the call discards an otherwise valid result (the path the compile fix touches); executor `aborted` and signal forwarding; timeout configuration bounds.
+  - Credentials: host `KIRO_API_KEY`, GitHub and `GRAVEYARD_*` variables are not forwarded; an explicit key reaches only the child environment, never argv or stdin; the key and token shapes are redacted from evidence before stdin; the key does not appear in any returned outcome even when the child's stderr and stdout contain it.
+  - `spawnAgentProcess` with real `node` children (no kiro-cli): shell metacharacters arrive as literal arguments (shell:false), only the explicit environment is passed and stdin is delivered, timeout and abort kill the child, an output cap stops and flags the child, a missing binary rejects. This group starts real processes and is the most environment-sensitive part.
+- `src/test/tester.test.ts` (pure): passed only with both stages observed passing; missing stages and missing tests (`no-tests-found`, `no-tests-executed`) are `not-run` with `tests-not-run`; a "passed" label with zero passing tests, no counts, unconfirmed or missing cleanup, truncation or a bad exit code is `not-run`; observed nonzero exit or failing counts are `failed`; timeout, abort, isolation and Docker problems are `not-run`; wrong-slot results are `stage-mismatch`; a failed stage outranks a not-run stage; free text and output tails never reach the report.
+
+### Verification answers (by reading code and tests, not by running anything)
+
+- No trust-all-tools: the argv builder emits `--trust-tools=` (empty list) and no other trust flag; a test asserts it and a source scan checks it.
+- No execution by the agent modules: the adapter only spawns the injected executor with `kiro-cli`; patches are `proposalOnly` data; nothing applies a patch or runs repository code. The Tester has no process or I/O.
+- No credentials in logs: the modules do not log. The key is passed only through the child environment, is redacted from evidence and from failure detail, and failure details are fixed strings.
+
+### Not established
+
+- That anything compiles or passes. The real `kiro-cli` headless behaviour (stdin handling, `--trust-tools=` semantics, the output format, whether the global Kiro configuration or hooks are read from the home directory) has not been observed. The v2 and v3 profiles use the same flags and any difference is unverified.
+- The process is not sandboxed. It reads the operator's global Kiro configuration and sends evidence to Kiro's service, which is a data-egress decision for the operator.
+- Validation shows output is well formed and consistent with supplied evidence. It does not show a diagnosis is true or a patch is correct; only independent build and test results do.
+- Not wired to the server, worker, runner or any job. No patch-apply step exists.
+
+### Pending external
+
+```
+pnpm exec tsc -p tsconfig.json
+pnpm exec tsc -p tsconfig.test.json
+pnpm run build:test
+node --test dist-test/test/kiro-agent.test.js dist-test/test/tester.test.js
+node --test dist-test/test/*.js
+```
+Fix any compile or test failures, then record the results here, in `.kiro/PROJECT.md` and in `.kiro/KIRO_USAGE.md`. An opt-in manual check of the real `kiro-cli` has not been written or run.
+
+
+
+
+
+---
+
+## 2026-11-15: integrated worker execution path: PipelineJobRunner (written by Kiro, NOT compiled or run)
+
+Kiro had no working shell (the shell tool was refused), so `tsc` and the tests were **not run**. Everything below is unverified until an operator runs it and logs the result here and in `.kiro/PROJECT.md`. Edits are under `backend/` and `.kiro/` only. No frontend, dependency, git or `server.ts` changes.
+
+### What was connected
+
+Before this entry the pieces were separate: `JobWorker` drove a `JobRunner` that only had `UnavailableRunner`; the controlled pipeline, Tester and agents were not reachable from a job. Now a queued job can travel through all of them:
+
+```
+queued job -> JobWorker.runOnce (claim, lease, heartbeat, deadline)
+  -> PipelineJobRunner.run
+       resolve repoUrl in an operator catalog        (unknown URL: refused, nothing runs)
+       stage "building"   ControlledPipeline.run     (network none, one container: npm ci --offline, build, test)
+       stage "testing"    buildPipelineTesterReport  (pure; re-checks the observed evidence)
+       on repository failure only, agents configured:
+       stage "diagnosing" Analyst (bounded, redacted evidence)
+       stage "repairing"  Fixer   (proposal only)
+       one "result" event
+  -> PipelineJobRunner.cleanup (Docker cleanup proof for the exact execution id)
+  -> worker writes completed / failed / blocked
+```
+
+### Changes
+
+- `src/leases.ts`: `JOB_STAGES`, `ProgressStage`, `recordLeasedStage` (updates `jobs.stage`, appends a `stage` event) and `recordLeasedResult` (appends one `result` event per attempt, at most `MAX_RESULT_BYTES` = 64 KiB serialized; larger payloads throw, they are never truncated). Both are fenced like `finishLeasedJob`: matching lease token, unexpired lease, deadline not passed, not in recovery; otherwise `accepted:false` with no side effects. No schema change: the result is persisted as an event only (readable through the existing SSE route; there is still no result endpoint).
+- `src/runner.ts`: optional `RunContext.report` (`JobProgress`: `stage()`, `result()`). Optional so existing runners and tests are unaffected.
+- `src/worker.ts`: builds `report` from the lease token, never throws, and returns `false` after any coordinator abort (shutdown, deadline, lease loss), so a runner cannot record anything once aborted. New `drainQueue(worker, { maxJobs })`: sequential, at most 1 to 100 jobs, stops at idle, busy, limit, or the first `blocked` / `lease-lost` job.
+- `src/tester.ts`: `buildPipelineTesterReport(ControlledPipelineResult)`. `passed` or `failed` needs the pipeline's own matching `success` / `failure`, a parsed stage list, confirmed container cleanup, confirmed staging removal and untruncated output; otherwise `not-run` / `evidence-unconfirmed`. A failure needs an observed `exit-code` failure with a nonzero exit code; timeouts and other reasons are `inconclusive`. Missing tests are `no-tests` / `tests-not-run`. No container text enters the report.
+- `src/pipeline-runner.ts` (new): `PipelineJobRunner`, `createCatalogResolver`, `readFixtureEvidence`, `buildEvidence`, `buildResultPayload`. Dependencies are injected: `resolve`, `pipeline` (`ControlledPipeline` satisfies it), `cleanupExecution` (`DockerFixtureSandbox.cleanup` shape), optional `agents` (`KiroAgentAdapter` satisfies it).
+- `src/test/pipeline-runner.test.ts` (new): see below.
+
+### Exact supported behaviour
+
+Outcome mapping:
+
+| Situation | Job status | Result event |
+|---|---|---|
+| Pipeline `success` and Tester `passed` | completed | verdict `verified` |
+| Pipeline `failure` in install, build or test and Tester `failed` | completed | verdict `repository-failing`, Tester report, Analyst diagnosis and Fixer proposal if agents are configured |
+| Build passed, fixture has no tests | completed | verdict `tests-not-run` (never `verified`) |
+| Any other `not-run` (timeout, Docker unavailable, truncated, protocol error, unconfirmed cleanup or staging, ...) | failed, `infrastructure-unavailable`, reason code in metadata | none |
+| URL not in the catalog, catalog entry invalid, resolver throws | failed, `infrastructure-unavailable` | none |
+| No progress channel, pipeline throws, verdict and Tester disagree | failed, `infrastructure-unavailable` | none |
+| Abort, lost lease, rejected write | worker rules apply (discarded, requeue only with cleanup proof) | none |
+| Container cleanup not proven | blocked (fenced, `recovery_required`) | a `result` event may already exist, but the job never reaches `completed` |
+
+"completed" means the worker finished its work and a result exists. It does not mean the repository was repaired. Infrastructure errors stay in job metadata and never in a repository diagnosis. Agent failures (no-result, rejected, timed-out, unavailable, raised) are recorded inside the result as data and do not fail the job. Analyst and Fixer fields are labelled `modelAuthored: true`; the Fixer proposal carries `proposalOnly: true` and `applied: false`.
+
+The stage events report only what actually happened: `building` covers install, build and test together because they run in one container and cannot be separated live; `testing` is the Tester judging the observed stage list. `cloning`, `analyzing` and `verifying` are never emitted (nothing is cloned, and no patch is applied and re-verified). The stage on a requeued job is not reset between attempts.
+
+Security properties kept: no repository code runs on the host (only the existing network-`none` container); the catalog is exact-match on the canonical URL and fixture names pass `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; catalog files must be plain regular files at most 64 KiB, with `package.json` and `build.mjs` required, `test.mjs` optional, and nothing else read; evidence for agents is at most 6 files and 3500 bytes each, and the container's output tails are redacted by `prepareEvidence`; a pipeline verdict is accepted only with confirmed cleanup, staging removal and the same execution id; the worker's cleanup gate still applies after the runner returns; result events contain no lease or recovery token; the `ctx.report` writes are fenced.
+
+### Tests (all injected: fake pipeline, fake cleanup, fake agents, real in-memory SQLite and real `JobWorker`)
+
+`src/test/pipeline-runner.test.ts`:
+- successful: pass verdict, stage events `building, testing`, job `completed` and stage `done`, one result event, execution id `<job>:1` passed to the pipeline and cleanup; agents not called on a pass; failing build with Analyst and Fixer (stage events add `diagnosing, repairing`, `proposalOnly`, `applied:false`); evidence content and bounds; failing build without agents; Analyst no-result skips the Fixer; agent raising and Fixer rejection recorded without failing the job; no-tests fixture is `tests-not-run`; no tokens in events.
+- failed or refused: uncatalogued URL, throwing resolver, four invalid catalog entries, timed-out pipeline (no result, no agent call), claimed success with unconfirmed cleanup, with staging not removed, with another execution id, with truncated output, pipeline that throws (cleanup still requested, message does not leak the error), unconfirmed cleanup after a good result gives `blocked`, cleanup proof for another execution id, throwing cleanup, cleanup for an execution this process never ran.
+- direct runner: no reporter, pre-aborted signal, abort during the pipeline discards the result, signal handed to the pipeline, rejected stage write and rejected result write.
+- `recordLeasedStage` / `recordLeasedResult`: holder accepted, wrong token, expired lease, fenced lease, invalid stage names, one result per attempt, oversize refused, non-object refused.
+- `drainQueue`: idle, limit, stops at blocked, invalid bounds.
+- `buildPipelineTesterReport`: pass, failure, install failure, no tests, seven downgrade cases, non-success verdict, timeout inconclusive, no container text.
+- `buildEvidence`, `readFixtureEvidence`, `createCatalogResolver` (real temp directory).
+
+### Remaining gaps (not claimed)
+
+- No arbitrary repository support. Only operator-prepared controlled fixtures in a catalog. The git acquisition and registry acquisition modules are not connected to the runner; the production `EgressGuard` does not exist, so acquisition stays disabled. A real repository would also need a lockfile, an offline cache and `build.mjs`, which the pipeline requires.
+- Nothing starts a worker loop in `server.ts`; the production runner is still `UnavailableRunner`. An operator script must construct `ControlledPipeline`, `DockerFixtureSandbox` (for cleanup), the catalog and optionally `KiroAgentAdapter`, then call `drainQueue`. No such composition script or configuration exists.
+- No patch apply and no repair verification. `repairing` means a proposal was requested. The `verifying` stage is unused.
+- No result or patch endpoint; the result is readable only from the SSE `result` event.
+- Staging is keyed by fixture name, so a leftover staging directory makes later runs of that fixture refuse (`staging-failed`, fail closed). Recovery cleanup proves containers only, not staging directories.
+- The Tester judges stage results observed in one container; it has no test counts for the pipeline (they are not in the driver protocol).
+- Real `kiro-cli` behaviour is still unobserved (see the agent foundation entry).
+
+### Pending external
+
+```
+pnpm exec tsc -p tsconfig.json
+pnpm exec tsc -p tsconfig.test.json
+pnpm run build:test
+node --test dist-test/test/pipeline-runner.test.js dist-test/test/worker.test.js dist-test/test/leases.test.js dist-test/test/tester.test.js
+node --test dist-test/test/*.js
+```
+Likely trouble spots if the compile fails: `Promise.resolve` inference in the new test, `Array.isArray` narrowing on a readonly array in `validSource`, and the `report` closure in `worker.ts`. Record the results here, in `.kiro/PROJECT.md` and in `.kiro/KIRO_USAGE.md`.
+
+
+
+
+---
+
+## 2026-11-15: external verification of build, tests and a real Analyst call (docs only)
+
+Kiro ran no commands and changed no source. Results are reported by the user from external runs. This supersedes the "NOT compiled or run" status of the agent foundation and integrated worker execution path entries above; those entries are left as history.
+
+### Verified
+
+- Production TypeScript compilation (`tsconfig.json`) passed.
+- Test TypeScript compilation (`tsconfig.test.json`) passed.
+- The full `node --test` suite passed on 2026-11-15. One isolated temporary-directory test may skip when the environment is empty.
+- A real synthetic Analyst call using the logged-in Kiro CLI returned no-result (unknown diagnosis). This demonstrates that the invocation works. It is not evidence that the diagnosis is correct.
+
+### Limits
+
+- Tests use injected fakes (runner, pipeline, cleanup, agents). No end-to-end live worker run was performed.
+- The pipeline remains limited to controlled fixtures. It is not wired to the server, and it does not apply repairs.
+- Not shown: a real diagnosis or patch from the agents, arbitrary repositories, a production `EgressGuard`, result or patch endpoints.

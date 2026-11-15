@@ -200,3 +200,30 @@ Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `
 Reported externally: test TypeScript compile and the full backend suite passed. On real Docker 29.9.2 with a controlled operator lockfile v3 of two packages (`is-number@7.0.0`, `is-buffer@2.0.5`), both were acquired through the registry-only proxy with integrity verified, 4 cache files (7170 bytes) were handed off, and offline install, build and tests passed. A hostile resolved URL was rejected before any container was created, the default guard refused, direct public IP probes and forbidden hosts were blocked, and cleanup was confirmed.
 
 Not shown: arbitrary user repositories, a production egress guard, a live worker. Scope is limited controlled fixtures: flat unscoped packages, at most 8.
+
+
+
+
+## 2026-11-15: agent foundation compile fix and focused tests (written, not compiled or run)
+
+One bounded request, edits only. The shell tool was refused, so Kiro ran no `tsc`, tests or commands. Kiro read `backend/src/agent-contract.ts`, `kiro-agent.ts` and `tester.ts` (plus the `StageResult` types in `node-fixture-runner.ts`), fixed the TS2367 abort check in `kiro-agent.ts` with an `isAborted` helper, and added `backend/src/test/kiro-agent.test.ts` and `backend/src/test/tester.test.ts`. It updated `.kiro/PROJECT.md`, this file and `backend/DEVELOPMENT.md`. No frontend, dependency, live-wiring or shell changes. No test result exists for this work; no external verification is claimed. The reported error line (503) did not match the file as read, so the fix rests on inspection.
+
+
+
+## 2026-11-15: integrated worker path (source only, no shell)
+
+Kiro read the worker, leases, controlled pipeline, registry pipeline, Tester and agent modules, then wrote `src/pipeline-runner.ts`, fenced stage/result writes in `src/leases.ts`, the `report` channel in `src/runner.ts` and `src/worker.ts` (plus `drainQueue`), `buildPipelineTesterReport` in `src/tester.ts`, and `src/test/pipeline-runner.test.ts`. The shell tool was refused, so nothing was compiled or run. Results must be logged after an external `tsc` and test run. See `backend/DEVELOPMENT.md` for supported behaviour and gaps.
+
+
+
+
+## 2026-11-15: docs-only update, external verification of build, tests and a real Analyst call
+
+Kiro ran no commands and changed no source; it edited only `.kiro/KIRO_USAGE.md` and `backend/DEVELOPMENT.md`. Results are reported by the user from external runs. This supersedes the "NOT compiled or run" status of the agent foundation and integrated worker path entries above, which are left as history.
+
+Reported externally:
+- Production and test TypeScript compilation passed.
+- The full `node --test` suite passed on 2026-11-15. One isolated temporary-directory test may skip when the environment is empty.
+- A real synthetic Analyst call through the logged-in Kiro CLI returned no-result (unknown diagnosis). This shows the invocation works. It does not show the diagnosis is correct.
+
+Scope: tests use injected fakes. No end-to-end live worker run was performed. The pipeline remains limited to controlled fixtures, is not wired to the server, and does not apply repairs.

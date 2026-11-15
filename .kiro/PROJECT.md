@@ -43,10 +43,15 @@ Package manager: pnpm 10.12.1 (both workspaces).
 
 ## Backend — not yet implemented
 
-- Execution worker / worker loop / sandbox runner
-- Automatic cleanup and restart-recovery coordinator
-- Real agents (Analyst / Fixer / Tester) and repair pipeline
+- Production worker loop wiring (`server.ts` does not start a worker; production runner is still `UnavailableRunner`)
+- Arbitrary-repository acquisition (git/registry acquisition modules exist but are not connected to jobs; no production `EgressGuard`)
+- Patch apply and repair verification
+- Automatic restart-recovery coordinator
 - Result and patch endpoints
+
+## Backend — integrated worker path (written 2026-11-15, NOT compiled or run)
+
+`src/pipeline-runner.ts` (`PipelineJobRunner`) connects `JobWorker` to the controlled network-none pipeline, the Tester (`buildPipelineTesterReport`) and optional Analyst/Fixer, with fenced `stage` and `result` events (`recordLeasedStage`, `recordLeasedResult` in `leases.ts`) and a bounded `drainQueue`. Supported source: operator-prepared controlled fixtures in an exact-match catalog only. Unknown repositories fail closed as `infrastructure-unavailable`. Fixer output is a proposal and is never applied. Tests (`src/test/pipeline-runner.test.ts`) use injected fakes. Details and gaps: `backend/DEVELOPMENT.md`, entry "integrated worker execution path". Unverified until `tsc` and the suite are run externally.
 
 ## Frontend — repair workspace (authored 2026-11-11, pending external verification)
 
@@ -319,3 +324,16 @@ Docs-only update; Kiro ran no commands and changed no source (no shell). Recorde
 Authorship: Kiro wrote the changes; an external assistant reviewed and tested them.
 
 Limits: controlled fixtures only, flat unscoped packages, at most 8 per lockfile. No arbitrary user repository, no production `EgressGuard`, no live worker. Nothing is wired to the server, worker or jobs, and the default guard still never attests, so acquisition stays disabled in the product.
+
+
+
+
+## 2026-11-15: agent foundation compile fix and focused tests (written by Kiro, NOT compiled or run)
+
+Kiro's shell was unavailable, so nothing was compiled or run. Edits only under `backend/` and `.kiro/`; no frontend, dependency or shell changes; nothing wired to the server, worker, runner or any job.
+
+- Fixed the reported TS2367 in `backend/src/kiro-agent.ts`: the post-`await` abort check compared `signal?.aborted === true` after an earlier early return had narrowed it to `false`. Both abort checks now go through an `isAborted(signal)` helper. The reported line (503) does not exist in the file as read, so the cause was found by inspection, not from the compiler. Unverified until `tsc` runs.
+- Added `backend/src/test/kiro-agent.test.ts` (fake executor; Analyst and Fixer valid, malformed and bounded output; timeout and abort; argv without shell and without trusted tools; empty controlled cwd; dangerous patches rejected; credential handling; a few real `node` child-process checks of `spawnAgentProcess`) and `backend/src/test/tester.test.ts` (measured passed/failed/not-run, including missing tests as not-run).
+- Checked by reading the code and tests: no `--trust-all-tools` (the argv uses `--trust-tools=`), no execution or patch application by the agent modules (patches are proposal-only), no credential in argv, stdin, logs or results.
+
+Status: UNVERIFIED. Pending external `tsc` (both configs), the new tests, and the full suite. Real `kiro-cli` headless behaviour has not been observed. Limits and the command list are in `backend/DEVELOPMENT.md`.

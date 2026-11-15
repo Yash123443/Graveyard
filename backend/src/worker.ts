@@ -38,10 +38,12 @@ import {
   listRecoveryTargets,
   expireQueuedDeadlines,
   executionIdFor,
+  recordLeasedStage,
+  recordLeasedResult,
   DEFAULT_LEASE_MS,
   type ClaimedJob,
 } from "./leases.js";
-import type { CleanupRequest, JobRunner, RunOutcome } from "./runner.js";
+import type { CleanupRequest, JobProgress, JobRunner, RunOutcome } from "./runner.js";
 
 export type Cancel = () => void;
 
@@ -266,6 +268,31 @@ export class JobWorker {
       const aborted = new Promise<"aborted">((resolve) => {
         controller.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
       });
+      const report: JobProgress = {
+        // Fenced by lease token, lease expiry and deadline in leases.ts. After any coordinator abort
+        // nothing more is recorded, matching "the runner's result is discarded after an abort".
+        stage: (stage, note) => {
+          if (state.reason !== null) return false;
+          try {
+            return recordLeasedStage(this.db, {
+              jobId: job.jobId, leaseToken: job.leaseToken, stage, now: this.now(),
+              ...(note === undefined ? {} : { note }),
+            }).accepted;
+          } catch {
+            return false;
+          }
+        },
+        result: (result) => {
+          if (state.reason !== null) return false;
+          try {
+            return recordLeasedResult(this.db, {
+              jobId: job.jobId, leaseToken: job.leaseToken, result, now: this.now(),
+            }).accepted;
+          } catch {
+            return false;
+          }
+        },
+      };
       const runP: Promise<RunOutcome | { kind: "error" }> = (async () => {
         try {
           return await this.runner.run({
@@ -275,6 +302,7 @@ export class JobWorker {
             attempt: job.attemptCount,
             deadlineAt: job.deadlineAt,
             signal: controller.signal,
+            report,
           });
         } catch {
           return { kind: "error" } as const;
@@ -410,4 +438,42 @@ export class JobWorker {
       cancel();
     }
   }
+}
+
+
+
+export interface DrainOptions {
+  /** Upper bound on jobs processed in this call. Integer 1..100. */
+  maxJobs: number;
+}
+
+export interface DrainResult {
+  finished: Array<{ jobId: string; outcome: FinishedOutcome }>;
+  /**
+   *  idle         the queue had no claimable job
+   *  limit        maxJobs reached
+   *  busy         the worker was already processing a job
+   *  stopped      a job ended "blocked" or "lease-lost"; draining stops so an operator can look
+   */
+  stoppedBecause: "idle" | "limit" | "busy" | "stopped";
+}
+
+/**
+ * Bounded queue drain: calls worker.runOnce() sequentially, at most `maxJobs` times. It never loops
+ * unbounded and never starts a second job while one is active. Stops at the first blocked or
+ * lease-lost job (cleanup unproven or ownership lost) instead of pressing on.
+ */
+export async function drainQueue(worker: JobWorker, opts: DrainOptions): Promise<DrainResult> {
+  if (!Number.isInteger(opts.maxJobs) || opts.maxJobs < 1 || opts.maxJobs > 100) {
+    throw new Error("maxJobs must be an integer between 1 and 100");
+  }
+  const finished: DrainResult["finished"] = [];
+  for (let i = 0; i < opts.maxJobs; i += 1) {
+    const r = await worker.runOnce();
+    if (r.kind === "idle") return { finished, stoppedBecause: "idle" };
+    if (r.kind === "busy") return { finished, stoppedBecause: "busy" };
+    finished.push({ jobId: r.jobId, outcome: r.outcome });
+    if (r.outcome === "blocked" || r.outcome === "lease-lost") return { finished, stoppedBecause: "stopped" };
+  }
+  return { finished, stoppedBecause: "limit" };
 }

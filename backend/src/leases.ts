@@ -593,3 +593,120 @@ export function listRecoveryTargets(db: DatabaseSync): RecoveryTarget[] {
     executionId: executionIdFor(r["id"] as string, r["attempt_count"] as number),
   }));
 }
+
+
+
+// ---------------------------------------------------------------------------
+// Fenced progress writes (stage transitions and the result record)
+// ---------------------------------------------------------------------------
+
+/** Every stage a job can show. `queued` is the initial value, `done` is written only by finishLeasedJob. */
+export const JOB_STAGES = [
+  "queued", "cloning", "analyzing", "diagnosing", "repairing", "building", "testing", "verifying", "done",
+] as const;
+export type JobStageName = (typeof JOB_STAGES)[number];
+/** The stages a lease holder may report while it is running. */
+export type ProgressStage = Exclude<JobStageName, "queued" | "done">;
+const PROGRESS_STAGES: readonly string[] = JOB_STAGES.filter((s) => s !== "queued" && s !== "done");
+
+/** Upper bound for one serialized result payload. Larger payloads are refused, never truncated. */
+export const MAX_RESULT_BYTES = 64 * 1024;
+const MAX_NOTE = 200;
+
+export interface RecordStageParams extends ClockOption {
+  jobId: string;
+  leaseToken: string;
+  stage: ProgressStage;
+  /** Short fixed-text description. Never repository or model output. */
+  note?: string;
+}
+
+/**
+ * Moves a running job to a progress stage and appends a "stage" event, in one transaction. Fenced
+ * exactly like finishLeasedJob: matching lease token, unexpired lease, deadline not passed, not in
+ * recovery. A stale writer is rejected with no side effects. Returns accepted:false for any of those.
+ * Throws for a stage name that is not a progress stage (programming error).
+ */
+export function recordLeasedStage(db: DatabaseSync, params: RecordStageParams): { accepted: boolean } {
+  if (!PROGRESS_STAGES.includes(params.stage)) throw new Error("invalid progress stage");
+  const now = (params.now ?? new Date()).toISOString();
+
+  return immediate(db, () => {
+    const row = db.prepare(`
+      SELECT attempt_count FROM jobs
+      WHERE id = ? AND status = 'running' AND recovery_required = 0
+        AND lease_token = ? AND lease_expires_at > ? AND deadline_at > ?
+    `).get(params.jobId, params.leaseToken, now, now) as Row | undefined;
+    if (row === undefined) return { accepted: false };
+
+    const res = db.prepare(`
+      UPDATE jobs SET stage = ?, updated_at = ?
+      WHERE id = ? AND status = 'running' AND recovery_required = 0 AND lease_token = ?
+    `).run(params.stage, now, params.jobId, params.leaseToken);
+    if (Number(res.changes) !== 1) return { accepted: false };
+
+    insertEvent(db, params.jobId, "stage", {
+      jobId: params.jobId,
+      stage: params.stage,
+      status: "running",
+      attemptCount: row["attempt_count"],
+      ...(params.note === undefined ? {} : { note: params.note.length > MAX_NOTE ? `${params.note.slice(0, MAX_NOTE)}…` : params.note }),
+    }, now);
+    return { accepted: true };
+  });
+}
+
+export interface RecordResultParams extends ClockOption {
+  jobId: string;
+  leaseToken: string;
+  /** Plain JSON-serializable object built by the worker side from validated data. */
+  result: Record<string, unknown>;
+}
+
+/**
+ * Appends one "result" event for the current attempt, fenced like recordLeasedStage. At most one
+ * result per attempt: a second call returns accepted:false. The serialized payload must be at most
+ * MAX_RESULT_BYTES; larger payloads throw (they are never truncated). The result is persisted only
+ * as an event, so there is no schema change and no separate results endpoint.
+ */
+export function recordLeasedResult(db: DatabaseSync, params: RecordResultParams): { accepted: boolean } {
+  if (typeof params.result !== "object" || params.result === null || Array.isArray(params.result)) {
+    throw new Error("result must be a plain object");
+  }
+  const now = (params.now ?? new Date()).toISOString();
+
+  return immediate(db, () => {
+    const row = db.prepare(`
+      SELECT stage, attempt_count FROM jobs
+      WHERE id = ? AND status = 'running' AND recovery_required = 0
+        AND lease_token = ? AND lease_expires_at > ? AND deadline_at > ?
+    `).get(params.jobId, params.leaseToken, now, now) as Row | undefined;
+    if (row === undefined) return { accepted: false };
+
+    const attemptCount = row["attempt_count"] as number;
+    const payload = JSON.stringify({
+      jobId: params.jobId,
+      stage: row["stage"],
+      status: "running",
+      attemptCount,
+      result: params.result,
+    });
+    if (Buffer.byteLength(payload, "utf8") > MAX_RESULT_BYTES) throw new Error("result payload is too large");
+
+    const existing = db.prepare(
+      "SELECT payload FROM job_events WHERE job_id = ? AND event_type = 'result'",
+    ).all(params.jobId) as Row[];
+    for (const e of existing) {
+      try {
+        if ((JSON.parse(e["payload"] as string) as { attemptCount?: unknown }).attemptCount === attemptCount) {
+          return { accepted: false };
+        }
+      } catch { /* an unparsable stored payload cannot be this attempt's result */ }
+    }
+
+    db.prepare(
+      "INSERT INTO job_events (job_id, event_type, payload, created_at) VALUES (?, 'result', ?, ?)",
+    ).run(params.jobId, payload, now);
+    return { accepted: true };
+  });
+}

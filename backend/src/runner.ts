@@ -9,6 +9,20 @@
  * @module runner
  */
 
+import type { ProgressStage } from "./leases.js";
+
+/**
+ * Fenced progress channel the coordinator hands to a runner. Both calls return false when the write
+ * was not recorded (lease lost, deadline passed, coordinator abort, duplicate or oversize result);
+ * the runner must then stop and report nothing further. Never throws.
+ */
+export interface JobProgress {
+  /** Records a stage transition with a short fixed-text note. */
+  stage(stage: ProgressStage, note?: string): boolean;
+  /** Records the single result of this attempt (plain JSON object, at most 64 KiB serialized). */
+  result(result: Record<string, unknown>): boolean;
+}
+
 /** Everything a runner may know about one execution attempt. */
 export interface RunContext {
   jobId: string;
@@ -20,6 +34,8 @@ export interface RunContext {
   deadlineAt: string;
   /** Aborted on shutdown, deadline or lost lease. The runner must stop promptly. */
   signal: AbortSignal;
+  /** Present when run by JobWorker. A runner that needs to record results must refuse to run without it. */
+  report?: JobProgress;
 }
 
 /**
