@@ -380,3 +380,30 @@ Docs-only update; Kiro ran no commands and changed no source (no shell). Recorde
 Authorship: Kiro wrote the source; an external assistant reviewed and ran the tests.
 
 Limits: one controlled fixture on this machine. Not verified: real GitHub cloning, agents on this job, repair or patch application (`repair.verified` stays `false`), arbitrary repositories, failing-fixture, uncatalogued-URL, timeout, cancel, stop and Docker-outage cases on real Docker. The frontend workspace text saying no worker or result endpoint exists is still stale and unchanged. Browser visual interaction is still unverified.
+
+
+
+
+## 2026-11-15: GitHub repository flow in the opt-in worker (written by Kiro; compiled and unit-tested externally, no real GitHub run)
+
+Status update (docs only): this entry originally said nothing was compiled or run. The user reports that an external run afterwards compiled both `tsc` configs and passed the tests, including `src/test/github-runner.test.ts` (fake Docker and fake adapters). Kiro ran nothing; no counts were supplied, so none are recorded. **No real-Docker or real-GitHub run of this flow has occurred.** A first-run harness exists, `backend/src/test/manual-github-e2e-check.ts` (`pnpm run test:github-e2e`, octocat/Hello-World at `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`, expected `unsupported-repository`); it is written, **NOT compiled or run**. See "GitHub flow end-to-end harness" in `backend/DEVELOPMENT.md`.
+
+Kiro used file read, search and edit tools only (no shell, no git, as instructed) and edited only under `backend/` and `.kiro/`. No scene, frontend or dependency change, no `server.ts` or schema change.
+
+Added: an opt-in path in which the running worker takes jobs for operator-pinned public GitHub commits (`GRAVEYARD_GITHUB_CATALOG` maps canonical URLs to full 40-hex SHAs). It reuses the existing git acquisition, registry acquisition with cache handoff, offline controlled pipeline, Tester, agents and result endpoint.
+
+- `src/github-runner.ts`: pinned job -> clone in a disposable container (only `github.com`, through an attested internal network) -> read four root files as raw git blobs (`src/github-source.ts`; the host never gets the repository) -> static check of the supported class (`src/github-analysis.ts`) -> supported and registry egress configured: registry acquisition, then the network-`none` offline install/build/test -> Tester and optional agents. Repository code runs only in that container.
+- `src/egress-guard.ts`: `OperatorEgressGuard` attests an operator-provisioned internal network and single-host proxy container after `docker inspect` checks and two probes inside the proxy. Only configured when the operator sets the variables; the default guard still never attests. It is a spot check, not proof of isolation.
+- Results: unsupported repositories **complete** with verdict `unsupported-repository` (outcome `unsupported-repository`) and exact findings; nothing is built. Failures of egress, Docker, git, cleanup or the pipeline fail the job with no result. `repair.verified` and `repair.patchApplied` stay `false`; no patch is applied.
+- Supported class is narrow: root `package.json` with no `scripts` that passes the strict operator policy, lockfileVersion 3 with at most 8 flat unscoped registry packages, and a root `build.mjs`. Most real projects are therefore reported unsupported with the specific reason.
+- Not done: branch or default-branch resolution, scripts-based projects, patch application and verification, frontend update, making the fixture catalog optional, any real-Docker or real-GitHub run.
+- Tests: `src/test/github-runner.test.ts` (fake Docker, fake acquisition adapters, real `JobWorker` and filesystem under `os.tmpdir()`).
+
+Done externally (per the user): both `tsc` configs and the tests. Pending external: the manual real run (`pnpm run test:github-e2e`, unsupported repository, needs only the GitHub proxy), then optionally a supported-repository run. Details, risks and commands are in `backend/DEVELOPMENT.md` ("GitHub repository flow" and "GitHub flow end-to-end harness") and `backend/README.md`.
+
+
+## 2026-11-15: GitHub flow end-to-end harness (written by Kiro, NOT compiled or run)
+
+**2026-11-16 verification update:** Codex compiled both TypeScript projects, passed 113 focused tests, and ran the live pinned GitHub worker harness on Docker Desktop 29.9.2. The volume-free `graveyard-git-fixture:local` image passed acquisition preflight with the existing isolation checks. The owner-authorized result returned `unsupported-repository` for `octocat/Hello-World`, and cleanup was confirmed. Supported-repository execution and repair remain pending. Commands and mount evidence are in `backend/DEVELOPMENT.md`.
+
+`backend/src/test/manual-github-e2e-check.ts`, run with `pnpm run test:github-e2e` (opt-in `GRAVEYARD_MANUAL_GITHUB_E2E=1` from `backend/github-e2e.env`; skipped otherwise). It builds the `manual-clone-check.ts` topology (per-run internal network plus a github.com-only proxy container), starts the real API and the real worker with one pin, octocat/Hello-World at `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`, submits a job over localhost and expects `unsupported-repository` with findings `no-package-json`, `no-package-lock`, `no-build-script`, authenticated result access (401/403/200, `no-store`), and no leftover container, network or temporary directory. No registry, no agents, no repository code is executed. It fails closed if Docker, an image, the network or the proxy fails. **It has not been compiled or run; no real-GitHub run is claimed.** Details: `backend/DEVELOPMENT.md` ("GitHub flow end-to-end harness").

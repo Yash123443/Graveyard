@@ -63,6 +63,9 @@ export const ACQ_LABEL_ID = "graveyard.acquisition-id";
 export const ACQ_LOG_DRIVER = "json-file";
 export const ACQ_LOG_MAX_SIZE = "64k";
 export const ACQ_LOG_MAX_FILE = "1";
+/** Image-declared VOLUME path (alpine/git). Mounted as a bounded tmpfs so no anonymous volume is created. */
+export const GIT_VOLUME_DIR = "/git";
+export const GIT_VOLUME_TMPFS_OPTIONS: readonly string[] = ["rw", "noexec", "nosuid", "nodev", "size=16m"];
 const NAME_PREFIX = "graveyard-acq-";
 const CONTROL_OUTPUT_BYTES = 256 * 1024;
 
@@ -333,6 +336,8 @@ export class GitAcquisition {
       "--read-only",
       "--tmpfs", `/tmp:rw,noexec,nosuid,nodev,size=${TMP_MB}m`,
       "--tmpfs", `${WORK_DIR}:rw,noexec,nosuid,nodev,size=${l.diskMb}m,uid=65532,gid=65532,mode=0700`,
+      // alpine/git declares VOLUME /git; an explicit bounded tmpfs there replaces the anonymous volume.
+      "--tmpfs", `${GIT_VOLUME_DIR}:${GIT_VOLUME_TMPFS_OPTIONS.join(",")}`,
       "--shm-size", "4m",
       "--memory", `${l.memoryMb}m`,
       "--memory-swap", `${l.memoryMb}m`,
@@ -500,9 +505,17 @@ export class GitAcquisition {
 
     const tmpfs = obj(host["Tmpfs"]);
     const keys = Object.keys(tmpfs).sort();
-    if (keys.length !== 2 || keys[0] !== "/tmp" || keys[1] !== WORK_DIR) {
+    const wantKeys = ["/tmp", WORK_DIR, GIT_VOLUME_DIR].sort();
+    if (keys.length !== wantKeys.length || !keys.every((k, i) => k === wantKeys[i])) {
       v.push("unexpected tmpfs mounts");
     } else {
+      // /git must carry exactly the requested option set (order-insensitive).
+      const gitRaw = tmpfs[GIT_VOLUME_DIR];
+      const gitOpts = typeof gitRaw === "string" ? gitRaw.split(",").map((o) => o.trim()).sort() : [];
+      const gitWant = [...GIT_VOLUME_TMPFS_OPTIONS].sort();
+      if (gitOpts.length !== gitWant.length || !gitOpts.every((o, i) => o === gitWant[i])) {
+        v.push(`tmpfs ${GIT_VOLUME_DIR} options differ from the required set`);
+      }
       const want: Array<[string, number]> = [["/tmp", TMP_MB], [WORK_DIR, l.diskMb]];
       for (const [path, mb] of want) {
         const raw = tmpfs[path];

@@ -16,6 +16,13 @@
  * Nothing runs on the host: the only child processes are `docker` (argument arrays, no shell) and,
  * only if agents are enabled, `kiro-cli` (no tools trusted).
  *
+ * GitHub flow (only when config.github is set; github-runner.ts): additionally wires an
+ * OperatorEgressGuard per target host, GitAcquisition, NpmRegistryAcquisition (only if registry
+ * egress is configured) and a per-run ControlledPipeline, and wraps the fixture runner in
+ * GithubJobRunner. Startup also refuses when the runs root or the registry driver is missing.
+ * The GitHub flow part was written without a shell and later compiled and unit-tested (fakes) in an
+ * external run; it has not run against real Docker or GitHub.
+ *
  * Test seams (`pipeline`, `cleanupExecution`, `agents`, `executor`, `agentExecutor`, `workerOptions`)
  * exist so the loop, authorization and result flow can be tested with fakes. The real entry point
  * (worker-main.ts) passes none of them except `log`.
@@ -32,6 +39,11 @@ import { PIPELINE_ARGV, PIPELINE_COMMAND_ID, ControlledPipeline } from "./contro
 import { DockerFixtureSandbox, spawnExecutor, type ProcessExecutor } from "./docker-sandbox.js";
 import { NODE_FIXTURE_IMAGE } from "./node-fixture-runner.js";
 import { KiroAgentAdapter, spawnAgentProcess, type AgentProcessExecutor } from "./kiro-agent.js";
+import { GitAcquisition } from "./git-acquisition.js";
+import { OperatorEgressGuard } from "./egress-guard.js";
+import { NpmRegistryAcquisition } from "./npm-registry-acquisition.js";
+import { GithubJobRunner, type GithubRunnerOptions } from "./github-runner.js";
+import { readRootFiles } from "./github-source.js";
 import {
   PipelineJobRunner,
   createCatalogResolver,
@@ -39,7 +51,7 @@ import {
   type AgentsLike,
   type PipelineLike,
 } from "./pipeline-runner.js";
-import type { CleanupProof } from "./runner.js";
+import type { CleanupProof, JobRunner } from "./runner.js";
 import { JobWorker, type WorkerOptions } from "./worker.js";
 import { WorkerService, type ServiceLog } from "./worker-service.js";
 import type { WorkerConfig } from "./worker-config.js";
@@ -56,6 +68,8 @@ export interface ComposeDeps {
   pipeline?: PipelineLike;
   cleanupExecution?: (executionId: string) => Promise<CleanupProof>;
   agents?: AgentsLike;
+  /** Test seams for the GitHub flow (only used when config.github is set). */
+  githubSeams?: Partial<Pick<GithubRunnerOptions, "makeGit" | "readRootFiles" | "registry" | "makePipeline">>;
   workerOptions?: Partial<Pick<WorkerOptions, "timers" | "now" | "leaseMs" | "heartbeatMs" | "abortGraceMs" | "cleanupTimeoutMs">>;
   maxBackoffMs?: number;
 }
@@ -125,6 +139,15 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
   if (deps.pipeline === undefined && !isRegularFile(driverPath)) {
     problems.push("the compiled pipeline driver (fixture-pipeline-driver.js) was not found; run the build first");
   }
+  const github = config.github ?? null;
+  const seams = deps.githubSeams ?? {};
+  if (github !== null) {
+    realDirectory("GRAVEYARD_GITHUB_RUNS_ROOT", github.runsRoot, problems);
+    const registryDriver = join(dirname(fileURLToPath(import.meta.url)), "npm-acquire-driver.js");
+    if (github.registryEgress !== null && seams.registry === undefined && !isRegularFile(registryDriver)) {
+      problems.push("the compiled registry driver (npm-acquire-driver.js) was not found; run the build first");
+    }
+  }
   if (problems.length > 0) throw new Error(`worker startup refused:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
 
   const executor = deps.executor ?? spawnExecutor;
@@ -162,12 +185,51 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
       });
     }
 
-    const runner = new PipelineJobRunner({
+    const fixtureRunner = new PipelineJobRunner({
       resolve: createCatalogResolver(config.catalog, config.fixturesRoot),
       pipeline,
       cleanupExecution,
       ...(agents === undefined ? {} : { agents }),
     });
+
+    let runner: JobRunner = fixtureRunner;
+    if (github !== null) {
+      // The GitHub flow exists only when the operator configured it. Guards attest only after the
+      // operator-provisioned topology passes their checks; the default guard is not used here.
+      const makeGit =
+        seams.makeGit ??
+        ((() => {
+          const guard = new OperatorEgressGuard({ executor, host: "github.com", ...github.gitEgress });
+          return (hook: Parameters<GithubRunnerOptions["makeGit"]>[0]): ReturnType<GithubRunnerOptions["makeGit"]> =>
+            new GitAcquisition({ executor, egress: guard, allowedImages: [github.gitImage], afterCheckout: hook });
+        })());
+      const registry =
+        seams.registry !== undefined
+          ? seams.registry
+          : github.registryEgress === null
+            ? null
+            : new NpmRegistryAcquisition({
+                executor,
+                egress: new OperatorEgressGuard({ executor, host: "registry.npmjs.org", ...github.registryEgress }),
+                stagingRoot: config.stagingRoot,
+              });
+      runner = new GithubJobRunner({
+        fallback: fixtureRunner,
+        fixtureUrls: new Set(Object.keys(config.catalog)),
+        pins: new Map(Object.entries(github.pins)),
+        runsRoot: github.runsRoot,
+        gitImage: github.gitImage,
+        makeGit,
+        readRootFiles: seams.readRootFiles ?? ((info) => readRootFiles(executor, info)),
+        registry,
+        makePipeline:
+          seams.makePipeline ??
+          ((runDir, cacheDir) =>
+            new ControlledPipeline({ executor, fixturesRoot: runDir, stagingRoot: config.stagingRoot, cacheDir, driverPath })),
+        cleanupExecution,
+        ...(agents === undefined ? {} : { agents }),
+      });
+    }
     const worker = new JobWorker({ db, workerId: config.workerId, runner, ...(deps.workerOptions ?? {}) });
     const service = new WorkerService({
       worker,

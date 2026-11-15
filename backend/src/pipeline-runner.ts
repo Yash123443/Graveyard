@@ -85,10 +85,21 @@ export interface SourceFile {
   complete: boolean;
 }
 
+/** Set only by the GitHub runner (github-runner.ts): the files came from this pinned public commit. */
+export interface SourceOrigin {
+  kind: "github-pinned";
+  /** Canonical https://github.com/owner/repo URL. */
+  repoUrl: string;
+  /** Full lowercase 40-hex commit id. */
+  commit: string;
+}
+
 export interface ControlledSource {
   /** Directory name under the pipeline's fixturesRoot. */
   fixture: string;
   files: readonly SourceFile[];
+  /** Absent for operator-prepared fixtures. */
+  origin?: SourceOrigin;
 }
 
 /** Maps a job's canonical repository URL to a controlled source, or null when there is none. May throw (treated as null). */
@@ -112,6 +123,8 @@ export interface PipelineJobRunnerOptions {
   cleanupExecution: (executionId: string) => Promise<CleanupProof>;
   /** Optional. Without it a failing repository gets the Tester report and no diagnosis. */
   agents?: AgentsLike;
+  /** Optional text for the `building` stage event (the GitHub runner also fetches dependencies there). */
+  buildNote?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,17 +296,22 @@ export function buildResultPayload(args: {
   analyst: AgentOutcome<Diagnosis> | null;
   fixer: AgentOutcome<PatchProposal> | null;
   fixerSkipped: "not-configured" | "no-diagnosis";
+  origin?: SourceOrigin;
 }): Record<string, unknown> {
+  const origin = args.origin;
   return {
     verdict: args.verdict,
-    sourceKind: "controlled-fixture",
+    sourceKind: origin === undefined ? "controlled-fixture" : "github-pinned",
+    ...(origin === undefined ? {} : { source: { repoUrl: origin.repoUrl, commit: origin.commit } }),
     fixture: args.fixture,
     pipeline: projectPipeline(args.pipeline),
     tester: args.tester,
     analyst: projectAnalyst(args.analyst),
     fixer: projectFixer(args.fixer, args.fixerSkipped),
     notes: [
-      "The source is an operator-prepared controlled fixture, not a fetched repository.",
+      origin === undefined
+        ? "The source is an operator-prepared controlled fixture, not a fetched repository."
+        : "The source is a public GitHub repository fetched at the pinned commit; only its root package.json, package-lock.json, build.mjs and test.mjs were used.",
       "A patch proposal is never applied; no repair was verified.",
     ],
   };
@@ -330,7 +348,8 @@ export class PipelineJobRunner implements JobRunner {
     if (!validSource(source)) return infra(SOURCE_INVALID_REASON);
     if (ctx.signal.aborted) return { kind: "aborted" };
 
-    if (!report.stage("building", "install, build and test run offline in one disposable container")) return { kind: "aborted" };
+    const buildNote = this.o.buildNote ?? "install, build and test run offline in one disposable container";
+    if (!report.stage("building", buildNote)) return { kind: "aborted" };
 
     let result: ControlledPipelineResult;
     try {
@@ -392,6 +411,7 @@ export class PipelineJobRunner implements JobRunner {
 
     const payload = buildResultPayload({
       verdict, fixture: source.fixture, pipeline: effective, tester, analyst, fixer, fixerSkipped,
+      ...(source.origin === undefined ? {} : { origin: source.origin }),
     });
     if (!report.result(payload)) return { kind: "aborted" };
     return { kind: "completed" };

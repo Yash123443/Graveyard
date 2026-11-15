@@ -64,6 +64,8 @@ if (!result.started) {
     workerId: result.composed.config.workerId,
     catalogEntries: Object.keys(result.composed.config.catalog).length,
     agents: result.composed.config.agents,
+    githubPins: Object.keys(result.composed.config.github?.pins ?? {}).length,
+    githubRegistryEgress: result.composed.config.github?.registryEgress != null,
   });
   await result.done;
 }

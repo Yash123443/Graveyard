@@ -91,6 +91,7 @@ function goodDoc(): Doc {
       Tmpfs: {
         "/tmp": "rw,noexec,nosuid,nodev,size=16m",
         "/work": "rw,noexec,nosuid,nodev,size=256m,uid=65532,gid=65532,mode=0700",
+        "/git": "rw,noexec,nosuid,nodev,size=16m",
       },
       LogConfig: { Type: "json-file", Config: { "max-size": "64k", "max-file": "1" } },
     },
@@ -262,6 +263,7 @@ describe("container and git arguments", () => {
     assert.deepEqual(valuesOf(a, "--tmpfs"), [
       "/tmp:rw,noexec,nosuid,nodev,size=16m",
       "/work:rw,noexec,nosuid,nodev,size=256m,uid=65532,gid=65532,mode=0700",
+      "/git:rw,noexec,nosuid,nodev,size=16m",
     ]);
     assert.deepEqual(valuesOf(a, "--env"), [...GIT_ENV]);
     for (const banned of [
@@ -466,6 +468,10 @@ describe("source policy", () => {
 });
 
 describe("isolation verification", () => {
+  const GIT_TMPFS = "rw,noexec,nosuid,nodev,size=16m";
+  const setGit = (d: Doc, opts: string): void => {
+    (d.HostConfig["Tmpfs"] as Record<string, string>)["/git"] = opts;
+  };
   const tampers: Array<[string, (d: Doc) => void]> = [
     ["default bridge network", (d) => { d.HostConfig["NetworkMode"] = "bridge"; }],
     ["host network", (d) => { d.HostConfig["NetworkMode"] = "host"; }],
@@ -477,18 +483,37 @@ describe("isolation verification", () => {
     ["writable root", (d) => { d.HostConfig["ReadonlyRootfs"] = false; }],
     ["root user", (d) => { d.Config["User"] = "0:0"; }],
     ["missing git env", (d) => { d.Config["Env"] = ["PATH=/usr/bin"]; }],
-    ["no /work tmpfs", (d) => { d.HostConfig["Tmpfs"] = { "/tmp": "rw,noexec,nosuid,nodev,size=16m" }; }],
+    ["no /work tmpfs", (d) => {
+      d.HostConfig["Tmpfs"] = { "/tmp": "rw,noexec,nosuid,nodev,size=16m", "/git": GIT_TMPFS };
+    }],
     ["oversized /work tmpfs", (d) => {
       d.HostConfig["Tmpfs"] = {
         "/tmp": "rw,noexec,nosuid,nodev,size=16m",
         "/work": "rw,noexec,nosuid,nodev,size=9999m",
+        "/git": GIT_TMPFS,
       };
     }],
     ["exec-capable /work", (d) => {
       d.HostConfig["Tmpfs"] = {
         "/tmp": "rw,noexec,nosuid,nodev,size=16m",
         "/work": "rw,exec,nosuid,nodev,size=256m",
+        "/git": GIT_TMPFS,
       };
+    }],
+    ["missing /git tmpfs", (d) => { delete (d.HostConfig["Tmpfs"] as Record<string, string>)["/git"]; }],
+    ["anonymous /git volume mount", (d) => {
+      delete (d.HostConfig["Tmpfs"] as Record<string, string>)["/git"];
+      d.Mounts = [{ Type: "volume", Destination: "/git", RW: true }];
+    }],
+    ["exec-capable /git", (d) => { setGit(d, "rw,exec,nosuid,nodev,size=16m"); }],
+    ["suid-capable /git", (d) => { setGit(d, "rw,noexec,suid,nodev,size=16m"); }],
+    ["dev-capable /git", (d) => { setGit(d, "rw,noexec,nosuid,dev,size=16m"); }],
+    ["read-only /git", (d) => { setGit(d, "ro,noexec,nosuid,nodev,size=16m"); }],
+    ["oversized /git", (d) => { setGit(d, "rw,noexec,nosuid,nodev,size=32m"); }],
+    ["unsized /git", (d) => { setGit(d, "rw,noexec,nosuid,nodev"); }],
+    ["/git with extra option", (d) => { setGit(d, "rw,noexec,nosuid,nodev,size=16m,mode=1777"); }],
+    ["unexpected extra tmpfs", (d) => {
+      (d.HostConfig["Tmpfs"] as Record<string, string>)["/extra"] = "rw,noexec,nosuid,nodev,size=1m";
     }],
     ["pids limit", (d) => { d.HostConfig["PidsLimit"] = 0; }],
     ["host pid namespace", (d) => { d.HostConfig["PidMode"] = "host"; }],

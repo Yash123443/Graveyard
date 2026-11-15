@@ -289,6 +289,87 @@ Limitations:
 - `src/test/worker.test.ts` was written without running `tsc` or the tests
   (no shell was available). Pending external verification.
 
+## GitHub repository flow (opt-in extension of the local worker)
+
+On 2026-11-16 the live harness fetched the pinned `octocat/Hello-World` commit on Docker Desktop with
+`alpine/git:2.47.2`, returned `unsupported-repository` to the authorized job owner, and confirmed cleanup.
+See `DEVELOPMENT.md` for the mount fix and verification scope.
+
+With the extra variables below the worker also accepts jobs for **operator-pinned public GitHub commits**. It
+is off by default. Without the variables the worker is fixtures-only and no egress guard ever attests.
+
+What a pinned job does:
+
+1. `cloning`: fetches exactly the pinned commit (a full 40-hex SHA, never a branch) inside a disposable
+   container on an operator-provisioned `--internal` network whose only exit is a `github.com`-only proxy.
+   The tree policy (no symlinks, no unsafe or case-colliding paths, size and file limits) is checked before
+   checkout. The host never receives the repository; it reads four root files (`package.json`,
+   `package-lock.json`, `build.mjs`, `test.mjs`, each at most 64 KiB) as raw git blobs.
+2. `analyzing`: a pure check against the supported class. Unsupported repositories **complete** with verdict
+   `unsupported-repository` (outcome `unsupported-repository`) and the exact findings. Nothing is built or run.
+3. `building`/`testing`: only for the supported class, and only if registry egress is configured. Dependencies
+   are fetched with `npm ci --ignore-scripts` through a `registry.npmjs.org`-only proxy into a host-verified
+   cache, then the existing network-`none` offline install, build and test run in one disposable container.
+   Repository code (`build.mjs`, `test.mjs`) runs only there, never on the host. The Tester, and optionally the
+   agents, then act exactly as for fixtures. A diagnosis or patch proposal is never applied.
+
+**Supported class (narrow on purpose):** root `package.json` that passes the strict operator policy
+(`npm-operator-fixture.ts`: allowlisted fields, **no `scripts`**, no workspaces or overrides, production
+dependencies only), a lockfileVersion 3 `package-lock.json` with at most 8 flat unscoped registry packages
+(sha512, registry.npmjs.org URLs), and a root `build.mjs`. Because `scripts` are not allowed, ordinary npm
+projects are reported as unsupported with the specific reason. That is a limit of this slice, not a statement
+about the repository.
+
+Everything else is explicit: an unpinned URL fails as `infrastructure-unavailable` (nothing fetched); a refused
+or unverifiable egress, missing Docker, a failed git step, unconfirmed cleanup or an inconclusive pipeline fails
+the job with no result; a tree rejected by the acquisition policy is reported as `unsupported-repository`.
+
+### Variables
+
+| Variable | Meaning |
+|---|---|
+| `GRAVEYARD_GITHUB_CATALOG` | Absolute path of a JSON file `{ "<canonical repo URL>": "<40-hex commit>" }` (at most 50 entries, 16 KiB). A URL may not also be in the fixture catalog. Setting any variable below requires this one. |
+| `GRAVEYARD_GITHUB_RUNS_ROOT` | Existing worker-owned directory, separate from the fixtures, staging and cache roots. One `run-<hex>` directory per job, removed before the job ends. |
+| `GRAVEYARD_GITHUB_GIT_IMAGE` | Set this to a locally provisioned image with `git` and `sleep` and no declared Docker volumes. The worker never pulls it. The current fallback, `alpine/git:2.47.2`, declares `/git` and fails the acquisition mount check. |
+| `GRAVEYARD_GITHUB_EGRESS_NETWORK`, `_PROXY_CONTAINER`, `_PROXY_URL` | Required. Internal network, proxy container name and `http://<private IPv4>:<port>` of the github.com-only proxy. |
+| `GRAVEYARD_REGISTRY_EGRESS_NETWORK`, `_PROXY_CONTAINER`, `_PROXY_URL` | Optional, all three or none. The registry.npmjs.org-only counterpart; must use a different network and container. Without it a supported repository is reported as not runnable. |
+
+### Operator-provisioned egress (the worker builds none of this)
+
+Per target host, outside the worker (see `src/test/manual-clone-check.ts` for a working shape of the first two steps):
+
+1. `docker network create --driver bridge --internal --subnet 10.201.5.0/24 graveyard-gh-net`
+2. Run a proxy container (image with `node`, compiled `egress-proxy.js`, `acquisition-policy.js`, `url.js` and a
+   small runner calling `new EgressProxy({ bindHost, port, target })`; `target` is `github.com` by default or
+   `registry.npmjs.org`) created on that network with a fixed address (`--ip 10.201.5.10`), then also attached
+   to a network with upstream access (`docker network connect bridge ...`), with the label
+   `graveyard.egress-proxy=<host>`.
+3. Repeat with another network and subnet for `registry.npmjs.org`.
+
+On every acquisition the guard (`egress-guard.ts`) re-checks with `docker inspect` that the network is Internal and
+IPv4, the proxy container is running with the right label and address, and asks the proxy from inside its
+container for `CONNECT example.com:443` and for the other supported host; both must answer `403`. That is a
+narrow spot-check of an operator-provisioned topology. It does not prove isolation, that the allowed host is
+reachable, that the proxy is the expected code, or that nothing else sits on the network.
+
+### Manual end-to-end check (opt-in)
+
+```powershell
+$env:GRAVEYARD_GITHUB_E2E_GIT_IMAGE = "graveyard-git-fixture:local"
+pnpm run test:github-e2e
+```
+
+Use the example tag if that fixture image is already installed, or set the variable to your own locally
+provisioned Git image with no declared volumes. The live check passed with the example tag on Docker Desktop 29.9.2.
+
+Skipped by `pnpm test`. It creates its own temporary internal network and github.com-only proxy, starts the real API
+and worker with one pin (octocat/Hello-World at `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`), expects the job to
+complete as `unsupported-repository` (the repository has no package files), checks the authenticated
+`GET /api/jobs/:id/result`, and verifies that no container, network or temporary directory remains. It needs a
+running Docker daemon, local `node:22-alpine` and git images (nothing is pulled) and outbound access to
+`github.com:443`; it fails closed otherwise. No registry, no agents, no repository code is executed. See
+`DEVELOPMENT.md` ("GitHub flow end-to-end harness").
+
 ## Local worker (opt-in, separate process; tested with mocked Docker, and verified end to end once on real Docker for one controlled fixture, 2026-11-15)
 
 The API server never starts a worker. Jobs stay `queued` until an operator

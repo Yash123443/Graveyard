@@ -28,6 +28,21 @@
  *   GRAVEYARD_WORKER_AGENTS      off | kiro-v2 | kiro-v3 (default off; anything else is refused)
  *   LOG_LEVEL                    as for the API (default info)
  *
+ * GitHub flow (optional; github-runner.ts). Setting ANY of the variables below turns it on and then
+ * GRAVEYARD_GITHUB_CATALOG, GRAVEYARD_GITHUB_RUNS_ROOT and the three GRAVEYARD_GITHUB_EGRESS_* are required:
+ *   GRAVEYARD_GITHUB_CATALOG     absolute path of a JSON file (at most 16 KiB, 1 to 50 entries) mapping canonical
+ *                                repository URLs to FULL 40-hex commit SHAs the operator pinned. A URL may not
+ *                                also be in the fixture catalog.
+ *   GRAVEYARD_GITHUB_RUNS_ROOT   absolute, existing, worker-owned directory (separate from the other three roots)
+ *   GRAVEYARD_GITHUB_GIT_IMAGE   local image with git and sleep, never pulled (default alpine/git:2.47.2)
+ *   GRAVEYARD_GITHUB_EGRESS_NETWORK / _PROXY_CONTAINER / _PROXY_URL
+ *                                operator-provisioned internal network and github.com-only proxy (egress-guard.ts)
+ *   GRAVEYARD_REGISTRY_EGRESS_NETWORK / _PROXY_CONTAINER / _PROXY_URL
+ *                                optional, all three or none: the registry.npmjs.org-only counterpart. Without it
+ *                                repositories in the supported class are reported as not runnable.
+ *   The proxy URLs must be http://<private IPv4>:<port>. Nothing here changes the default: without these
+ *   variables the worker runs only operator fixtures and no network guard ever attests.
+ *
  * @module worker-config
  */
 
@@ -35,6 +50,7 @@ import { randomBytes } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { LOG_LEVELS, type LogLevel } from "./config.js";
+import { GIT_SHA_RE } from "./acquisition-policy.js";
 import { validateGithubUrl } from "./url.js";
 import { FIXTURE_NAME_RE } from "./pipeline-runner.js";
 
@@ -42,7 +58,50 @@ export const WORKER_ENABLE_VAR = "GRAVEYARD_WORKER_ENABLED";
 export const MAX_CATALOG_BYTES = 16 * 1024;
 export const MAX_CATALOG_ENTRIES = 50;
 
+/** Setting any of these (except as documented) turns on the GitHub flow and requires the rest. */
+export const GITHUB_ENV_VARS: readonly string[] = Object.freeze([
+  "GRAVEYARD_GITHUB_CATALOG",
+  "GRAVEYARD_GITHUB_RUNS_ROOT",
+  "GRAVEYARD_GITHUB_GIT_IMAGE",
+  "GRAVEYARD_GITHUB_EGRESS_NETWORK",
+  "GRAVEYARD_GITHUB_EGRESS_PROXY_CONTAINER",
+  "GRAVEYARD_GITHUB_EGRESS_PROXY_URL",
+  "GRAVEYARD_REGISTRY_EGRESS_NETWORK",
+  "GRAVEYARD_REGISTRY_EGRESS_PROXY_CONTAINER",
+  "GRAVEYARD_REGISTRY_EGRESS_PROXY_URL",
+]);
+export const DEFAULT_GIT_IMAGE = "alpine/git:2.47.2";
+const IMAGE_RE =
+  /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$/;
+const EGRESS_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+const FORBIDDEN_NETWORK_NAMES = new Set(["bridge", "host", "none", "default", "docker_gwbridge", "ingress"]);
+const PRIVATE_PROXY_RE = /^http:\/\/(?:10\.[0-9]{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}:[1-9][0-9]{0,4}$/;
+
 export type AgentMode = "off" | "kiro-v2" | "kiro-v3";
+
+/** Operator-provisioned proxy topology for one target host (see egress-guard.ts). */
+export interface EgressSettings {
+  network: string;
+  proxyContainer: string;
+  proxyUrl: string;
+}
+
+/**
+ * The GitHub flow (github-runner.ts). Present only when the operator set GRAVEYARD_GITHUB_CATALOG
+ * and everything it needs. Its absence leaves the worker exactly as it was: fixtures only.
+ */
+export interface GithubConfig {
+  catalogPath: string;
+  /** Canonical repository URL to the full lowercase 40-hex commit the operator pinned. */
+  pins: Readonly<Record<string, string>>;
+  /** Existing worker-owned directory; one run directory per job is created inside it. */
+  runsRoot: string;
+  gitImage: string;
+  /** github.com-only proxy topology. */
+  gitEgress: EgressSettings;
+  /** registry.npmjs.org-only proxy topology. Null: supported repositories are reported as not runnable. */
+  registryEgress: EgressSettings | null;
+}
 
 export interface WorkerConfig {
   databasePath: string;
@@ -59,6 +118,8 @@ export interface WorkerConfig {
   shutdownMs: number;
   agents: AgentMode;
   logLevel: LogLevel;
+  /** Absent or null: the GitHub flow is off. */
+  github?: GithubConfig | null;
 }
 
 /** The opt-in switch is not set. Not a failure of configuration. */
@@ -165,6 +226,132 @@ export function parseCatalog(text: string): { ok: true; catalog: Record<string, 
 }
 
 /**
+ * Parses the GitHub pin catalog: canonical repository URL -> full lowercase 40-hex commit. Branches,
+ * tags and abbreviated ids are refused, so a job can only ever fetch the exact commit the operator chose.
+ */
+export function parsePins(text: string): { ok: true; pins: Record<string, string> } | { ok: false; problems: string[] } {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return { ok: false, problems: ["GitHub catalog is not valid JSON"] };
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) {
+    return { ok: false, problems: ["GitHub catalog must be a JSON object mapping repository URLs to full commit SHAs"] };
+  }
+  const entries = Object.entries(doc as Record<string, unknown>);
+  if (entries.length === 0) return { ok: false, problems: ["GitHub catalog has no entries"] };
+  if (entries.length > MAX_CATALOG_ENTRIES) return { ok: false, problems: [`GitHub catalog has more than ${MAX_CATALOG_ENTRIES} entries`] };
+  const problems: string[] = [];
+  const pins: Record<string, string> = {};
+  entries.forEach(([url, commit], i) => {
+    const v = validateGithubUrl(url);
+    if (!v.ok || v.url !== url) problems.push(`GitHub catalog entry ${i + 1}: key is not a canonical GitHub repository URL`);
+    if (typeof commit !== "string" || !GIT_SHA_RE.test(commit)) {
+      problems.push(`GitHub catalog entry ${i + 1}: commit must be a full 40-character lowercase hex SHA`);
+    }
+    if (problems.length === 0 && typeof commit === "string") pins[url] = commit;
+  });
+  return problems.length > 0 ? { ok: false, problems } : { ok: true, pins };
+}
+
+function egressSettings(env: NodeJS.ProcessEnv, prefix: string, required: boolean, problems: string[]): EgressSettings | null {
+  const names = [`${prefix}_NETWORK`, `${prefix}_PROXY_CONTAINER`, `${prefix}_PROXY_URL`] as const;
+  const any = names.some((n) => env[n] !== undefined);
+  if (!any) {
+    if (required) problems.push(`${names.join(", ")} are required`);
+    return null;
+  }
+  const missing = names.filter((n) => env[n] === undefined || env[n] === "");
+  if (missing.length > 0) {
+    problems.push(`${missing.join(", ")} must be set together with the other ${prefix}_* variables`);
+    return null;
+  }
+  const network = env[names[0]] as string;
+  const proxyContainer = env[names[1]] as string;
+  const proxyUrl = env[names[2]] as string;
+  let ok = true;
+  if (!EGRESS_NAME_RE.test(network) || FORBIDDEN_NETWORK_NAMES.has(network.toLowerCase())) {
+    problems.push(`${names[0]} must be a dedicated user-defined Docker network name, not a default network`);
+    ok = false;
+  }
+  if (!EGRESS_NAME_RE.test(proxyContainer)) {
+    problems.push(`${names[1]} must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}`);
+    ok = false;
+  }
+  const portOk = ((): boolean => {
+    const m = /:([0-9]{1,5})$/.exec(proxyUrl);
+    return m !== null && Number(m[1]) >= 1 && Number(m[1]) <= 65535;
+  })();
+  if (!PRIVATE_PROXY_RE.test(proxyUrl) || !portOk) {
+    problems.push(`${names[2]} must be http://<private IPv4 literal>:<port>`);
+    ok = false;
+  }
+  return ok ? { network, proxyContainer, proxyUrl } : null;
+}
+
+function loadGithubConfig(
+  env: NodeJS.ProcessEnv,
+  deps: ConfigDeps,
+  problems: string[],
+  otherDirs: ReadonlyArray<[string, string]>,
+  fixtureCatalog: Readonly<Record<string, string>>,
+): GithubConfig | null {
+  if (env["GRAVEYARD_GITHUB_CATALOG"] === undefined) {
+    problems.push("GRAVEYARD_GITHUB_CATALOG is required when any other GRAVEYARD_GITHUB_* or GRAVEYARD_REGISTRY_* variable is set");
+    return null;
+  }
+  const before = problems.length;
+  const catalogPath = absPath(env, "GRAVEYARD_GITHUB_CATALOG", problems);
+  const runsRoot = absPath(env, "GRAVEYARD_GITHUB_RUNS_ROOT", problems);
+  if (runsRoot !== "") {
+    for (const [name, dir] of otherDirs) {
+      if (dir !== "" && (sameOrInside(runsRoot, dir) || sameOrInside(dir, runsRoot))) {
+        problems.push(`GRAVEYARD_GITHUB_RUNS_ROOT and ${name} must be separate directories (neither may equal or contain the other)`);
+      }
+    }
+  }
+  const gitImage = env["GRAVEYARD_GITHUB_GIT_IMAGE"] ?? DEFAULT_GIT_IMAGE;
+  if (gitImage.length > 255 || !IMAGE_RE.test(gitImage)) problems.push("GRAVEYARD_GITHUB_GIT_IMAGE is not a valid image reference");
+
+  const gitEgress = egressSettings(env, "GRAVEYARD_GITHUB_EGRESS", true, problems);
+  const registryEgress = egressSettings(env, "GRAVEYARD_REGISTRY_EGRESS", false, problems);
+  if (gitEgress !== null && registryEgress !== null) {
+    if (gitEgress.network === registryEgress.network || gitEgress.proxyContainer === registryEgress.proxyContainer) {
+      problems.push("the GitHub and registry egress must use different networks and different proxy containers");
+    }
+  }
+
+  let pins: Record<string, string> = {};
+  if (catalogPath !== "") {
+    let text: string | null = null;
+    try {
+      text = (deps.readCatalog ?? defaultReadCatalog)(catalogPath);
+    } catch {
+      problems.push(`GRAVEYARD_GITHUB_CATALOG must be a regular file of at most ${MAX_CATALOG_BYTES} bytes`);
+    }
+    if (text !== null) {
+      if (Buffer.byteLength(text, "utf8") > MAX_CATALOG_BYTES) {
+        problems.push(`GRAVEYARD_GITHUB_CATALOG must be a regular file of at most ${MAX_CATALOG_BYTES} bytes`);
+      } else {
+        const parsed = parsePins(text);
+        if (parsed.ok) pins = parsed.pins;
+        else problems.push(...parsed.problems);
+      }
+    }
+  }
+  for (const url of Object.keys(pins)) {
+    if (Object.prototype.hasOwnProperty.call(fixtureCatalog, url)) {
+      problems.push("a repository URL may be in the fixture catalog or the GitHub catalog, not both");
+      break;
+    }
+  }
+
+  if (problems.length > before || gitEgress === null) return null;
+  return { catalogPath, pins: Object.freeze(pins), runsRoot, gitImage, gitEgress, registryEgress };
+}
+
+/**
  * Validates the environment. Throws WorkerDisabledError when the opt-in switch is not "1", and
  * WorkerConfigError (listing every problem, never any secret) when anything else is invalid.
  */
@@ -245,6 +432,21 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env, deps: Con
     }
   }
 
+  let github: GithubConfig | null = null;
+  if (GITHUB_ENV_VARS.some((n) => env[n] !== undefined)) {
+    github = loadGithubConfig(
+      env,
+      deps,
+      problems,
+      [
+        ["GRAVEYARD_FIXTURES_ROOT", fixturesRoot],
+        ["GRAVEYARD_STAGING_ROOT", stagingRoot],
+        ["GRAVEYARD_NPM_CACHE_DIR", cacheDir],
+      ],
+      catalog,
+    );
+  }
+
   if (problems.length > 0) throw new WorkerConfigError(problems);
 
   return {
@@ -261,5 +463,6 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env, deps: Con
     shutdownMs,
     agents,
     logLevel,
+    github,
   };
 }

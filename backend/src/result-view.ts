@@ -16,6 +16,8 @@
  *   failing-with-diagnosis     the fixture fails; a model-authored diagnosis exists, no proposal.
  *   failing-undiagnosed        the fixture fails; no diagnosis (agents off, unavailable or no result).
  *   tests-not-run              the build passed but no tests ran. Not a verification.
+ *   unsupported-repository     a pinned GitHub commit was fetched and inspected but is outside the supported class
+ *                              (or dependency acquisition is not configured). Nothing was built or run.
  *   infrastructure-failed      the job could not be evaluated. Says nothing about the repository.
  *   timed-out                  the deadline passed. Says nothing about the repository.
  *   cancelled                  cancelled while queued. Nothing ran.
@@ -34,6 +36,7 @@ export type ResultOutcome =
   | "failing-with-diagnosis"
   | "failing-undiagnosed"
   | "tests-not-run"
+  | "unsupported-repository"
   | "infrastructure-failed"
   | "timed-out"
   | "cancelled"
@@ -72,7 +75,7 @@ export interface ResultView {
   infrastructure: ResultInfrastructure | null;
 }
 
-const VERDICTS = ["verified", "repository-failing", "tests-not-run"] as const;
+const VERDICTS = ["verified", "repository-failing", "tests-not-run", "unsupported-repository"] as const;
 const INFRA_KINDS = ["deadline-exceeded", "attempts-exhausted", "infrastructure-unavailable", "cleanup-unconfirmed"];
 const MAX_INFRA_MESSAGE = 300;
 
@@ -88,6 +91,8 @@ const SUMMARIES: Readonly<Record<ResultOutcome, string>> = {
     "The fixture fails. No diagnosis or patch was produced. Nothing was repaired.",
   "tests-not-run":
     "The build passed but no tests ran. This is not a verified result.",
+  "unsupported-repository":
+    "The repository was fetched at the pinned commit and inspected, but it is outside the supported class (or this deployment cannot run its dependencies). Nothing was built or tested. This is not a verdict that the repository is broken.",
   "infrastructure-failed":
     "The job could not be evaluated because of an infrastructure condition. This is not a diagnosis of the repository.",
   "timed-out":
@@ -96,6 +101,26 @@ const SUMMARIES: Readonly<Record<ResultOutcome, string>> = {
   "completed-without-result":
     "The job is marked completed but no valid result record was found. Treat this as no result.",
 };
+
+/** Used instead of SUMMARIES when the stored result says the source was a pinned GitHub commit. */
+const GITHUB_SUMMARIES: Readonly<Partial<Record<ResultOutcome, string>>> = {
+  passing:
+    "The public GitHub repository, unmodified at the pinned commit, installed its locked dependencies, built and passed its tests in the sandbox. No repair was performed or needed.",
+  "failing-with-patch-proposal":
+    "The GitHub repository fails at the pinned commit. A model-authored patch was proposed. It was not applied and not verified.",
+  "failing-with-diagnosis":
+    "The GitHub repository fails at the pinned commit. A model-authored diagnosis exists. No patch was proposed, applied or verified.",
+  "failing-undiagnosed":
+    "The GitHub repository fails at the pinned commit. No diagnosis or patch was produced. Nothing was repaired.",
+};
+
+function summaryFor(outcome: ResultOutcome, result: Record<string, unknown> | undefined): string {
+  if (result !== undefined && result["sourceKind"] === "github-pinned") {
+    const specific = GITHUB_SUMMARIES[outcome];
+    if (specific !== undefined) return specific;
+  }
+  return SUMMARIES[outcome];
+}
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -130,6 +155,7 @@ function classify(result: Record<string, unknown>): { outcome: ResultOutcome; di
   if (typeof verdict !== "string" || !(VERDICTS as readonly string[]).includes(verdict)) return null;
   if (verdict === "verified") return { outcome: "passing", diagnosed: false, patchProposed: false };
   if (verdict === "tests-not-run") return { outcome: "tests-not-run", diagnosed: false, patchProposed: false };
+  if (verdict === "unsupported-repository") return { outcome: "unsupported-repository", diagnosed: false, patchProposed: false };
 
   const analyst = result["analyst"];
   const fixer = result["fixer"];
@@ -155,7 +181,7 @@ export function presentResult(rec: JobResultRecord): ResultView {
   ): ResultView => ({
     ...base,
     outcome,
-    summary: SUMMARIES[outcome],
+    summary: summaryFor(outcome, extra.result),
     repair: {
       verified: false,
       patchApplied: false,

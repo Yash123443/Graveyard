@@ -1205,3 +1205,145 @@ Authorship: Kiro wrote the worker, result endpoint and harness source; an extern
 
 1. Real-Docker cases for a failing fixture, an uncatalogued URL and a stop during a job.
 2. Frontend update for the now-stale "no worker or result endpoint" text, only as a deliberate frontend change.
+
+
+---
+
+## 2026-11-15: GitHub repository flow in the opt-in worker (written by Kiro; compiled and unit-tested externally, no real GitHub run)
+
+> **Status update (2026-11-15, docs only):** the original text of this entry said nothing was compiled or run. That was true when Kiro wrote it and is now stale. The user reports that, in an external run after this entry was written, both `tsc` configurations compiled and the tests passed, including `src/test/github-runner.test.ts` (fake Docker and fake acquisition adapters). Kiro did not run anything and no counts were supplied, so none are recorded. **Still not done: any real-GitHub or real-Docker run of this flow.** The opt-in harness for that run, `src/test/manual-github-e2e-check.ts`, is described in "GitHub flow end-to-end harness" at the end of this file; it has been written and has not been run. The "(as written, unverified)" and "unverified assumptions" wording below refers to behaviour against real Docker and github.com.
+
+Kiro used file read, search and edit tools only (no shell, no git, as instructed) and edited only under `backend/` and `.kiro/`. No frontend or scene file, no dependency, no `server.ts`, no schema change. When this entry was first written nothing had been compiled or run; see the status update above.
+
+### Goal and shape
+
+Before this change the worker could only run operator-prepared fixtures, and the git acquisition, registry acquisition and egress proxy were detached foundations that no running worker invoked. This slice connects them: the running worker (`worker-main.js`, via `composeWorker`) now takes jobs for **operator-pinned public GitHub commits** when the operator sets the `GRAVEYARD_GITHUB_*` variables. The default (no variables) is unchanged: fixtures only, and no guard ever attests.
+
+### What was added or changed
+
+| File | Change |
+|---|---|
+| `src/github-runner.ts` (new) | `GithubJobRunner`: pinned URL -> clone -> analyze -> (supported class and registry egress) registry acquisition -> offline pipeline -> Tester/agents. Everything else is delegated to the fixture `PipelineJobRunner`. Three-part cleanup proof (sandbox, git, registry). |
+| `src/github-source.ts` (new) | The `afterCheckout` hook: reads four root files as raw git blobs inside the acquisition container (`ls-tree -z` with fixed names, then `cat-file blob <id>`), capped at 64 KiB each. The host never receives the repository. |
+| `src/github-analysis.ts` (new) | Pure analysis of those files against the supported class (`checkOperatorFixture` plus a root `build.mjs`), with fixed-text findings and counted facts. |
+| `src/egress-guard.ts` (new) | `OperatorEgressGuard`: attests an operator-provisioned topology after `docker inspect` checks and two probes run inside the proxy container. |
+| `src/worker-config.ts` | Optional `GithubConfig` (`GRAVEYARD_GITHUB_*`, `GRAVEYARD_REGISTRY_EGRESS_*`), `parsePins`, strict validation (full 40-hex pins, private proxy IPv4, separate directories, distinct networks, no URL in both catalogs). `WorkerConfig.github` is optional so existing code and tests compile unchanged. |
+| `src/worker-compose.ts` | Builds the guards, `GitAcquisition`, `NpmRegistryAcquisition`, `ControlledPipeline` per run and wraps the fixture runner in `GithubJobRunner` only when `config.github` is set. New startup checks (runs root, registry driver). Test seams: `githubSeams`. |
+| `src/pipeline-runner.ts` | Additive: optional `ControlledSource.origin` (a `github-pinned` source changes `sourceKind`, adds `source`, and corrects the note) and optional `buildNote`. Fixture behaviour is unchanged. |
+| `src/result-view.ts` | New verdict `unsupported-repository` -> outcome `unsupported-repository`; GitHub-specific summaries for `passing`/`failing-*` so the text no longer says "operator-prepared fixture". `repair.verified` and `repair.patchApplied` remain constant `false`. |
+| `src/worker-main.ts`, `.env.example`, `README.md` | Startup log fields, commented variables, operator section. |
+| `src/test/github-runner.test.ts` (new) | Analysis, root-file reader, runner through the real `JobWorker`, cleanup proofs, egress guard, configuration, and composition. |
+
+### Exact behaviour (as written; compiled and unit-tested with fakes, not run against real Docker or GitHub)
+
+1. A job whose canonical URL is a key of the pin catalog (and not in the fixture catalog) is handled by `GithubJobRunner`. Any other URL goes to the fixture runner, which refuses unknown repositories with `infrastructure-unavailable` (nothing fetched).
+2. `cloning`: `GitAcquisition.acquire` with the pinned SHA. It needs the attestation of `OperatorEgressGuard` for `github.com` and an `Internal` Docker network, creates one hardened container (non-root, caps dropped, read-only root, tmpfs only, no mounts, `--pull never`), verifies its configuration with `docker inspect`, shallow-fetches the exact SHA, checks the tree listing (symlinks, unsafe or case-colliding paths, size and file limits) before checkout, then runs the hook, then always removes the container with proof.
+3. `analyzing`: `analyzeRootFiles`. Outside the supported class -> the job completes with `unsupported-repository` and findings such as `no-build-script`, `no-package-lock`, `dependency-policy-rejected` (for example any `scripts`), `file-unusable`, `source-policy-rejected` (the tree policy refused the commit) or `dependency-acquisition-not-configured`. Nothing is built or run.
+4. `building` and `testing`: supported class with registry egress configured -> the four files are written to a fresh `run-<hex>` directory under `GRAVEYARD_GITHUB_RUNS_ROOT`, then `runRegistryThenOffline`: registry acquisition (`npm ci --ignore-scripts` through the registry-only proxy, host-verified cache handoff bound to every lockfile integrity), then the existing network-`none` offline pipeline with that cache mounted read-only. `PipelineJobRunner` does the Tester verdict, optional agents and the single result event. A not-run or refused acquisition fails the job (no result) with the acquisition reason appended.
+5. The run directory is removed by exact path before the runner returns. If removal fails, a would-be `completed` becomes a failure.
+6. `cleanup(req)` requires three confirmed proofs for the execution (sandbox container, git acquisition container, registry acquisition container with id `<job>-npm:<attempt>`).
+
+### What it does and does not claim
+
+- It is a real path from a running worker to a pinned public GitHub commit. It compiles and its unit tests (fake Docker, fake adapters) pass, per the user's external run. It is not verified against reality: no real Docker, network or GitHub contact through this path has happened.
+- The egress guard attests an **operator-provisioned** topology after narrow checks. It does not prove isolation (see `egress-guard.ts`). It is the only new thing that can attest; the default guard still never does, and the worker never builds the network or the proxy.
+- Repository code executes only inside the existing network-`none` container (`node build.mjs`, `node --test test.mjs`), never on the host, and dependency install scripts are disabled by flag. Before this change that code was always operator-authored; now its author is whoever owns the pinned repository, and the sandbox hardening has not had a security review. Pin only repositories you would accept running in that sandbox.
+- No repair: no patch is applied or verified. `repair.verified` and `repair.patchApplied` stay `false`.
+- No branch or default-branch resolution: a job cannot choose a commit. A job for a pinned URL always gets the operator's commit.
+
+### Narrow supported class and its consequence
+
+A repository is runnable only if its root has a `package.json` passing the strict operator allowlist (no `scripts`, no workspaces, production dependencies only), a lockfileVersion 3 lock with at most 8 flat unscoped registry packages, and a `build.mjs`. Because `scripts` are not allowed, most real projects are reported `unsupported-repository` with the specific reason. Widening this needs a different, reviewed execution design (running npm scripts of untrusted code), which was deliberately not attempted.
+
+### Known gaps and risks
+
+- The fixture catalog and its fixtures root are still required by the worker even when only GitHub jobs are wanted (an unused one-entry catalog is enough).
+- Unverified assumptions: the git image runs `git ls-tree`/`cat-file` via `docker exec` as uid 65532 in the tmpfs `/work` with the entrypoint cleared; `docker exec ... node -e` works in the operator's proxy container; `npm ci --offline` accepts the handed-over cache for a multi-package lock (earlier note); Docker Desktop bind-source forms for `<runs root>/run-x/cache` (earlier notes).
+- `GitAcquisition` default limits apply (up to 20 000 files, 100 MiB, 256 MiB tmpfs). A large repository can be accepted by the tree policy and still take the full 300 s budget.
+- A leftover staging directory from a crashed process is left in place; names are random per job so later runs are not blocked. Leftover run directories under the runs root need manual removal.
+- Frontend: the workspace text saying no worker or result endpoint exists is still stale and does not call `/result`; deliberately unchanged.
+
+### Commands (build and unit tests already passed externally; kept for reference)
+
+```powershell
+cd backend
+pnpm run build
+pnpm test                       # tsc -p tsconfig.test.json, then node --test dist-test/test/*.js
+node --test dist-test/test/github-runner.test.js   # the focused file
+```
+
+The manual real run is `pnpm run test:github-e2e` (unsupported repository first, needs only the GitHub proxy; see "GitHub flow end-to-end harness" at the end of this file). A supported-repository run needs registry egress and has no harness yet. Record outcomes here and in `.kiro/PROJECT.md`.
+
+### Next steps
+
+1. Done externally (per the user): `tsc` for both configs and the test suite.
+2. Manual real-Docker run, unsupported repository first (harness written, not run), then a supported one (no harness).
+3. Decide whether to make the fixture catalog optional for GitHub-only operation, and whether to update the frontend workspace text.
+
+
+
+---
+
+## 2026-11-15: GitHub flow end-to-end harness (written by Kiro, NOT compiled or run)
+
+Kiro made file edits only: no shell, no `tsc`, no tests, no Docker, no network. **The harness has not been compiled or run, and no real-GitHub run of the worker has occurred.** Edits are under `backend/` and `.kiro/` only: `src/test/manual-github-e2e-check.ts` (new), `github-e2e.env` (new, one line), one script in `package.json`, and documentation. No production source behaviour changed (only header comments in the GitHub-flow modules were corrected, see below).
+
+### What the harness does
+
+`src/test/manual-github-e2e-check.ts` is skipped unless `GRAVEYARD_MANUAL_GITHUB_E2E=1`, so `pnpm test` reports it as skipped and never touches Docker or the network. The single explicit command is `pnpm run test:github-e2e`, which builds the test output and runs only this file with `--env-file=github-e2e.env`. It targets exactly one repository, hard-coded: `https://github.com/octocat/Hello-World` at `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`. No inputs are required.
+
+1. Fails closed before creating anything unless `docker version` answers, `node:22-alpine` and the git image (default `alpine/git:2.47.2`, override with `GRAVEYARD_GITHUB_E2E_GIT_IMAGE`) exist locally (never pulled), and the compiled `egress-proxy.js`, `acquisition-policy.js`, `url.js` and `fixture-pipeline-driver.js` exist in `dist-test`.
+2. Builds the topology of `manual-clone-check.ts`, with random per-run names and the label `graveyard.manual-github-e2e=<run id>`: an `--internal` network on a random `10.2xx.x.0/24`, and one hardened proxy container running `EgressProxy` for target `github.com`, at `.10` on that network and on the default bridge, also labelled `graveyard.egress-proxy=github.com` (what `OperatorEgressGuard` requires). It checks `Internal`, the proxy's two attachments, a `listening` log line and a probe: `CONNECT example.com:443` must answer 403.
+3. Creates five sibling `run-<hex>` directories under gitignored `backend/.tmp-fixtures`: database and catalogs, a placeholder fixtures root, staging, an **empty** npm cache directory and the GitHub runs root. The placeholder fixture (`package.json`, `package-lock.json`, `build.mjs`, keyed by an unrelated URL) exists only because the worker requires a fixture catalog; no job names it. The real `data/` database is never opened.
+4. Starts the real API (`buildApp`, `127.0.0.1`, ephemeral port) and the real worker through `startWorker` with an explicit environment object: the GitHub catalog holds exactly the one pin, the egress variables point at the harness network and proxy, agents `off`, and **no `GRAVEYARD_REGISTRY_EGRESS_*` variables**. No seam except the log sink is injected, so `OperatorEgressGuard`, `GitAcquisition`, `readRootFiles` and the Docker cleanup proofs are the real ones. It refuses to continue if the composed config has registry egress, more than one pin, or agents on.
+5. Creates the job with consent, checks 401 (no token) and 403 (another well-formed token), then polls `GET /api/jobs/:id/result` with the owner token for at most 360 s.
+6. Expects `completed`, stage `done`, outcome and stored verdict `unsupported-repository`, `sourceKind` `github-pinned`, the pinned URL and commit in `source`, analysis `supported: false` with **exactly** the findings `no-build-script`, `no-package-json`, `no-package-lock` and every `facts.present` value `false`, `repair.verified`, `repair.patchApplied`, `repair.patchProposed` and `repair.diagnosed` all `false`, no infrastructure record, `Cache-Control: no-store`, and the token absent from every body and from the worker log.
+7. Cleanup, in order: `worker.stop()`, `app.close()`, a query by label and by name for acquisition and sandbox containers of both possible execution ids (`<jobId>:1`, `<jobId>:2`; a leftover is reported and removed by full container id), removal of the proxy container and network only if the run label matches, removal of the temp app directory, then `removeRunDir` (exact path, no recursive delete) for each run directory. Any leftover or any failed expectation fails the test and prints the run id.
+
+What never happens: no registry contact, no npm install, no agent, no build or test container (Hello-World is unsupported, so the pipeline is never started), no repository code on the host or in a container. The host reads only the root tree listing of the commit; none of the four named files exists, so no blob is read.
+
+### Run (outside the restricted sandbox; PowerShell, from `backend/`)
+
+```powershell
+pnpm run test:github-e2e
+```
+
+Docker Desktop must be running, `node:22-alpine` and the git image must be present locally, and the Docker host needs outbound access to `github.com:443`. A `FAIL-CLOSED:` line means a precondition or setup step failed; the run then makes no claim about the worker, the proxy, Docker or GitHub.
+
+### Assumptions that a first run may contradict
+
+- `node --env-file=github-e2e.env --test <file>` is accepted together (Node 22.13+; the existing `test:worker-e2e` uses the same form and passed).
+- `alpine/git` runs with the entrypoint cleared, `git ls-tree` works via `docker exec` as uid 65532 in `/work`, and Hello-World's single-file tree passes the acquisition tree policy (earlier `manual-clone-check.ts` runs measured 1 file, 13 bytes).
+- Docker reports the harness proxy attached with exactly the configured address, so `OperatorEgressGuard` attests; its probe for `registry.npmjs.org:443` must also answer 403 from a `github.com`-only proxy.
+- The canonical, case-preserved URL `https://github.com/octocat/Hello-World` is accepted by the acquisition policy and by github.com.
+- Type details (`Extract<StartResult, ...>`, the `findings` array handling) were not compiled.
+
+### Not covered even if it passes
+
+One repository, one machine, one unsupported-repository outcome. No supported-repository run, registry acquisition, offline build or test, agents, failing git step, egress refusal, timeout, cancel or mid-job stop against real Docker. The proxy probe and the guard's checks are narrow spot checks, not proof of isolation. A pass would not be a repair and not production proof.
+
+### Header comments corrected in the same change
+
+`github-runner.ts`, `github-source.ts`, `github-analysis.ts`, `egress-guard.ts` and `worker-compose.ts` said "written without compiling or running anything". They now say that they compiled and passed unit tests externally and have not run against real Docker or GitHub. Comments only.
+
+### Next steps
+
+1. Run `pnpm run test:github-e2e` and record the exact output here and in `.kiro/PROJECT.md`. Until then, no real-GitHub worker run is claimed.
+2. Only afterwards consider a supported-repository run (needs registry egress and a repository in the narrow class).
+
+### 2026-11-16 live verification (Codex)
+
+Docker Desktop 29.9.2 reproduced the original pre-start refusal. The local `alpine/git:2.47.2` image declares `/git`, which Docker reported in `Mounts` as an anonymous writable volume. The intended `/tmp` and `/work` mounts appeared in `HostConfig.Tmpfs`. The acquisition validator was kept intact.
+
+From `backend/`, both TypeScript builds and all 113 focused Git acquisition and GitHub runner tests passed. The live check used the existing volume-free `graveyard-git-fixture:local` image. The compiled harness was invoked directly because the pnpm wrapper had previously hit a dependency-build policy error.
+
+```powershell
+$env:GRAVEYARD_GITHUB_E2E_GIT_IMAGE = "graveyard-git-fixture:local"
+node --env-file=github-e2e.env --test --test-reporter=spec dist-test/test/manual-github-e2e-check.js
+```
+
+The pinned `octocat/Hello-World` job completed with `stage=done` and `outcome=unsupported-repository`. The authenticated result contained `no-build-script`, `no-package-json`, and `no-package-lock`. The harness passed and removed its temporary directories, and a separate Docker query found no harness-labeled containers or networks. Codex performed this verification. Supported-repository execution and repair remain pending.
+
+### 2026-11-16 verification with the default Git image
+
+Kiro added a 16 MiB tmpfs at `/git` with `noexec`, `nosuid` and `nodev` to override the image's anonymous volume. The worker checks the requested options in Docker's inspect response and continues to reject unexpected mounts. Codex compiled both TypeScript projects and passed 123 focused tests, then ran the compiled GitHub harness with the default `alpine/git:2.47.2` image on Docker Desktop 29.9.2. The owner received the expected unsupported result for the pinned Hello-World commit, and the harness confirmed cleanup.
