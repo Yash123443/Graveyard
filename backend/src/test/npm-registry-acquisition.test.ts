@@ -29,6 +29,7 @@ import {
   FIXED_PACKAGE_JSON,
   NPM_ACQ_ARGV,
   NpmRegistryAcquisition,
+  OPERATOR_FIXTURE_ID,
   REGISTRY_EGRESS_HOSTS,
   STAGED_ACQ_DRIVER_NAME,
   buildCreateArgs,
@@ -41,6 +42,17 @@ import {
   type RunCtx,
 } from "../npm-registry-acquisition.js";
 import { contentPathFor, indexPathFor, tarballKey } from "../npm-registry-cache.js";
+import {
+  EXPECTED_DEFAULT,
+  cacheFilesFor,
+  lockEntry,
+  operatorDoc,
+  tarballBytesFor,
+  textsOf,
+  withExtraRootPackages,
+  type Json,
+  type OperatorDoc,
+} from "./operator-fixture-helpers.js";
 
 const IMAGE = NODE_FIXTURE_IMAGE;
 const MB = 1024 * 1024;
@@ -706,5 +718,213 @@ describe("cleanup", () => {
     const before = r.docker.calls.length;
     assert.equal((await r.acq.cleanup({ executionId: "bad id" })).confirmed, false);
     assert.equal(r.docker.calls.length, before);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Operator-supplied multi-package lockfile v3 fixtures. Synthetic data, mocked docker. These show the
+// gating and the plumbing only; they do not show that real npm or the registry accept such files.
+// ---------------------------------------------------------------------------
+
+describe("acquire: operator fixture", () => {
+  const REPORT_3: AcquireResult = { ...REPORT_OK, stdoutTail: "\nadded 3 packages in 2s\n" };
+  const opReq = (r: Rig, d: OperatorDoc = operatorDoc()): RegistryAcquisitionRequest => ({
+    ...r.req,
+    fixture: OPERATOR_FIXTURE_ID,
+    operatorFixture: textsOf(d),
+  });
+  const pk = (d: OperatorDoc): Json => d.lock["packages"];
+
+  it("is unavailable by default: the default guard never attests and docker is never contacted", async () => {
+    const r = rig({ egress: new UnavailableEgressGuard() });
+    const out = await r.acq.acquire(opReq(r));
+    assert.equal(out.kind, "network-unavailable");
+    assert.deepEqual(r.docker.names, []);
+    assert.equal(out.cleanup, null);
+  });
+
+  it("rejects a policy-violating fixture before the guard is asked and before docker is contacted", async () => {
+    const mutations: Array<[string, (d: OperatorDoc) => void]> = [
+      ["devDependencies", (d) => { d.pkg["devDependencies"] = { gamma: "^0.3.0" }; }],
+      ["install script", (d) => { d.pkg["scripts"] = { postinstall: "node x.js" }; }],
+      ["lockfileVersion 2", (d) => { d.lock["lockfileVersion"] = 2; }],
+      ["git specifier", (d) => { d.pkg["dependencies"]["alpha"] = "git+https://github.com/u/r.git"; }],
+      ["other registry", (d) => { pk(d)["node_modules/gamma"]["resolved"] = "https://evil.example/gamma/-/gamma-0.3.4.tgz"; }],
+      ["sha1 integrity", (d) => { pk(d)["node_modules/gamma"]["integrity"] = "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA="; }],
+      ["nested package", (d) => { pk(d)["node_modules/alpha/node_modules/gamma"] = lockEntry("gamma", "0.3.4"); }],
+      ["too many packages", (d) => { withExtraRootPackages(d, 6); }],
+      ["optional entry", (d) => { pk(d)["node_modules/gamma"]["optional"] = true; }],
+    ];
+    for (const [label, mutate] of mutations) {
+      let asked = 0;
+      const guard: EgressGuard = {
+        attest: (): Promise<EgressAttestation> => {
+          asked += 1;
+          return stubGuard().attest();
+        },
+      };
+      const r = rig({ egress: guard });
+      const d = operatorDoc();
+      mutate(d);
+      const out = await r.acq.acquire(opReq(r, d));
+      assert.equal(out.kind, "rejected", label);
+      assert.equal(asked, 0, label);
+      assert.deepEqual(r.docker.names, [], label);
+      assert.deepEqual(readdirSync(r.staging), [], label);
+    }
+  });
+
+  it("rejects mismatched fixture selectors and malformed operator input", async () => {
+    const r = rig();
+    const t = textsOf(operatorDoc());
+    const bad: Array<Partial<RegistryAcquisitionRequest>> = [
+      { fixture: FIXED_FIXTURE_ID, operatorFixture: t },
+      { fixture: OPERATOR_FIXTURE_ID },
+      { fixture: OPERATOR_FIXTURE_ID, operatorFixture: undefined },
+      { fixture: OPERATOR_FIXTURE_ID, operatorFixture: null as unknown as RegistryAcquisitionRequest["operatorFixture"] },
+      { fixture: OPERATOR_FIXTURE_ID, operatorFixture: {} as unknown as RegistryAcquisitionRequest["operatorFixture"] },
+      { fixture: OPERATOR_FIXTURE_ID, operatorFixture: { ...t, extra: "x" } as unknown as RegistryAcquisitionRequest["operatorFixture"] },
+      { fixture: OPERATOR_FIXTURE_ID, operatorFixture: { packageJson: 1, packageLock: 2 } as unknown as RegistryAcquisitionRequest["operatorFixture"] },
+      { fixture: OPERATOR_FIXTURE_ID, operatorFixture: { packageJson: t.packageJson } as unknown as RegistryAcquisitionRequest["operatorFixture"] },
+      { fixture: "operator-lockfile-v2", operatorFixture: t },
+      { fixture: "", operatorFixture: t },
+    ];
+    for (const b of bad) {
+      const out = await r.acq.acquire({ ...r.req, ...b });
+      assert.equal(out.kind, "rejected", JSON.stringify(Object.keys(b)));
+    }
+    assert.deepEqual(r.docker.names, []);
+  });
+
+  it("stages exactly the operator's bytes, expects exactly its packages, and requires npm's own count to match", async () => {
+    const r = rig();
+    const d = operatorDoc();
+    const t = textsOf(d);
+    let seen: Record<string, string> = {};
+    r.docker.behaviour = (source) => {
+      seen = Object.fromEntries(readdirSync(source).map((n) => [n, readFileSync(join(source, n), "utf8")]));
+      return exited(REPORT_3);
+    };
+    const out = await r.acq.acquire(opReq(r, d));
+    assert.equal(out.kind, "acquired");
+    assert.ok(out.kind === "acquired" && out.packagesAdded === 3);
+    assert.equal(seen["package.json"], t.packageJson);
+    assert.equal(seen["package-lock.json"], t.packageLock);
+    assert.deepEqual(Object.keys(seen).sort(), ["npm-acquire-driver.mjs", "package-lock.json", "package.json"]);
+    assert.deepEqual(r.handoffCalls[0]?.expected, EXPECTED_DEFAULT);
+    assert.equal(out.stagingRemoved, true);
+    assert.ok(out.cleanup?.confirmed === true);
+    assert.deepEqual(readdirSync(r.staging), []);
+  });
+
+  it("refuses when npm adds a different number of packages than the lockfile lists", async () => {
+    for (const tailText of ["\nadded 1 package in 2s\n", "\nadded 2 packages in 2s\n", "\nadded 4 packages in 2s\n", "", "nothing here\n"]) {
+      const r = rig();
+      r.docker.behaviour = exited({ ...REPORT_OK, stdoutTail: tailText });
+      const out = await r.acq.acquire(opReq(r));
+      assert.equal(out.kind, "summary-mismatch", tailText);
+      assert.equal(r.handoffCalls.length, 0);
+    }
+  });
+
+  it("builds the same container isolation as the fixed fixture; the fixture only changes staged bytes", async () => {
+    const createArgs = async (mode: "fixed" | "operator"): Promise<string[]> => {
+      const r = rig();
+      if (mode === "operator") r.docker.behaviour = exited(REPORT_3);
+      await r.acq.acquire(mode === "fixed" ? r.req : opReq(r));
+      const call = r.docker.calls.find((c) => c.args[0] === "create");
+      assert.ok(call);
+      return call.args.map((a) => a.replace(/source=[^,]+/, "source=<staged>"));
+    };
+    const fixed = await createArgs("fixed");
+    const operator = await createArgs("operator");
+    assert.deepEqual(operator, fixed);
+    assert.equal(operator.some((a) => /alpha|beta|gamma|op-fixture/.test(a)), false, "no operator text reaches docker arguments");
+  });
+
+  it("never starts a container whose configuration differs from the intent, in operator mode too", async () => {
+    for (const tamper of [
+      (x: Doc) => { x.HostConfig["NetworkMode"] = "bridge"; },
+      (x: Doc) => { x.HostConfig["Privileged"] = true; },
+      (x: Doc) => { x.Config["Env"] = [...(x.Config["Env"] as string[]), "NPM_CONFIG_REGISTRY=https://evil.example/"]; },
+      (x: Doc) => { x.Mounts.push({ Type: "bind", Source: "/", Destination: "/host", RW: true }); },
+    ]) {
+      const r = rig();
+      r.docker.tamper = tamper;
+      const out = await r.acq.acquire(opReq(r));
+      assert.equal(out.kind, "isolation-violation");
+      assert.equal(r.docker.started, false);
+      assert.equal(r.handoffCalls.length, 0);
+    }
+  });
+
+  it("does not trust the output when cleanup or staging removal cannot be proven", async () => {
+    const a = rig();
+    a.docker.behaviour = exited(REPORT_3);
+    a.docker.rmRemoves = false;
+    assert.equal((await a.acq.acquire(opReq(a))).kind, "cleanup-unconfirmed");
+    assert.equal(a.handoffCalls.length, 0);
+
+    const b = rig();
+    b.docker.behaviour = (source) => {
+      writeFileSync(join(source, "intruder"), "x");
+      return exited(REPORT_3);
+    };
+    assert.equal((await b.acq.acquire(opReq(b))).kind, "staging-cleanup-failed");
+    assert.equal(b.handoffCalls.length, 0);
+  });
+
+  it("a driver failure is install-failed and never acquired", async () => {
+    const r = rig();
+    r.docker.behaviour = exited(reportFail());
+    const out = await r.acq.acquire(opReq(r));
+    assert.equal(out.kind, "install-failed");
+    assert.equal(r.handoffCalls.length, 0);
+    assert.ok(out.cleanup?.confirmed === true);
+  });
+
+  describe("with the real cache handoff", () => {
+    it("writes a verified cache binding every package to its lockfile integrity", async () => {
+      const r = rig({}, false);
+      r.docker.behaviour = exited({ ...REPORT_3, files: cacheFilesFor(EXPECTED_DEFAULT) });
+      const out = await r.acq.acquire(opReq(r));
+      assert.equal(out.kind, "acquired");
+      assert.ok(out.kind === "acquired");
+      assert.equal(out.summary.files, 6);
+      assert.equal(out.summary.contentFiles, 3);
+      assert.equal(out.summary.indexFiles, 3);
+      assert.deepEqual(out.summary.tarballs, EXPECTED_DEFAULT);
+      assert.deepEqual(readdirSync(join(r.runDir, "cache", "_cacache")).sort(), ["content-v2", "index-v5"]);
+    });
+
+    it("rejects the cache and writes nothing when one tarball's bytes are not the lockfile's", async () => {
+      const r = rig({}, false);
+      const swapped = (name: string, version: string): Buffer =>
+        name === "beta" ? Buffer.from("not the tarball the lockfile names\n") : tarballBytesFor(name, version);
+      r.docker.behaviour = exited({ ...REPORT_3, files: cacheFilesFor(EXPECTED_DEFAULT, swapped) });
+      const out = await r.acq.acquire(opReq(r));
+      assert.equal(out.kind, "handoff-rejected");
+      assert.deepEqual(readdirSync(r.runDir), []);
+      assert.ok(out.cleanup?.confirmed === true);
+    });
+
+    it("rejects the cache when a listed package is missing, even though npm's count matched", async () => {
+      const r = rig({}, false);
+      const files = cacheFilesFor(EXPECTED_DEFAULT.filter((p) => p.name !== "gamma"));
+      r.docker.behaviour = exited({ ...REPORT_3, files });
+      const out = await r.acq.acquire(opReq(r));
+      assert.equal(out.kind, "handoff-rejected");
+      assert.deepEqual(readdirSync(r.runDir), []);
+    });
+
+    it("rejects a cache carrying an extra, unlisted package", async () => {
+      const r = rig({}, false);
+      const unlisted = cacheFilesFor([{ name: "intruder", version: "1.0.0", integrity: "unused: derived from the exported bytes" }]);
+      r.docker.behaviour = exited({ ...REPORT_3, files: [...cacheFilesFor(EXPECTED_DEFAULT), ...unlisted] });
+      const out = await r.acq.acquire(opReq(r));
+      assert.equal(out.kind, "handoff-rejected");
+      assert.deepEqual(readdirSync(r.runDir), []);
+    });
   });
 });

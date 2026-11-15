@@ -114,6 +114,42 @@ describe("runRegistryThenOffline", () => {
     }
   });
 
+  it("passes an operator-fixture acquisition request through unchanged and gates the offline stage the same way", async () => {
+    const seen: RegistryAcquisitionRequest[] = [];
+    const op: RegistryAcquisitionRequest = {
+      ...ACQ_REQ,
+      fixture: "operator-lockfile-v3",
+      operatorFixture: { packageJson: "{}", packageLock: "{}" },
+    };
+    const make = (a: RegistryAcquisitionResult): { d: RegistryPipelineDeps; made: string[] } => {
+      const made: string[] = [];
+      return {
+        made,
+        d: {
+          acquire: (req) => {
+            seen.push(req);
+            return Promise.resolve(a);
+          },
+          makePipeline: (cacheDir) => {
+            made.push(cacheDir);
+            return { run: () => Promise.resolve(pipelineResult("success", "ok")) };
+          },
+        },
+      };
+    };
+    const ok = make(acquired({ packagesAdded: 3 }));
+    const r = await runRegistryThenOffline(ok.d, { acquisition: op, pipeline: PIPE_REQ });
+    assert.equal(r.status, "success");
+    assert.deepEqual(ok.made, ["/run/cache"]);
+    assert.equal(seen[0], op);
+    assert.match(r.detail, /acquired 3 package/);
+
+    const refused = make({ kind: "rejected", reason: "x", cleanup: null, stagingRemoved: null, driverSha256: null, executionId: null });
+    const n = await runRegistryThenOffline(refused.d, { acquisition: op, pipeline: PIPE_REQ });
+    assert.equal(n.status, "not-run");
+    assert.deepEqual(refused.made, []);
+  });
+
   it("reports not-run, never a throw, when the offline stage cannot be built or raises", async () => {
     const raising = deps(acquired(), new Error("boom"));
     assert.equal((await runRegistryThenOffline(raising.d, { acquisition: ACQ_REQ, pipeline: PIPE_REQ })).status, "not-run");

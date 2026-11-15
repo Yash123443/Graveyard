@@ -15,8 +15,14 @@
  * The caller owns every directory: the run directory that receives `<runDir>/cache`, the fixtures
  * and staging roots of the pipeline, and their removal (fixture-workspace.removeRunDir).
  * The pipeline fixture directory must contain the SAME package.json and package-lock.json that were
- * acquired (FIXED_PACKAGE_JSON, FIXED_LOCKFILE); if it does not, the offline install fails with a
- * cache miss and that is reported as the pipeline's failure.
+ * acquired (FIXED_PACKAGE_JSON and FIXED_LOCKFILE for the fixed fixture, or the exact
+ * `operatorFixture` texts for an operator fixture; this function cannot check that, it has no file
+ * access); if it does not, the offline install fails with a cache miss and that is reported as the
+ * pipeline's failure. Operator fixtures add no code here: the request is passed to `acquire`
+ * unchanged and the gate above is identical. The offline stage applies the base checkNpmFixture
+ * (controlled-pipeline.ts, step 3 of its header) to the same bytes, which the operator gate has
+ * already passed. Unverified: that the offline `npm ci --offline` accepts the handed-over cache for
+ * a multi-package lock; any refusal there is reported as the pipeline's failure or not-run.
  *
  * @module registry-pipeline
  */

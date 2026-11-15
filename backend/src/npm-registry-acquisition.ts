@@ -4,10 +4,19 @@
  * network-none build/test stage (controlled-pipeline.ts) can mount read-only.
  *
  * Foundation only. NOT a JobRunner, NOT wired to the server, worker or any job. It accepts no
- * repository, no URL, no package name and no lockfile from a request: the fixture id must equal
- * FIXED_FIXTURE_ID and the bytes of package.json and package-lock.json are the constants below.
+ * repository, no URL and no package name from a request. Two fixture modes exist:
+ *  - FIXED_FIXTURE_ID (default, unchanged, externally verified): the bytes of package.json and
+ *    package-lock.json are the constants below and `operatorFixture` must be absent;
+ *  - OPERATOR_FIXTURE_ID (added later by Kiro, NOT compiled or run): the CALLER (operator code, never
+ *    an HTTP request) passes the two file texts in `operatorFixture`. They must pass
+ *    checkOperatorFixture (npm-operator-fixture.ts): the unchanged lock policy first, then at most 8
+ *    flat, unscoped, production-only registry packages from a lockfileVersion 3 lock of at most
+ *    64 KiB. A rejected fixture returns `rejected` before the attestation or Docker is contacted.
+ *    Everything after that point (egress gates, container isolation, `--ignore-scripts`, cleanup
+ *    proof, host-verified cache handoff bound to every lockfile integrity) is the same code path.
+ * The default egress guard still never attests, so by default neither mode creates anything.
  * Written without running anything: until an operator runs the tests and the opt-in harness
- * (test/manual-registry-acquisition-check.ts), none of this is verified.
+ * (test/manual-registry-acquisition-check.ts), the operator mode is not verified.
  *
  * Order of operations. Each step fails closed; nothing later runs if an earlier step refuses:
  *  1. request validation (execution id, fixed fixture id, allowlisted image, real run directory);
@@ -59,6 +68,7 @@ import { NODE_FIXTURE_IMAGE } from "./node-fixture-runner.js";
 import { ACQUIRE_PROXY_ENV, EXIT_FAILED, EXIT_PASSED, parsePrivateProxyUrl } from "./npm-acquire-driver.js";
 import { parseNpmAdded } from "./npm-install-runner.js";
 import { MAX_LOCKFILE_BYTES, MAX_PACKAGE_JSON_BYTES, checkNpmFixture } from "./npm-lock-policy.js";
+import { checkOperatorFixture } from "./npm-operator-fixture.js";
 import {
   handoffNpmCache,
   parseAcquireOutput,
@@ -76,6 +86,9 @@ import type { CleanupProof } from "./runner.js";
 export const REGISTRY_EGRESS_HOSTS: readonly string[] = Object.freeze(["registry.npmjs.org"]);
 
 export const FIXED_FIXTURE_ID = "is-number-7.0.0";
+
+/** Selects operator-supplied files (see npm-operator-fixture.ts). Requires `operatorFixture`. */
+export const OPERATOR_FIXTURE_ID = "operator-lockfile-v3";
 
 /**
  * is-number@7.0.0. The integrity value was written from the author's memory of the public registry
@@ -195,11 +208,19 @@ export interface RegistryAcquisitionOptions {
   handoff?: typeof handoffNpmCache;
 }
 
+/** The exact text of both files. Validated by checkOperatorFixture before anything else happens. */
+export interface OperatorFixtureInput {
+  packageJson: string;
+  packageLock: string;
+}
+
 export interface RegistryAcquisitionRequest {
   /** `<id>:<number>`, same format as the other adapters. */
   executionId: string;
-  /** Must equal FIXED_FIXTURE_ID. Nothing else is accepted. */
+  /** FIXED_FIXTURE_ID (no `operatorFixture`) or OPERATOR_FIXTURE_ID (needs `operatorFixture`). */
   fixture: string;
+  /** Only with OPERATOR_FIXTURE_ID. Supplied by operator code, never by an HTTP request. */
+  operatorFixture?: OperatorFixtureInput;
   /** Exact image reference from the allowlist. */
   image: string;
   /** Existing real directory. The verified cache is written to `<runDir>/cache`. */
@@ -257,6 +278,16 @@ type InspectState =
   | { state: "absent" }
   | { state: "present"; info: Record<string, unknown> }
   | { state: "error"; reason: string };
+
+/** The validated fixture an acquisition will stage and expect back. */
+interface AcqFixture {
+  packageJson: string;
+  lock: string;
+  expected: ExpectedTarball[];
+  packageCount: number;
+  /** False for the fixed fixture, which is additionally compared byte for byte with the constants. */
+  operator: boolean;
+}
 
 export interface Plan {
   name: string;
@@ -556,6 +587,11 @@ export class NpmRegistryAcquisition {
     const plan = planned;
     if (plan.signal?.aborted === true) return finish({ kind: "aborted" });
 
+    // 1b. Fixture files. Operator files are validated here, before the attestation or Docker is touched.
+    const resolvedFixture = this.resolveFixture(req);
+    if (!resolvedFixture.ok) return finish({ kind: "rejected", reason: resolvedFixture.reason });
+    const fx = resolvedFixture.value;
+
     // 2. Attestation. This module never creates one.
     let attestation: unknown;
     try {
@@ -583,11 +619,13 @@ export class NpmRegistryAcquisition {
       return finish({ kind: "unavailable", reason: "docker CLI could not be started" });
     }
 
-    // 4. Fixed fixture and trusted driver.
-    const fixed = checkFixedFixture(FIXED_PACKAGE_JSON, FIXED_LOCKFILE);
-    if (!fixed.ok) return finish({ kind: "unavailable", reason: fixed.reason });
-    if (Buffer.byteLength(FIXED_PACKAGE_JSON) > MAX_PACKAGE_JSON_BYTES || Buffer.byteLength(FIXED_LOCKFILE) > MAX_LOCKFILE_BYTES) {
-      return finish({ kind: "unavailable", reason: "fixed fixture exceeds the policy size limits" });
+    // 4. Fixture and trusted driver.
+    if (!fx.operator) {
+      const fixed = checkFixedFixture(fx.packageJson, fx.lock);
+      if (!fixed.ok) return finish({ kind: "unavailable", reason: fixed.reason });
+    }
+    if (Buffer.byteLength(fx.packageJson) > MAX_PACKAGE_JSON_BYTES || Buffer.byteLength(fx.lock) > MAX_LOCKFILE_BYTES) {
+      return finish({ kind: "unavailable", reason: "fixture exceeds the policy size limits" });
     }
     const driver = readCapped(this.driverPath, MAX_ACQ_DRIVER_BYTES);
     if (driver.kind !== "file") return finish({ kind: "unavailable", reason: "the compiled driver is missing or unreadable; run the build first" });
@@ -600,8 +638,8 @@ export class NpmRegistryAcquisition {
     const stagedDir = join(this.staging, `acq-${randomBytes(6).toString("hex")}`);
     const staged: Array<[string, Buffer]> = [
       [STAGED_ACQ_DRIVER_NAME, driver.bytes],
-      ["package.json", Buffer.from(FIXED_PACKAGE_JSON, "utf8")],
-      ["package-lock.json", Buffer.from(FIXED_LOCKFILE, "utf8")],
+      ["package.json", Buffer.from(fx.packageJson, "utf8")],
+      ["package-lock.json", Buffer.from(fx.lock, "utf8")],
     ];
     try {
       mkdirSync(stagedDir); // non-recursive: an existing entry is refused
@@ -642,10 +680,10 @@ export class NpmRegistryAcquisition {
     // 8. Count check, then the verified handoff written by the host.
     const report = classified.passed;
     const added = parseNpmAdded(report.stdoutTail);
-    if (added !== fixed.packageCount) {
-      return finish({ kind: "summary-mismatch", reason: `npm reported ${added === null ? "no package summary" : `${added} package(s)`}, the lockfile lists ${fixed.packageCount}` }, common);
+    if (added !== fx.packageCount) {
+      return finish({ kind: "summary-mismatch", reason: `npm reported ${added === null ? "no package summary" : `${added} package(s)`}, the lockfile lists ${fx.packageCount}` }, common);
     }
-    const handoff = this.handoff(report.files, [FIXED_PACKAGE], plan.runDir, NPM_ACQ_CACHE_DIR_NAME);
+    const handoff = this.handoff(report.files, fx.expected, plan.runDir, NPM_ACQ_CACHE_DIR_NAME);
     if (!handoff.ok) return finish({ kind: "handoff-rejected", reason: sanitize(handoff.reason), dir: handoff.dir }, common);
     return finish(
       { kind: "acquired", cacheDir: handoff.cacheDir, summary: handoff.summary, packagesAdded: added, durationMs: report.durationMs },
@@ -691,10 +729,31 @@ export class NpmRegistryAcquisition {
 
   // -------------------------------------------------------------------------
 
+  /** Chooses the fixture files. Operator files must pass checkOperatorFixture; nothing is contacted before that. */
+  private resolveFixture(req: RegistryAcquisitionRequest): { ok: true; value: AcqFixture } | { ok: false; reason: string } {
+    if (req.fixture === FIXED_FIXTURE_ID) {
+      if (req.operatorFixture !== undefined) return { ok: false, reason: "the fixed fixture does not accept operator files" };
+      return {
+        ok: true,
+        value: { packageJson: FIXED_PACKAGE_JSON, lock: FIXED_LOCKFILE, expected: [FIXED_PACKAGE], packageCount: 1, operator: false },
+      };
+    }
+    const input: unknown = req.operatorFixture;
+    const shape = obj(input);
+    if (Object.keys(shape).sort().join(",") !== "packageJson,packageLock") {
+      return { ok: false, reason: "operatorFixture must be exactly { packageJson, packageLock }" };
+    }
+    const r = checkOperatorFixture(shape["packageJson"], shape["packageLock"]);
+    if (!r.ok) return { ok: false, reason: sanitize(`operator fixture violates the policy: ${r.violations[0] ?? "unknown"}`) };
+    return { ok: true, value: { packageJson: r.packageJson, lock: r.lock, expected: r.packages, packageCount: r.packageCount, operator: true } };
+  }
+
   private plan(req: RegistryAcquisitionRequest): Plan | { reason: string } {
     if (typeof req !== "object" || req === null) return { reason: "request must be an object" };
     if (typeof req.executionId !== "string" || !EXECUTION_ID_RE.test(req.executionId)) return { reason: "invalid execution id" };
-    if (req.fixture !== FIXED_FIXTURE_ID) return { reason: "only the fixed is-number@7.0.0 fixture is supported" };
+    if (req.fixture !== FIXED_FIXTURE_ID && req.fixture !== OPERATOR_FIXTURE_ID) {
+      return { reason: "fixture is not supported (only the fixed fixture or an operator lockfile v3 fixture)" };
+    }
     if (typeof req.image !== "string" || req.image !== this.image) return { reason: "image is not in the allowlist" };
     if (typeof req.runDir !== "string" || !isAbsolute(req.runDir) || !isRealDir(resolve(req.runDir))) {
       return { reason: "runDir must be an existing real directory" };

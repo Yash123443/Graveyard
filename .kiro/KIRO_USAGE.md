@@ -182,3 +182,21 @@ Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `
 Reported externally: test `tsc`, focused registry and GitHub proxy tests, and the full backend suite passed. `npm view is-number@7.0.0` confirmed the pinned sha512. On real Docker 29.9.2 with `node:22-alpine`: the default guard refused; the isolated client could not reach 1.1.1.1 or 8.8.8.8; the proxy rejected github, example, private, metadata and wrong-port targets and permitted registry port 443; the fixed `is-number@7` fetch passed its integrity check; 2 cache files (4404 bytes) were handed off; offline install, build and test passed; all labelled containers, the network and temp directories were confirmed cleaned up.
 
 Not shown: arbitrary repositories, general production isolation, a production `EgressGuard`, worker or job wiring.
+
+
+
+
+## 2026-11-15: operator multi-package lockfile v3 fixtures (written by Kiro, NOT compiled or run)
+
+Kiro used file read, search and edit tools only; no shell, no dependency, no frontend change. It edited under `backend/` and `.kiro/` only: added `backend/src/npm-operator-fixture.ts`, `backend/src/test/npm-operator-fixture.test.ts` and `backend/src/test/operator-fixture-helpers.ts`; edited `npm-registry-acquisition.ts`, `registry-pipeline.ts` (comment), `npm-registry-acquisition.test.ts`, `registry-pipeline.test.ts`, `manual-registry-acquisition-check.ts`, and the docs `.kiro/PROJECT.md`, `.kiro/specs/backend-foundation/tasks.md`, `backend/DEVELOPMENT.md`. Kiro read `npm-registry-acquisition.ts`, `npm-registry-cache.ts`, `npm-lock-policy.ts`, `registry-pipeline.ts`, `npm-acquire-driver.ts`, their tests and the existing harness before changing anything. Nothing was compiled or run, so no test result exists for this work. No external verification of it is claimed.
+
+
+
+
+## 2026-11-15: docs-only update, external verification of operator multi-package lockfile v3 fixtures
+
+Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `.kiro/KIRO_USAGE.md`, `.kiro/specs/backend-foundation/tasks.md` and `backend/DEVELOPMENT.md`. Kiro authored the operator-fixture changes; an external assistant reviewed and tested them. No other provenance is claimed. This supersedes the earlier "written, NOT compiled or run" entry for that request, which is left as history.
+
+Reported externally: test TypeScript compile and the full backend suite passed. On real Docker 29.9.2 with a controlled operator lockfile v3 of two packages (`is-number@7.0.0`, `is-buffer@2.0.5`), both were acquired through the registry-only proxy with integrity verified, 4 cache files (7170 bytes) were handed off, and offline install, build and tests passed. A hostile resolved URL was rejected before any container was created, the default guard refused, direct public IP probes and forbidden hosts were blocked, and cleanup was confirmed.
+
+Not shown: arbitrary user repositories, a production egress guard, a live worker. Scope is limited controlled fixtures: flat unscoped packages, at most 8.

@@ -274,3 +274,48 @@ Docs-only update; Kiro ran no commands and changed no source (no shell). Recorde
 Authorship: Kiro wrote the source; an external assistant reviewed and ran the tests.
 
 Limits: one controlled fixture (`is-number@7.0.0`) on this machine. It does not show behavior for arbitrary repositories or general production isolation. No production `EgressGuard` exists, and nothing is wired to the server, worker or jobs. The default guard still never attests, so acquisition stays disabled in the product.
+
+
+
+
+## 2026-11-15: operator multi-package lockfile v3 fixtures for registry acquisition (written by Kiro, NOT compiled or run)
+
+Kiro made file edits only (no shell, no dependency or frontend changes, only `backend/` and `.kiro/`). Nothing is wired to the server, worker or any job, and default egress stays unavailable (`UnavailableEgressGuard` never attests). This does not change the verification status of the fixed `is-number@7.0.0` path recorded above, which stays as recorded.
+
+Changed:
+- New `backend/src/npm-operator-fixture.ts`: `checkOperatorFixture(packageJson, lock)`. Runs the unchanged `checkNpmFixture` first (registry.npmjs.org tarball URLs, one canonical sha512 per entry, no git/url/file/alias/link, no install-script flags). Then narrows: at most 8 packages, lockfileVersion exactly 3, flat unscoped `node_modules/<name>` keys, plain x.y.z versions, unique integrities, production dependencies only (the driver runs npm with NODE_ENV=production, so dev/optional/peer entries would not install), allowlisted package.json fields (so no scripts) that agree with the lock root, every dependency listed and every entry reachable, package.json <= 8 KiB, lockfile <= 64 KiB.
+- `npm-registry-acquisition.ts`: new `OPERATOR_FIXTURE_ID` and `operatorFixture` on the request. The fixed fixture rejects operator files; the operator id requires exactly `{ packageJson, packageLock }`. A failing fixture returns `rejected` before the guard is asked or Docker is contacted. Everything after that is the same code: attested Internal network, isolation read back before start, `--ignore-scripts`, proven cleanup, then the host-verified handoff with one expected tarball per lockfile package and npm's `added N` equal to N.
+- `registry-pipeline.ts`: comment only. The offline stage must be given the same two files.
+- `src/test/manual-registry-acquisition-check.ts`: with `GRAVEYARD_MANUAL_REGISTRY_FIXTURE_DIR` set it loads and policy-checks the operator's two files before Docker, runs the same topology and probes, expects a policy-violating copy to be `rejected` with no container, and expects npm's count to equal the lockfile's. Without the variable the fixed behaviour is unchanged.
+
+Tests added (synthetic data, mocked Docker, no network): `npm-operator-fixture.test.ts` (acceptance, bounds, lockfile shape, package.json, hostile text), operator cases in `npm-registry-acquisition.test.ts` (default guard, reject-before-contact, selector mismatches, exact staged bytes, count mismatch, identical create arguments to the fixed mode, isolation tampering, cleanup gates, real handoff with swapped, missing and unlisted tarballs) and one in `registry-pipeline.test.ts`. Helper: `src/test/operator-fixture-helpers.ts`.
+
+Status: UNVERIFIED. Pending external: `pnpm exec tsc -p tsconfig.json`, `pnpm exec tsc -p tsconfig.test.json`, the full backend suite, then an opt-in run with a real operator lockfile:
+```
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_REGISTRY_ACQUISITION = "1"
+$env:GRAVEYARD_MANUAL_REGISTRY_FIXTURE_DIR = "C:\absolute\path\to\fixture"
+node --test dist-test/test/manual-registry-acquisition-check.js
+```
+Kiro supplied no real multi-package lockfile: it has no registry access and would have had to invent integrity values. Unobserved assumptions that fail closed: npm's cache for several packages matches the verifier's layout, the offline `npm ci --offline` accepts it, and the real tarballs fit the driver's export bounds (64 files, 64 KiB per file, 128 KiB total; small packages only). Not covered: that a version satisfies its range (npm ci checks), package contents, scoped or nested packages, arbitrary repositories, a production `EgressGuard`, worker or job wiring.
+
+
+
+
+## 2026-11-15: operator multi-package lockfile v3 fixtures (externally verified, narrow)
+
+Docs-only update; Kiro ran no commands and changed no source (no shell). Recorded from the user's external checks. This supersedes the "written by Kiro, NOT compiled or run" and "UNVERIFIED" status of the operator multi-package lockfile v3 section above, which is left as history. Earlier pending notes for it are superseded.
+
+- Test TypeScript compile passed and the full backend suite passed (counts not supplied to Kiro).
+- Real Docker 29.9.2, controlled operator lockfile v3 with two packages, `is-number@7.0.0` and `is-buffer@2.0.5`:
+  - both were acquired through the registry-only proxy and passed integrity verification;
+  - 4 cache files (7170 bytes) were handed off;
+  - offline install, build and tests passed on that cache;
+  - a hostile `resolved` URL was rejected before any container was created;
+  - the default guard refused (never attests);
+  - direct public IP probes and forbidden hosts were blocked;
+  - cleanup was confirmed.
+
+Authorship: Kiro wrote the changes; an external assistant reviewed and tested them.
+
+Limits: controlled fixtures only, flat unscoped packages, at most 8 per lockfile. No arbitrary user repository, no production `EgressGuard`, no live worker. Nothing is wired to the server, worker or jobs, and the default guard still never attests, so acquisition stays disabled in the product.

@@ -790,3 +790,67 @@ Limits:
 - No worker integration. Nothing is wired to the server, `JobWorker`, `JobRunner` or any job. No real agents.
 
 Next: a production `EgressGuard` design, then worker integration.
+
+
+
+
+## 2026-11-15: operator multi-package lockfile v3 fixtures (written by Kiro, NOT compiled or run)
+
+Kiro made file edits only: no shell, no dependency or frontend changes, nothing wired to the server, worker or any job. Default egress is unchanged (`UnavailableEgressGuard` never attests, so by default nothing is created). The fixed `is-number@7.0.0` path and its external verification above are unchanged and apply to the fixed path only.
+
+What changed:
+- `src/npm-operator-fixture.ts` (pure): `checkOperatorFixture(packageJsonText, lockText)`. Gate 1 is the existing `checkNpmFixture`, unmodified. Gate 2 accepts only: package.json <= 8 KiB with fields `name, version, private: true, description, license, dependencies` (so no scripts, workspaces, overrides, dev/optional/peer maps); lockfile <= 64 KiB (the driver's `MAX_INPUT_FILE_BYTES`, which the base policy's 512 KiB would exceed), `lockfileVersion` exactly 3, no legacy tree, keys limited to `name, version, lockfileVersion, requires, packages`; 1 to 8 packages (`MAX_OPERATOR_PACKAGES`, the cache verifier's cap), each `node_modules/<unscoped lowercase name>` with a plain x.y.z version and entry fields limited to `version, resolved, integrity, dependencies, license, engines, bin, funding, deprecated`; unique integrity values; at most 16 dependencies per map; the lock root equal to package.json; every listed dependency present and every entry reachable from the root. Dev, devOptional, optional and peer flags are rejected because the driver runs npm with `NODE_ENV=production` and such entries would not be installed, which would make the expected package count unknowable. Scoped, nested and prerelease packages are rejected because the cache verifier only supports unscoped names and plain versions. It returns the exact accepted texts, their sha256, and one `{ name, version, integrity }` per package sorted by name.
+- `src/npm-registry-acquisition.ts`: `OPERATOR_FIXTURE_ID = "operator-lockfile-v3"` and `RegistryAcquisitionRequest.operatorFixture`. Rules: `FIXED_FIXTURE_ID` must not carry `operatorFixture`; `OPERATOR_FIXTURE_ID` requires exactly `{ packageJson, packageLock }` strings that pass `checkOperatorFixture`; otherwise `rejected`, decided before the attestation is requested and before any Docker call. The fixed path still compares the bytes with the constants. Staging, container creation arguments, isolation read-back, cleanup proof and staging removal are the same code for both modes (a test compares the `docker create` arguments). The handoff expectation is the full package list and `summary-mismatch` is raised unless npm's `added N packages` equals the lockfile's package count. Requests come from operator code; no HTTP route or job accepts a lockfile.
+- `src/registry-pipeline.ts`: documentation only. The offline stage is not given the files; the caller must place the same two texts in the pipeline fixture directory.
+- Harness `src/test/manual-registry-acquisition-check.ts`: with `GRAVEYARD_MANUAL_REGISTRY_FIXTURE_DIR` set to an absolute real directory holding `package.json` and `package-lock.json` (plain files, no symlinks, <= 64 KiB), the harness runs `checkOperatorFixture` before touching Docker (a rejection fails closed), then runs the same topology, probes and attestation as before, checks that a copy with a foreign `resolved` host is `rejected` with no container, and expects `packagesAdded` to equal the lockfile's package count. Without the variable the behaviour is exactly the fixed one.
+
+Tests (all synthetic, mocked Docker, no network; the package names, versions and tarball bytes are invented and the helper computes integrity from those bytes): `src/test/npm-operator-fixture.test.ts` (acceptance of a three-package chain and of the fixed fixture, size and count bounds including exactly 8 versus 9, lockfile version 1/2/"3", legacy tree, unknown fields, dev/optional/peer, nested/scoped/traversal/workspace/alias keys, prerelease and build versions, foreign hosts, git/file/http specs, sha1 and multi-hash integrity, shared integrity, orphan and dangling entries, scripts, package.json overrides/workspaces/packageManager, root mismatch, BOM, `__proto__` keys, Object.prototype-named packages, control characters in messages, duplicate JSON keys); the `acquire: operator fixture` block in `npm-registry-acquisition.test.ts` (default guard never contacts Docker, nine policy mutations rejected without asking the guard, selector mismatches, exact staged bytes, count mismatch, same create arguments as the fixed fixture, isolation tampering, cleanup gates, real handoff accepts a consistent three-package cache and rejects swapped, missing and unlisted tarballs); one case in `registry-pipeline.test.ts`. Helper: `src/test/operator-fixture-helpers.ts`.
+
+Status: UNVERIFIED. Nothing was compiled or run, so type errors or wrong expectations in the new tests are possible. Pending external:
+```
+pnpm exec tsc -p tsconfig.json
+pnpm exec tsc -p tsconfig.test.json
+pnpm run build:test
+node --test dist-test/test/npm-operator-fixture.test.js dist-test/test/npm-registry-acquisition.test.js dist-test/test/registry-pipeline.test.js
+node --test dist-test/test/*.js
+$env:GRAVEYARD_MANUAL_REGISTRY_ACQUISITION = "1"
+$env:GRAVEYARD_MANUAL_REGISTRY_FIXTURE_DIR = "C:\absolute\path\to\fixture"
+node --test dist-test/test/manual-registry-acquisition-check.js
+```
+The last command needs local `node:22-alpine`, runs outside the restricted sandbox, and needs a small real lockfile (a few tiny unscoped packages) that the operator generates with `npm install --package-lock-only --ignore-scripts` and checks with `npm view <name>@<version> dist.integrity`. Record the outcome here and in `.kiro/PROJECT.md`.
+
+Known limits and unobserved assumptions (all fail closed):
+- The driver exports at most 64 files, 64 KiB per file and 128 KiB in total. Real tarballs larger than that are refused at export, so operator fixtures must use tiny packages.
+- npm's cache for several packages must match the verifier's layout (one index entry per tarball URL, optional packument entries), and the offline `npm ci --offline` must accept it. Unobserved.
+- The gate does not check that a version satisfies its range (npm ci does) or what a package contains, and it does not detect duplicate JSON keys (JSON.parse, npm and this module all keep the last value).
+- Not covered: scoped or nested packages, arbitrary repositories, a production `EgressGuard`, worker or job wiring, real agents.
+
+
+
+
+## 2026-11-15: operator multi-package lockfile v3 fixtures: external verification (docs only)
+
+Kiro ran no commands and changed no source (no shell). Recorded from the user's external checks. This supersedes the "written by Kiro, NOT compiled or run" and "UNVERIFIED" status of the operator multi-package lockfile v3 entry above, including its pending `tsc`, full suite and opt-in run; that entry is left as history.
+
+### Verified
+
+- Test TypeScript compile passed.
+- The full backend suite passed (count not supplied to Kiro).
+- Real Docker 29.9.2, controlled operator lockfile v3 with two packages, `is-number@7.0.0` and `is-buffer@2.0.5`:
+  - both packages were acquired through the registry-only proxy and their integrity was verified;
+  - 4 cache files (7170 bytes) were handed off;
+  - offline install, build and tests passed on that cache;
+  - a hostile `resolved` URL was rejected before any container was created;
+  - the default guard refused;
+  - direct public IP probes and forbidden hosts were blocked;
+  - cleanup was confirmed.
+
+This resolves, for this two-package fixture, the earlier unobserved assumptions about multi-package cache layout, offline `npm ci --offline` acceptance and the export bounds.
+
+Authorship: Kiro wrote the changes; an external assistant reviewed and tested them.
+
+### Limits
+
+- Limited controlled fixtures: flat unscoped packages, at most 8, lockfile v3 only.
+- No arbitrary user repository, no production `EgressGuard`, no live worker. Nothing is wired to the server, `JobWorker`, `JobRunner` or jobs. The default guard still never attests, so acquisition stays disabled in the product.
+- No claim about package contents, scoped or nested packages, or general production isolation.

@@ -46,6 +46,18 @@
  *   pnpm run build:test
  *   $env:GRAVEYARD_MANUAL_REGISTRY_ACQUISITION = "1"
  *   node --test dist-test/test/manual-registry-acquisition-check.js
+ *
+ * OPERATOR FIXTURE MODE (added later by Kiro, NOT compiled or run). Additionally set
+ *   $env:GRAVEYARD_MANUAL_REGISTRY_FIXTURE_DIR = "C:\absolute\path\to\fixture"
+ * to a real directory holding exactly the operator's `package.json` and `package-lock.json`
+ * (lockfileVersion 3, at most 8 flat unscoped production packages from registry.npmjs.org with real
+ * sha512 integrity values; see npm-operator-fixture.ts). The files are read with lstat (no symlink,
+ * regular file, at most 64 KiB), checked with checkOperatorFixture BEFORE Docker is contacted (a
+ * rejected fixture fails closed and nothing is created), then used instead of the fixed constants for
+ * the same steps: a policy-violating copy must be `rejected` with no container, and `npm ci` must
+ * report exactly the lockfile's package count. Kiro cannot supply a real multi-package lockfile: it
+ * has no registry access and would have to invent integrity values. Without the variable the fixed
+ * is-number@7.0.0 behaviour above is unchanged.
  */
 
 import { spawn } from "node:child_process";
@@ -67,11 +79,14 @@ import {
   FIXED_PACKAGE,
   FIXED_PACKAGE_JSON,
   NpmRegistryAcquisition,
+  OPERATOR_FIXTURE_ID,
   type RegistryAcquisitionResult,
 } from "../npm-registry-acquisition.js";
+import { MAX_OPERATOR_LOCK_BYTES, checkOperatorFixture } from "../npm-operator-fixture.js";
 import { runRegistryThenOffline } from "../registry-pipeline.js";
 
 const OPT_IN = process.env["GRAVEYARD_MANUAL_REGISTRY_ACQUISITION"] === "1";
+const FIXTURE_DIR = process.env["GRAVEYARD_MANUAL_REGISTRY_FIXTURE_DIR"] ?? "";
 const IMAGE = NODE_FIXTURE_IMAGE;
 const LABEL = "graveyard.manual-registry";
 const PROXY_PORT = "3128";
@@ -144,6 +159,46 @@ function safeMountPath(p: string, what: string): string {
     throw new FailClosed(`${what} path is unusable for a bind mount (must be absolute, no comma, quote or newline): ${abs}`);
   }
   return abs;
+}
+
+interface HarnessFixture {
+  operator: boolean;
+  packageJson: string;
+  packageLock: string;
+  /** What `npm ci` must report as added. */
+  expectedAdded: number;
+  label: string;
+}
+
+/** Reads and policy-checks the operator's two files. Fails closed before Docker is contacted. */
+function loadOperatorFixture(dir: string): HarnessFixture {
+  if (!isAbsolute(dir) || /[\0\r\n]/.test(dir)) throw new FailClosed("GRAVEYARD_MANUAL_REGISTRY_FIXTURE_DIR must be an absolute path");
+  try {
+    const st = lstatSync(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error("not a real directory");
+  } catch {
+    throw new FailClosed(`fixture directory ${dir} is not an existing real directory`);
+  }
+  const texts: string[] = [];
+  for (const name of ["package.json", "package-lock.json"]) {
+    const p = join(dir, name);
+    try {
+      const st = lstatSync(p);
+      if (st.isSymbolicLink() || !st.isFile() || st.size > MAX_OPERATOR_LOCK_BYTES) throw new Error("bad file");
+      texts.push(readFileSync(p, "utf8"));
+    } catch {
+      throw new FailClosed(`${name} in ${dir} is missing, is not a plain file or is larger than ${MAX_OPERATOR_LOCK_BYTES} bytes`);
+    }
+  }
+  const r = checkOperatorFixture(texts[0], texts[1]);
+  if (!r.ok) throw new FailClosed(`operator fixture rejected by policy (nothing was contacted): ${r.violations.slice(0, 5).join("; ")}`);
+  return {
+    operator: true,
+    packageJson: r.packageJson,
+    packageLock: r.lock,
+    expectedAdded: r.packageCount,
+    label: `operator fixture ${r.packages.map((p) => `${p.name}@${p.version}`).join(",")} (package.json sha256 ${r.packageJsonSha256.slice(0, 12)}, lock sha256 ${r.lockSha256.slice(0, 12)})`,
+  };
 }
 
 function backendRoot(): string {
@@ -276,6 +331,14 @@ test(
     process.once("SIGINT", onSigint);
 
     try {
+      // Fixture selection happens first so a rejected operator fixture never reaches Docker.
+      const fixture: HarnessFixture = FIXTURE_DIR === ""
+        ? { operator: false, packageJson: FIXED_PACKAGE_JSON, packageLock: FIXED_LOCKFILE, expectedAdded: 1, label: `fixed ${FIXED_PACKAGE.name}@${FIXED_PACKAGE.version}` }
+        : loadOperatorFixture(FIXTURE_DIR);
+      log.push(`fixture: ${fixture.label}`);
+      const fixtureId = fixture.operator ? OPERATOR_FIXTURE_ID : FIXED_FIXTURE_ID;
+      const operatorInput = fixture.operator ? { operatorFixture: { packageJson: fixture.packageJson, packageLock: fixture.packageLock } } : {};
+
       // Preconditions (fail closed).
       const v = await dockerQuery(["version", "--format", "{{.Server.Version}}"]);
       if (!v.ok || v.stdout.trim() === "") throw new FailClosed("docker daemon is not available");
@@ -293,10 +356,29 @@ test(
       // 0. The default guard never attests: nothing may be created.
       {
         const refusing = new NpmRegistryAcquisition({ executor: spawnExecutor, egress: new UnavailableEgressGuard(), stagingRoot: stagingDir });
-        const r = await refusing.acquire({ executionId: `regacq-${runId}-0:1`, fixture: FIXED_FIXTURE_ID, image: IMAGE, runDir: handoffRun });
+        const r = await refusing.acquire({ executionId: `regacq-${runId}-0:1`, fixture: fixtureId, image: IMAGE, runDir: handoffRun, ...operatorInput });
         log.push(`[0:default-guard] ${describeResult(r)}`);
         if (r.kind !== "network-unavailable") problems.push(`[0] default guard: expected network-unavailable, got ${r.kind}`);
         if (r.cleanup !== null) problems.push("[0] default guard: a container was involved");
+
+        if (fixture.operator) {
+          // A policy-violating copy (resolved points at another host) must be rejected before anything is contacted.
+          const doc = JSON.parse(fixture.packageLock) as { packages: Record<string, { resolved?: string }> };
+          const firstKey = Object.keys(doc.packages).find((k) => k !== "");
+          const entry = firstKey === undefined ? undefined : doc.packages[firstKey];
+          if (entry === undefined) {
+            problems.push("[0b] operator fixture has no package entry to mutate");
+          } else {
+            entry.resolved = "https://evil.example/x/-/x-1.0.0.tgz";
+            const hostile = await refusing.acquire({
+              executionId: `regacq-${runId}-0b:1`, fixture: OPERATOR_FIXTURE_ID, image: IMAGE, runDir: handoffRun,
+              operatorFixture: { packageJson: fixture.packageJson, packageLock: JSON.stringify(doc, null, 2) },
+            });
+            log.push(`[0b:hostile-copy] ${describeResult(hostile)}`);
+            if (hostile.kind !== "rejected") problems.push(`[0b] hostile copy: expected rejected, got ${hostile.kind}`);
+            if (hostile.cleanup !== null) problems.push("[0b] hostile copy: a container was involved");
+          }
+        }
       }
 
       // Topology.
@@ -392,7 +474,7 @@ test(
       const acquisition = new NpmRegistryAcquisition({ executor: spawnExecutor, egress: guard, stagingRoot: stagingDir });
       const acqId = `regacq-${runId}-1:1`;
       const pipeId = `regpipe-${runId}-1:1`;
-      writeFixture(fixturesDir, "pass", { "package.json": FIXED_PACKAGE_JSON, "package-lock.json": FIXED_LOCKFILE, ...pipelineFixtureScripts("pass") });
+      writeFixture(fixturesDir, "pass", { "package.json": fixture.packageJson, "package-lock.json": fixture.packageLock, ...pipelineFixtureScripts("pass") });
 
       // 4. Offline stage with the handed-over cache.
       const overall = await runRegistryThenOffline(
@@ -402,18 +484,18 @@ test(
             new ControlledPipeline({ executor: spawnExecutor, fixturesRoot: fixturesDir, stagingRoot: pipeStagingDir, cacheDir }),
         },
         {
-          acquisition: { executionId: acqId, fixture: FIXED_FIXTURE_ID, image: IMAGE, runDir: handoffRun },
+          acquisition: { executionId: acqId, fixture: fixtureId, image: IMAGE, runDir: handoffRun, ...operatorInput },
           pipeline: { executionId: pipeId, fixture: "pass" },
         },
       );
       const a = overall.acquisition;
       log.push(`[1:acquisition] ${describeResult(a)}`);
       if (a.kind === "install-failed") log.push(`[1:acquisition] driver detail: ${a.detail}`);
-      if (a.kind === "acquired") log.push(`[1:acquisition] handoff cache: ${a.summary.files} file(s), ${a.summary.totalBytes} bytes, tarball ${FIXED_PACKAGE.name}@${FIXED_PACKAGE.version}`);
+      if (a.kind === "acquired") log.push(`[1:acquisition] handoff cache: ${a.summary.files} file(s), ${a.summary.totalBytes} bytes, tarballs ${a.summary.tarballs.map((t) => `${t.name}@${t.version}`).join(",")}`);
       if (a.kind !== "acquired") problems.push(`acquisition: expected acquired, got ${a.kind}`);
       if (a.cleanup === null || !a.cleanup.confirmed) problems.push("acquisition: container cleanup not confirmed");
       if (a.stagingRemoved !== true) problems.push("acquisition: staging directory not removed");
-      if (a.kind === "acquired" && a.packagesAdded !== 1) problems.push("acquisition: npm did not report exactly one added package");
+      if (a.kind === "acquired" && a.packagesAdded !== fixture.expectedAdded) problems.push(`acquisition: npm did not report exactly ${fixture.expectedAdded} added package(s)`);
 
       const p = overall.pipeline;
       if (p === null) {
