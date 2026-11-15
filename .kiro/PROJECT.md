@@ -38,20 +38,21 @@ Package manager: pnpm 10.12.1 (both workspaces).
 - `POST /api/jobs/:id/cancel` — queued → cancelled (token-gated, 409 on conflict)
 - `GET /api/jobs/:id/events` — SSE stream of persisted events (bearer-gated, Last-Event-ID replay, 429 stream cap). Externally verified 2026-11-11, including real-HTTP tests (replay, live, cancel, cap, shutdown, heartbeat, backpressure).
 - Cache-Control: no-store on all `/api/jobs*` responses
+- `GET /api/jobs/:id/result` — durable result view (bearer-gated, same 401/403 contract). **Written 2026-11-15, NOT compiled or run** (see "Local worker process" at the end of this file).
 - Authorization header redaction from logs
 - Schema v2 migration and lease/recovery **library primitives** (`src/leases.ts`: claim, heartbeat, fencing, cleanup-confirmed requeue, `listRecoveryRequired`, `expireQueuedDeadlines`). These are library functions only; nothing in the running server invokes them.
 
 ## Backend — not yet implemented
 
-- Production worker loop wiring (`server.ts` does not start a worker; production runner is still `UnavailableRunner`)
+- Worker started by the API server (`server.ts` never starts one; the worker is a separate opt-in process, see "Local worker process" at the end of this file)
 - Arbitrary-repository acquisition (git/registry acquisition modules exist but are not connected to jobs; no production `EgressGuard`)
-- Patch apply and repair verification
-- Automatic restart-recovery coordinator
-- Result and patch endpoints
+- Patch apply and repair verification (nothing applies a patch; `repair.verified` is always `false`)
+- Patch endpoint (a model-authored proposal is readable only inside the result payload)
+- Automatic restart-recovery coordinator beyond the worker's periodic `recoverOnce`
 
-## Backend — integrated worker path (written 2026-11-15, NOT compiled or run)
+## Backend — integrated worker path (written 2026-11-15; later compiled and tested externally, see DEVELOPMENT.md "external verification of build, tests and a real Analyst call")
 
-`src/pipeline-runner.ts` (`PipelineJobRunner`) connects `JobWorker` to the controlled network-none pipeline, the Tester (`buildPipelineTesterReport`) and optional Analyst/Fixer, with fenced `stage` and `result` events (`recordLeasedStage`, `recordLeasedResult` in `leases.ts`) and a bounded `drainQueue`. Supported source: operator-prepared controlled fixtures in an exact-match catalog only. Unknown repositories fail closed as `infrastructure-unavailable`. Fixer output is a proposal and is never applied. Tests (`src/test/pipeline-runner.test.ts`) use injected fakes. Details and gaps: `backend/DEVELOPMENT.md`, entry "integrated worker execution path". Unverified until `tsc` and the suite are run externally.
+`src/pipeline-runner.ts` (`PipelineJobRunner`) connects `JobWorker` to the controlled network-none pipeline, the Tester (`buildPipelineTesterReport`) and optional Analyst/Fixer, with fenced `stage` and `result` events (`recordLeasedStage`, `recordLeasedResult` in `leases.ts`) and a bounded `drainQueue`. Supported source: operator-prepared controlled fixtures in an exact-match catalog only. Unknown repositories fail closed as `infrastructure-unavailable`. Fixer output is a proposal and is never applied. Tests (`src/test/pipeline-runner.test.ts`) use injected fakes. Details and gaps: `backend/DEVELOPMENT.md`, entry "integrated worker execution path". Compilation and the suite were later verified externally (see `backend/DEVELOPMENT.md`); it was later run end to end once with real Docker for one controlled fixture (2026-11-15, see the final section of this file).
 
 ## Frontend — repair workspace (authored 2026-11-11, pending external verification)
 
@@ -337,3 +338,45 @@ Kiro's shell was unavailable, so nothing was compiled or run. Edits only under `
 - Checked by reading the code and tests: no `--trust-all-tools` (the argv uses `--trust-tools=`), no execution or patch application by the agent modules (patches are proposal-only), no credential in argv, stdin, logs or results.
 
 Status: UNVERIFIED. Pending external `tsc` (both configs), the new tests, and the full suite. Real `kiro-cli` headless behaviour has not been observed. Limits and the command list are in `backend/DEVELOPMENT.md`.
+
+
+
+## 2026-11-15: opt-in local worker process and durable result endpoint (written by Kiro, NOT compiled or run)
+
+Kiro used file read, search and edit tools only (no shell, no git, as instructed), and edited only under `backend/` and `.kiro/`. No frontend file, no dependency, no `server.ts`, no schema change.
+
+Added: a separate worker process (`backend/src/worker-main.ts`, `worker-process.ts`, `worker-compose.ts`, `worker-config.ts`, `worker-service.ts`) and `GET /api/jobs/:id/result` (`result-view.ts`, `getJobResultRecord` in `jobs.ts`, route in `routes/jobs.ts`). It is opt-in (`GRAVEYARD_WORKER_ENABLED=1`), runs only fixtures from an operator catalog through the existing network-`none` pipeline, claims nothing while `docker version` fails, and stops gracefully on SIGINT/SIGTERM (an active job is requeued only with cleanup proof). The result view exposes a durable result only for `completed` jobs and keeps diagnosis and patch proposals separate from repair: `repair.verified` and `repair.patchApplied` are always `false`. Tests: `worker-config.test.ts`, `worker-service.test.ts`, `worker-process.test.ts`, `job-result.test.ts`. Docs updated: `backend/DEVELOPMENT.md`, `backend/README.md`, `backend/.env.example` (commented variables), `package.json` (script `worker` only), this file, `KIRO_USAGE.md` and the steering files.
+
+Status: **UNVERIFIED.** Nothing was compiled or run, including the new tests. Real Docker was not used. The earlier external verification (both `tsc` configs, full suite, one real Analyst call) does not cover this change.
+
+Live in code only once an operator builds and starts the worker with the opt-in variables: a worker process that processes catalogued fixtures and a result endpoint that authorized owners can read. Not live: arbitrary repositories (a job for an uncatalogued URL fails as `infrastructure-unavailable`; nothing is cloned or run), acquisition inside jobs, a production `EgressGuard`, patch application, repair verification, a patch endpoint, API-managed worker supervision, and any frontend use of `/result` (the frontend workspace text that says no worker or result endpoint exists is now stale; it was deliberately not changed).
+
+Pending external: both `tsc` configs, the four new test files, the full suite, then a manual real-Docker run of the worker (catalogued fixture with a prepopulated cache; Docker stopped and started; stop signal during a job). Record the results here and in `backend/DEVELOPMENT.md`.
+
+
+
+## 2026-11-15: worker process and result endpoint, external verification (docs only)
+
+Kiro ran no commands and changed no source for this record. Reported by the user from external runs; supersedes the "written, not compiled or run" status of the worker process and result endpoint.
+
+- Production `tsc` passed. Test `tsc` passed.
+- 87 new focused tests passed (`worker-config`, `worker-service`, `worker-process`, `job-result`).
+- The full backend suite passed.
+- These tests use mocked Docker (fake docker CLI, fake pipeline, fake cleanup, fake agents). No real-Docker worker run has been performed, and none is claimed.
+
+## 2026-11-15: opt-in real-Docker worker end-to-end harness (written by Kiro, NOT compiled or run)
+
+Kiro added `backend/src/test/manual-worker-e2e-check.ts`, `backend/worker-e2e.env` (only the opt-in switch) and the script `test:worker-e2e` in `backend/package.json`. No shell was used; nothing was compiled or run, **so no real-Docker worker run has occurred**. Single command: `pnpm run test:worker-e2e` (needs `GRAVEYARD_NPM_FIXTURE_DIR`, `GRAVEYARD_NPM_CACHE_DIR`, a running Docker daemon and local `node:22-alpine`). It starts the real API on an ephemeral 127.0.0.1 port and the real worker composition (real Docker executor, agents off) on a temporary database under `backend/.tmp-fixtures`, creates an authorized job for one controlled fixture, polls `GET /result` for at most 240 s, expects `completed` / `passing` with `repair.verified` and `repair.patchApplied` false, then stops the worker, checks for leftover containers and removes the temporary directories. It fails closed when Docker or inputs are missing; it never fakes Docker. Pending: an operator run, recorded in `backend/DEVELOPMENT.md`.
+
+
+## 2026-11-15: real-Docker worker end-to-end run (externally verified, narrow)
+
+Docs-only update; Kiro ran no commands and changed no source (no shell). Recorded from the user's external checks. This supersedes the "written by Kiro, NOT compiled or run" status of the worker end-to-end harness entry and the "no real-Docker worker run" statements above, which are left as history.
+
+- Docker Desktop server 29.9.2, local `node:22-alpine`, 2026-11-15.
+- Both TypeScript builds, 87 focused tests and the full suite passed before the harness; the harness compiled and passed (1 test).
+- Controlled single `is-number@7.0.0` offline fixture, real localhost API, real separate worker composition, real Docker, agents off: job `completed`, stage `done`, outcome `passing`, result read with the owner token, cleanup confirmed.
+
+Authorship: Kiro wrote the source; an external assistant reviewed and ran the tests.
+
+Limits: one controlled fixture on this machine. Not verified: real GitHub cloning, agents on this job, repair or patch application (`repair.verified` stays `false`), arbitrary repositories, failing-fixture, uncatalogued-URL, timeout, cancel, stop and Docker-outage cases on real Docker. The frontend workspace text saying no worker or result endpoint exists is still stale and unchanged. Browser visual interaction is still unverified.

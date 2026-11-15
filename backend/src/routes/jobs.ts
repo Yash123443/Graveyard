@@ -23,6 +23,13 @@
  *                   dummy comparison for missing jobs).
  *     - Cache-Control: no-store on every /api/jobs response via onRequest hook.
  *
+ *   POST /api/jobs/:id/cancel   (see the route below)
+ *
+ *   GET /api/jobs/:id/result
+ *     Same auth as GET /api/jobs/:id. 200 with the presented result (result-view.ts):
+ *     `terminal`, `outcome`, `repair` (verified/patchApplied are always false), the stored
+ *     `result` for completed jobs, and `infrastructure` metadata for failed or timed-out jobs.
+ *
  * Authorization design:
  *   A syntactically well-formed Bearer token (64 lowercase hex chars) that
  *   does not match ANY job is indistinguishable from a token that matches a
@@ -37,7 +44,8 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest 
 import type { DatabaseSync } from "node:sqlite";
 import { validateGithubUrl } from "../url.js";
 import { generateRawToken, verifyToken } from "../token.js";
-import { createJob, findJobById, getTokenHash, cancelJob } from "../jobs.js";
+import { createJob, findJobById, getTokenHash, cancelJob, getJobResultRecord } from "../jobs.js";
+import { presentResult } from "../result-view.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -349,6 +357,52 @@ export const jobRoutes: FastifyPluginAsync<{ db: DatabaseSync }> = async (
         createdAt: job.created_at,
         updatedAt: job.updated_at,
       });
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/jobs/:id/result
+  // -------------------------------------------------------------------------
+  //
+  // Same Bearer authorization as the other job routes (401 malformed, 403 wrong or unknown).
+  // 200 always carries the presented state: `terminal:false` and `outcome:"pending"` while the job
+  // is queued or running; the durable result once it has completed. See result-view.ts for the
+  // outcome vocabulary. A diagnosis or patch proposal is reported as such and never as a repair:
+  // `repair.verified` and `repair.patchApplied` are constant false.
+  // The response is built from fixed fields only; token hashes, lease tokens and recovery tokens
+  // are never selected.
+
+  fastify.get<{ Params: GetJobParams }>(
+    "/api/jobs/:id/result",
+    async (request, reply) => {
+      const authHeader = request.headers["authorization"];
+      if (typeof authHeader !== "string" || !BEARER_RE.test(authHeader)) {
+        return reply.status(401).send({
+          statusCode: 401,
+          error: "Unauthorized",
+          message: "Authorization header must be: Bearer <64 lowercase hex chars>",
+        });
+      }
+
+      const { id: jobId } = request.params;
+      const storedHash = getTokenHash(db, jobId) ?? DUMMY_HASH;
+      if (!verifyToken(authHeader.slice(7), storedHash)) {
+        return reply.status(403).send({
+          statusCode: 403,
+          error: "Forbidden",
+          message: "Invalid token for this resource",
+        });
+      }
+
+      const record = getJobResultRecord(db, jobId);
+      if (record === null) {
+        return reply.status(403).send({
+          statusCode: 403,
+          error: "Forbidden",
+          message: "Invalid token for this resource",
+        });
+      }
+      return reply.status(200).send(presentResult(record));
     },
   );
 };

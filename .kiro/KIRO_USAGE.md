@@ -227,3 +227,21 @@ Reported externally:
 - A real synthetic Analyst call through the logged-in Kiro CLI returned no-result (unknown diagnosis). This shows the invocation works. It does not show the diagnosis is correct.
 
 Scope: tests use injected fakes. No end-to-end live worker run was performed. The pipeline remains limited to controlled fixtures, is not wired to the server, and does not apply repairs.
+
+
+
+
+## 2026-11-15: opt-in local worker process and durable result endpoint (source only, no shell)
+
+Kiro read `DEVELOPMENT.md`, `server.ts`, `config.ts`, `app.ts`, `worker.ts`, `runner.ts`, `pipeline-runner.ts`, the lease, job and event modules, `routes/jobs.ts`, `routes/events.ts`, the controlled pipeline and sandbox constructors and the existing worker and pipeline-runner tests, then wrote `src/worker-config.ts`, `worker-service.ts`, `worker-compose.ts`, `worker-process.ts`, `worker-main.ts`, `result-view.ts`, `getJobResultRecord` in `src/jobs.ts`, `GET /api/jobs/:id/result` in `src/routes/jobs.ts`, four test files (`worker-config`, `worker-service`, `worker-process`, `job-result`), and the documentation and steering updates. It also changed `drainQueue`'s parameter type, exported `FIXTURE_NAME_RE`, added the `worker` script to `package.json` and commented worker variables to `.env.example`. As instructed, no shell or git command was run, so nothing was compiled or tested and no result exists for this work. No external verification is claimed. No frontend or dependency change.
+
+
+
+
+## 2026-11-15: docs-only update, external verification of the real-Docker worker end-to-end run
+
+Kiro ran no commands and changed no source; it edited only `backend/DEVELOPMENT.md`, `backend/README.md`, `.kiro/PROJECT.md` and `.kiro/KIRO_USAGE.md`. Kiro authored the worker, result endpoint and end-to-end harness source; an external assistant reviewed and ran them. No other provenance is claimed. This supersedes the earlier "written, not compiled or run" entries for the harness, which are left as history.
+
+Reported externally (2026-11-15): Docker Desktop server 29.9.2 and local `node:22-alpine`. Both TypeScript builds, 87 focused tests and the full suite passed before the harness; the harness compiled and passed (1 test). With a controlled single `is-number@7.0.0` offline fixture, the real localhost API, the real separate worker composition and real Docker (agents off), the job completed at stage `done` with outcome `passing`, the result was read with the owner token, and cleanup was confirmed.
+
+Not shown: real GitHub cloning, agents on this job, repair or patch application, arbitrary repositories.

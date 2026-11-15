@@ -70,7 +70,7 @@ export const SOURCE_INVALID_REASON = "The source catalog entry is invalid; nothi
 const MAX_EVIDENCE_FILES = 6;
 const EVIDENCE_TEXT_BYTES = 3500;
 const MAX_SOURCE_FILE_BYTES = 64 * 1024;
-const FIXTURE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const FIXTURE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 // ---------------------------------------------------------------------------
 // Injected dependencies

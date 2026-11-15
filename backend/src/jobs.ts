@@ -250,6 +250,68 @@ export function cancelJob(db: DatabaseSync, jobId: string): CancelJobResult {
 
 
 // ---------------------------------------------------------------------------
+// Result read (GET /api/jobs/:id/result)
+// ---------------------------------------------------------------------------
+
+/**
+ * Durable facts the result endpoint presents. `result` is set only for a job whose status is
+ * `completed`, and only from the `result` event written by its FINAL attempt. A result event of an
+ * earlier attempt, or of a job that is blocked or still running, is never returned: a result is
+ * trustworthy only once the worker has also proven cleanup and marked the job completed.
+ */
+export interface JobResultRecord {
+  jobId: string;
+  stage: string;
+  status: string;
+  attemptCount: number;
+  maxAttempts: number;
+  /** Raw `infra_error` JSON text, or null. Parsed defensively by result-view.ts. */
+  infraError: string | null;
+  result: Record<string, unknown> | null;
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Reads the state needed for the result view. Returns null when the job does not exist. Never returns token material. */
+export function getJobResultRecord(db: DatabaseSync, jobId: string): JobResultRecord | null {
+  const row = db
+    .prepare("SELECT id, stage, status, attempt_count, max_attempts, infra_error FROM jobs WHERE id = ?")
+    .get(jobId) as
+    | { id: string; stage: string; status: string; attempt_count: number; max_attempts: number; infra_error: string | null }
+    | undefined;
+  if (row === undefined) return null;
+
+  const attemptCount = Number(row.attempt_count);
+  let result: Record<string, unknown> | null = null;
+  if (row.status === "completed") {
+    const events = db
+      .prepare("SELECT payload FROM job_events WHERE job_id = ? AND event_type = 'result' ORDER BY seq DESC")
+      .all(jobId) as unknown as Array<{ payload: string }>;
+    for (const e of events) {
+      try {
+        const p: unknown = JSON.parse(e.payload);
+        if (isPlainObject(p) && p["attemptCount"] === attemptCount && isPlainObject(p["result"])) {
+          result = p["result"];
+          break;
+        }
+      } catch {
+        // An unparsable stored payload cannot be this attempt's result.
+      }
+    }
+  }
+  return {
+    jobId: row.id,
+    stage: row.stage,
+    status: row.status,
+    attemptCount,
+    maxAttempts: Number(row.max_attempts),
+    infraError: row.infra_error ?? null,
+    result,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Event reads (SSE replay / polling)
 // ---------------------------------------------------------------------------
 

@@ -25,4 +25,6 @@
 - Bearer tokens must never appear in URLs, logs, or events. The Authorization header is redacted from logs.
 - `Cache-Control: no-store` on all `/api/jobs*` responses.
 - Infrastructure errors go in job metadata, not `rootCause`.
+- Worker (opt-in, separate process `dist/worker-main.js`): disabled unless `GRAVEYARD_WORKER_ENABLED` is exactly `1`. Runs only operator-catalogued fixtures; an uncatalogued repository URL fails as `infrastructure-unavailable` and nothing is cloned or run. Claims no job while `docker version` fails. A job ends only after cleanup proof. The API server never starts it.
+- `GET /api/jobs/:id/result`: owner bearer gated, `no-store`. A result is exposed only for `completed` jobs. A diagnosis or patch proposal is never presented as a repair: `repair.verified` and `repair.patchApplied` are always false.
 - Do not claim an unverified control is secure.

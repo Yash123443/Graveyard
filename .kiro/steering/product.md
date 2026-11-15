@@ -22,4 +22,6 @@ GRAVEYARD turns abandoned GitHub repositories into gravestones in an immersive 3
 Stages: queued, cloning, analyzing, diagnosing, repairing, building, testing, verifying, done. Lifecycle status (queued, running, completed, failed, cancelled, timed-out) is tracked separately from stage.
 
 ## Current status
-Not implemented: execution worker loop, sandbox runner integration, secure acquisition (disabled), real agents, result and patch endpoints. Browser visual interaction of the workspace is unverified.
+Not implemented: arbitrary-repository acquisition inside jobs (secure acquisition stays disabled), real-Docker end-to-end worker verification, patch apply and repair verification, a patch endpoint, API-managed worker supervision. Browser visual interaction of the workspace is unverified.
+
+Written but not yet compiled or run (2026-11-15): an opt-in local worker process (`GRAVEYARD_WORKER_ENABLED=1`, separate from the API) that runs only operator-catalogued fixtures through the offline network-`none` pipeline, and `GET /api/jobs/:id/result`, which separates a diagnosis or patch proposal from a verified repair (`repair.verified` is always false). The frontend workspace was not changed: its text that no worker or result endpoint exists is now stale and it does not call `/result`.

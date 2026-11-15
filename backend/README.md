@@ -75,6 +75,7 @@ in the `persisted reopening` test group, which cleans up its own temp directory.
 | GET    | `/api/jobs/:id`         | Bearer token    | Fetch job metadata (token required)      |
 | POST   | `/api/jobs/:id/cancel`  | Bearer token    | Cancel a queued job (409 if not queued)  |
 | GET    | `/api/jobs/:id/events`  | Bearer token    | SSE stream of persisted job events       |
+| GET    | `/api/jobs/:id/result`  | Bearer token    | Durable result view (see "Local worker") |
 
 ### GET /api/jobs/:id/events (SSE)
 
@@ -94,7 +95,7 @@ const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
 - 401 malformed/missing header, 403 wrong token or unknown job (checked before the stream starts), 429 when the per-process stream cap (32) is reached.
 - Events are polled from SQLite in pages of 100 with `seq > cursor`; heartbeat comments every 15 s; polling pauses under backpressure.
 - The stream closes after the final `completed`/`failed`/`cancelled`/`timed-out` event is delivered, or immediately if the job is terminal and the cursor is already at the last event. Timers are cleaned up on disconnect and on app close.
-- No worker exists yet, so only `created` and `cancelled` events occur in practice.
+- Without the opt-in worker process running, only `created` and `cancelled` events occur. With it, `claimed`, `stage`, `result` and terminal events also appear.
 
 ### POST /api/jobs
 
@@ -288,20 +289,148 @@ Limitations:
 - `src/test/worker.test.ts` was written without running `tsc` or the tests
   (no shell was available). Pending external verification.
 
+## Local worker (opt-in, separate process; tested with mocked Docker, and verified end to end once on real Docker for one controlled fixture, 2026-11-15)
+
+The API server never starts a worker. Jobs stay `queued` until an operator
+starts the worker process on the same host and database file. It is **disabled
+unless `GRAVEYARD_WORKER_ENABLED` is exactly `1`**; otherwise it prints why and
+exits with code 2 without opening anything.
+
+It runs only operator-prepared fixtures. Arbitrary and untrusted repositories
+stay disabled: a job whose repository URL is not in the operator catalog fails
+as `infrastructure-unavailable`, and nothing is cloned, fetched or run. Fixture
+code runs only inside the existing disposable Docker container (network `none`,
+non-root, read-only root, offline `npm ci`, build and test). Nothing runs on
+the host.
+
+### Operator setup (PowerShell, from `backend/`)
+
+1. Prepare one directory per fixture under a fixtures root. Each needs
+   `package.json`, `package-lock.json` (must pass the lock policy: registry
+   tarballs, sha512 integrity, no install scripts), `build.mjs` and optionally
+   `test.mjs`. Prepare an offline npm cache that holds exactly the lockfile's
+   tarballs. Have `node:22-alpine` available locally (it is never pulled).
+2. Write the catalog, a JSON file mapping canonical repository URLs to fixture
+   directory names (at most 50 entries, 16 KiB):
+   ```json
+   { "https://github.com/octocat/Hello-World": "hello-fixture" }
+   ```
+3. Build and start (Docker must be running):
+   ```powershell
+   pnpm run build
+   $env:GRAVEYARD_WORKER_ENABLED = "1"
+   $env:GRAVEYARD_FIXTURES_ROOT = "C:\abs\fixtures"
+   $env:GRAVEYARD_STAGING_ROOT = "C:\abs\staging"      # existing, worker-owned
+   $env:GRAVEYARD_NPM_CACHE_DIR = "C:\abs\npm-cache"
+   $env:GRAVEYARD_FIXTURE_CATALOG = "C:\abs\catalog.json"
+   node dist/worker-main.js      # or `pnpm run worker` with the variables in .env
+   ```
+   Use the same `DATABASE_PATH` as the API (run both from `backend/` or give an
+   absolute path). The database must be a local file, never a network share.
+
+Optional variables and ranges: `GRAVEYARD_WORKER_ID`, `GRAVEYARD_WORKER_POLL_MS`
+(250 to 60000, default 2000), `GRAVEYARD_WORKER_RECOVER_MS` (5000 to 600000,
+default 30000), `GRAVEYARD_WORKER_BATCH` (1 to 20, default 5),
+`GRAVEYARD_WORKER_SHUTDOWN_MS` (1000 to 120000, default 45000),
+`GRAVEYARD_WORKER_AGENTS` (`off` default, `kiro-v2`, `kiro-v3`; anything other
+than `off` sends bounded, redacted evidence to Kiro's service), `LOG_LEVEL`.
+Invalid values, missing directories, a catalog fixture without its files, or a
+missing compiled driver stop the start with exit code 1 before the database is
+opened.
+
+### Behaviour
+
+- One job at a time; at most `GRAVEYARD_WORKER_BATCH` jobs per pass; sleeps the
+  poll interval when idle; exponential backoff (capped at 60 s) after errors.
+- If `docker version` does not answer, no job is claimed and queued jobs stay
+  queued. A daemon that disappears mid-run fails that job closed.
+- Every job ends only after cleanup of its container is proven. Unproven cleanup
+  leaves the job blocked (still `running`, never `completed`) for an operator.
+- SIGINT or SIGTERM: the active job is aborted and settled (requeued only with
+  cleanup proof), the loop ends, the database closes, exit code 0. A second
+  signal or the watchdog exits with code 1.
+- Logs are JSON lines on stderr and never contain job tokens.
+
+### GET /api/jobs/:id/result
+
+Header: `Authorization: Bearer <token>` (401 malformed, 403 wrong or unknown,
+identical 403 bodies, `Cache-Control: no-store`). Always 200 for an authorized
+caller:
+
+```json
+{
+  "jobId": "uuid", "status": "completed", "stage": "done", "terminal": true,
+  "outcome": "failing-with-patch-proposal",
+  "summary": "The fixture fails. A model-authored patch was proposed. It was not applied and not verified.",
+  "repair": { "verified": false, "patchApplied": false, "patchProposed": true, "diagnosed": true },
+  "result": { "verdict": "repository-failing", "...": "stored payload of the final attempt" },
+  "infrastructure": null
+}
+```
+
+`outcome` is one of `pending`, `passing`, `failing-with-patch-proposal`,
+`failing-with-diagnosis`, `failing-undiagnosed`, `tests-not-run`,
+`infrastructure-failed`, `timed-out`, `cancelled`, `completed-without-result`.
+
+- `result` is present only for a `completed` job and is the final attempt's
+  stored payload. It is durable (a `job_events` row). A blocked, running,
+  failed or timed-out job never exposes one.
+- `passing` means the **unmodified** fixture built and passed its tests. It is
+  not a repair. `tests-not-run` is not a verification.
+- A diagnosis or patch proposal is model-authored text. `repair.verified` and
+  `repair.patchApplied` are always `false`: nothing applies a patch or re-verifies.
+- `infrastructure` (failed and timed-out jobs) is never a repository diagnosis.
+
+### Real-Docker end-to-end harness (opt-in; run and passed once on 2026-11-15)
+
+Verified result (reported externally, 2026-11-15): Docker Desktop server
+29.9.2, local `node:22-alpine`, one controlled offline `is-number@7.0.0`
+fixture, real localhost API, real separate worker composition, real Docker,
+agents off. The job reached `completed` / stage `done` / outcome `passing`,
+the result was read with the owner token, cleanup was confirmed, and 1 test
+passed. This does **not** verify real GitHub cloning, agents on this job,
+repair, or arbitrary repositories.
+
+`pnpm run test:worker-e2e` runs `src/test/manual-worker-e2e-check.ts`: the real
+API on an ephemeral `127.0.0.1` port plus the real worker composition and real
+Docker, for one controlled fixture. It uses a temporary database, catalog,
+fixtures and staging directories under `backend/.tmp-fixtures` and removes them
+afterwards; existing data is never opened. It never fakes Docker: if the
+daemon, `node:22-alpine`, the compiled driver or the operator inputs are
+missing it fails with a `FAIL-CLOSED` message. `pnpm test` skips it.
+
+```powershell
+$env:GRAVEYARD_NPM_FIXTURE_DIR = "C:\path\to\is-number7-fixture"  # package.json + package-lock.json
+$env:GRAVEYARD_NPM_CACHE_DIR = "C:\path\to\npm-cache"            # prepopulated offline cache
+pnpm run test:worker-e2e
+```
+
+It expects a `completed` job with outcome `passing` and `repair.verified` /
+`repair.patchApplied` both `false`, then checks that no container remains. No
+network beyond localhost is used. See `DEVELOPMENT.md` for details and limits.
+
+### Not live
+
+Arbitrary repositories, git or registry acquisition inside a job, patch
+application, repair verification, a patch endpoint, worker supervision or health
+endpoint, and any frontend use of `/result` (the frontend is unchanged). The
+code and its tests (`worker-config`, `worker-service`, `worker-process`,
+`job-result`) compile and pass (87 focused tests plus the full suite, reported externally) with
+mocked Docker; the opt-in real-Docker harness above passed once for one controlled
+fixture. See `DEVELOPMENT.md`.
+
 ## Not yet implemented
 
 The following features from `requirements.md` / `design.md` are **deferred to
 future milestones** and are intentionally absent:
 
-- `GET /api/jobs/:id/result` — RepairResult compatible with frontend
-- `GET /api/jobs/:id/patch` — downloadable unified diff
-- Worker process — no polling loop or entry point; only lease primitives and the unwired `JobWorker` coordinator (see above)
-- Sandbox — disposable Docker execution, resource limits, timeout (15 min default)
-- Agent adapter — Analyst / Fixer / Tester phases; Kiro runtime feasibility outstanding
+- `GET /api/jobs/:id/patch` — downloadable unified diff (a model-authored proposal is readable inside the `/result` payload only)
+- Worker started or supervised by the API server (the worker is a separate opt-in process, see above)
+- Arbitrary-repository acquisition inside jobs and a production `EgressGuard`
+- Patch application and repair verification
 - Bounded log storage and truncation indicators
-- Jobs are accepted and persisted but never executed — they remain in `queued` status
-  indefinitely until a worker is implemented.  Cancellation is supported for queued jobs;
-  running jobs return 409 until the worker exists.
+- Without a running worker, jobs are accepted and persisted but stay `queued`.
+  Cancellation is supported for queued jobs; running jobs return 409.
 
 ---
 
@@ -317,6 +446,14 @@ backend/
 │   ├── leases.ts           # Worker lease primitives (claim, heartbeat, fence, recovery)
 │   ├── worker.ts           # JobWorker coordinator (unwired; injected runner)
 │   ├── runner.ts           # Runner contract + fail-closed UnavailableRunner
+│   ├── pipeline-runner.ts  # PipelineJobRunner: operator catalog -> controlled pipeline -> Tester -> agents
+│   ├── worker-config.ts    # Opt-in switch, worker env and catalog validation
+│   ├── worker-service.ts   # Bounded polling loop, availability gate, graceful stop
+│   ├── worker-compose.ts   # Builds the real worker from a validated config
+│   ├── worker-process.ts   # Testable start-up sequence
+│   ├── worker-main.ts      # Worker process entry point (opt-in; not started by the API)
+│   ├── result-view.ts      # Client-facing result presentation
+│   ├── (other modules: sandbox, pipeline, acquisition, agents; see DEVELOPMENT.md)
 │   ├── token.ts            # Cryptographic token utilities (generate, hash, verify)
 │   ├── url.ts              # Strict GitHub HTTPS URL validator
 │   ├── jobs.ts             # Jobs repository (prepared statements, transactions)

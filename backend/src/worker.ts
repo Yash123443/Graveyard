@@ -463,7 +463,7 @@ export interface DrainResult {
  * unbounded and never starts a second job while one is active. Stops at the first blocked or
  * lease-lost job (cleanup unproven or ownership lost) instead of pressing on.
  */
-export async function drainQueue(worker: JobWorker, opts: DrainOptions): Promise<DrainResult> {
+export async function drainQueue(worker: Pick<JobWorker, "runOnce">, opts: DrainOptions): Promise<DrainResult> {
   if (!Number.isInteger(opts.maxJobs) || opts.maxJobs < 1 || opts.maxJobs > 100) {
     throw new Error("maxJobs must be an integer between 1 and 100");
   }

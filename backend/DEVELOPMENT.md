@@ -1017,3 +1017,191 @@ Kiro ran no commands and changed no source. Results are reported by the user fro
 - Tests use injected fakes (runner, pipeline, cleanup, agents). No end-to-end live worker run was performed.
 - The pipeline remains limited to controlled fixtures. It is not wired to the server, and it does not apply repairs.
 - Not shown: a real diagnosis or patch from the agents, arbitrary repositories, a production `EgressGuard`, result or patch endpoints.
+
+
+
+
+
+
+---
+
+## 2026-11-15: opt-in local worker process and durable result endpoint (written by Kiro, NOT compiled or run)
+
+Kiro had no shell for this request (and was told not to run shell or git), so `tsc` and the tests were **not run**. Everything below is unverified until an operator builds and tests it and logs the result here and in `.kiro/PROJECT.md`. Edits are under `backend/` and `.kiro/` only. No frontend file, no dependency, no `server.ts` change, no schema change (schema stays v2).
+
+### What was added
+
+- `src/worker-config.ts`: `loadWorkerConfig`, `parseCatalog`, `isWorkerEnabled`. Pure validation of the environment and the operator catalog file (the file reader is injectable).
+- `src/worker-service.ts`: `WorkerService`, a bounded polling loop around `JobWorker` (injected sleep, clock and logger).
+- `src/worker-compose.ts`: `composeWorker`, which builds the real stack from a validated config, and `makeDockerPreflight`.
+- `src/worker-process.ts`: `startWorker(env, deps)`, the testable start-up sequence.
+- `src/worker-main.ts`: the process entry point (signals, logging, exit codes). `package.json` gained the script `"worker": "node --env-file=.env dist/worker-main.js"`. No dependency was added.
+- `src/result-view.ts`: `presentResult`, the pure client-facing view of a job.
+- `src/jobs.ts`: `getJobResultRecord` (read-only).
+- `src/routes/jobs.ts`: `GET /api/jobs/:id/result`.
+- Small edits: `drainQueue` now takes `Pick<JobWorker, "runOnce">` (same behaviour), and `FIXTURE_NAME_RE` is exported from `pipeline-runner.ts`.
+- Tests: `worker-config.test.ts`, `worker-service.test.ts`, `worker-process.test.ts`, `job-result.test.ts`.
+- `.env.example`: the worker variables, commented out. `README.md`: a "Local worker" section.
+
+### The worker process: how it is opt-in and what it will run
+
+The API server never starts a worker. The worker is a separate process (`dist/worker-main.js`) that does nothing unless `GRAVEYARD_WORKER_ENABLED` is exactly `1` (unset, `true`, `yes`, ` 1` and the like all mean disabled; exit code 2, nothing opened or read). Variables and ranges are documented in `src/worker-config.ts` and `.env.example`: `GRAVEYARD_FIXTURES_ROOT`, `GRAVEYARD_STAGING_ROOT`, `GRAVEYARD_NPM_CACHE_DIR` (absolute, existing, pairwise separate), `GRAVEYARD_FIXTURE_CATALOG` (absolute path of a JSON file), `DATABASE_PATH` (a file shared with the API; `:memory:` is refused), poll 250 to 60 000 ms (default 2000), recovery interval 5 000 to 600 000 ms (default 30 000), batch 1 to 20 (default 5), shutdown watchdog 1 000 to 120 000 ms (default 45 000), agents `off | kiro-v2 | kiro-v3` (default `off`).
+
+The catalog maps canonical GitHub repository URLs to fixture directory names under the fixtures root, for example `{ "https://github.com/octocat/Hello-World": "hello-fixture" }`. Keys must already be in the canonical form `validateGithubUrl` produces; values must match the fixture-name pattern; at most 50 entries and 16 KiB. Each named directory must hold `package.json`, `package-lock.json` and `build.mjs` as plain files (optional `test.mjs`) and the lockfile must pass the existing lock policy at job time. A repository URL that is not a key is refused by `PipelineJobRunner`: the job fails as `infrastructure-unavailable`, nothing is cloned, fetched or run. There is no setting that enables arbitrary repositories.
+
+Start-up order (`startWorker`): opt-in switch, configuration, then `composeWorker` checks that the three directories exist, that every catalog fixture has its files, and that the compiled `fixture-pipeline-driver.js` exists, all **before the database is opened**. A refusal exits 1 with every problem listed. Only then the database is opened and the loop starts.
+
+Nothing runs on the host. The only child processes are `docker` (argument arrays, no shell, minimal environment, through the existing `spawnExecutor`) and, only if agents are enabled, `kiro-cli` with no tools trusted (through the existing adapter). Repository content executes only inside the existing network-`none` disposable container.
+
+### Polling, availability and shutdown
+
+- Each pass: recovery if `recoverMs` has elapsed (first pass at start; expired leases fenced, queued deadlines expired, cleanup proof requested for fenced jobs), then `drainQueue` with the batch bound. A full batch loops again immediately; an idle queue sleeps `pollMs`; a pass with an error backs off to `min(60 s, pollMs * 2^failures)` and resets after a clean pass. One job at a time (the `JobWorker` guarantee).
+- Availability gate: before claiming, `docker version` must answer. While it does not, nothing is claimed, so queued jobs stay queued instead of being consumed and failed by an outage (logged once per change). This probes the daemon only, not image presence, not isolation. A daemon that disappears during a run still fails that run closed through the existing runner paths.
+- A drain stops at the first `blocked` or `lease-lost` job and logs a warning; that job stays fenced for an operator.
+- SIGINT, SIGTERM (and SIGBREAK on Windows): `WorkerService.stop()` wakes the loop, `JobWorker.shutdown()` aborts the active run, the job is requeued only with cleanup proof and otherwise fenced and blocked (existing rules), then the database is closed and the process exits 0. A second signal or the watchdog exits 1.
+
+### Result endpoint
+
+`GET /api/jobs/:id/result`, same Bearer contract as the other job routes (401 malformed, 403 wrong or unknown, identical 403 bodies, `Cache-Control: no-store`). The 200 body always has `jobId, status, stage, terminal, outcome, summary, repair, result, infrastructure`, built from fixed fields only (no token hash, lease token or recovery token is selected).
+
+- `result` is the stored payload of the **final attempt**, and only for a job whose status is `completed`. A result event of an earlier attempt, or of a job that is running, blocked on cleanup, failed or timed out, is never exposed. The result is durable because it is a `job_events` row (and the status that gates it is a `jobs` row).
+- Outcomes: `pending`, `passing`, `failing-with-patch-proposal`, `failing-with-diagnosis`, `failing-undiagnosed`, `tests-not-run`, `infrastructure-failed`, `timed-out`, `cancelled`, `completed-without-result`. `terminal` is true for completed, failed, cancelled and timed-out.
+- Diagnosis and proposal are not repair. `repair.verified` and `repair.patchApplied` are the constant `false`; `repair.patchProposed` and `repair.diagnosed` are true only when the stored analyst or fixer entry has `status:"ok"`, `modelAuthored:true` and (for the fixer) `proposalOnly:true`, `applied:false`. `passing` means the **unmodified** operator-prepared fixture built and passed its tests; it says nothing about repair. `tests-not-run` is not a verification. `infrastructure` (kind, bounded message, attempt counts, time) is set for failed and timed-out jobs and is never a repository diagnosis.
+- `completed` still means "the work finished and a result exists", not "repaired". The existing SSE stream also carries the `stage` and `result` events; the frontend was not changed.
+
+### Tests written (all unrun)
+
+- `worker-config.test.ts`: opt-in switch (ten disabled spellings, the catalog is not read while disabled), defaults and range edges, relative and NUL paths, `:memory:`, overlapping directories, out-of-range and non-integer numbers, bad agent mode / worker id / log level, all problems reported at once, unreadable or oversized catalog without echoing reader errors, catalog key canonicalisation, unsafe fixture names, entry limit, `__proto__`.
+- `worker-service.test.ts` (fake worker, clock and sleep): recovery cadence, idle sleep, bounded batches, stop at a blocked job, availability gate (no claim, one warning, resume, throwing probe, recovery still runs), exponential backoff with cap and reset, recovery failure not preventing a drain, stop while sleeping and while a job runs (waits for the job to settle), idempotent stop, a stopped service never starts, option validation, real `systemSleep`.
+- `worker-process.test.ts` (real Fastify app and the real composition on a shared temporary SQLite file; fake docker CLI, fake pipeline, fake cleanup, fake agents): disabled start, invalid config, missing directories / fixtures / driver refuse before the database is opened, unavailable Docker claims nothing and issues only `docker version`, a passing job end to end (execution id `<job>:1`, stage events `building, testing`, cleanup requested, owner reads `passing`, no token in the log), failing job with a patch proposal (`failing-with-patch-proposal`, `applied:false`, `verified:false`, pipeline run once), agents enabled with an unstartable `kiro-cli` (job completes, `failing-undiagnosed`), uncatalogued repository (failed, `infrastructure-failed`, pipeline never called), timed-out pipeline (failed, no result), unproven cleanup (job blocked, result hidden), stop mid-job (job requeued, loop ended, database closed).
+- `job-result.test.ts` (real app, real lease functions): 401/403 behaviour including cross-job tokens, pending for queued, running and blocked jobs even when a result event exists, every outcome above, the attempt-mismatch case, durability across reopening the database, failed / timed-out / cancelled, no secrets in the body, and the pure `presentResult` invariants.
+
+### What is live, and what is not
+
+Live in code (once built and the worker is started by an operator with the opt-in variables): a separate worker process that polls the shared SQLite file, runs queued jobs whose URL is in the operator catalog through the existing offline pipeline in a network-`none` container, records stage and result events with fenced writes, settles every job only after cleanup proof, and the owner can read the durable outcome from `GET /api/jobs/:id/result`.
+
+Not live, not claimed:
+- Nothing has been compiled or run in this change, including the new tests. The earlier external verification (both `tsc` configs, full suite, one real Analyst call) predates this change and does not cover it.
+- No end-to-end run with real Docker has happened: the new end-to-end tests fake the docker CLI and the pipeline. The pipeline, the sandbox and cleanup proof are covered only by their own earlier tests and manual harnesses.
+- No arbitrary or untrusted repositories: no clone, no acquisition, no registry download in a job. The catalog fixtures and their offline npm cache are prepared by the operator. The production `EgressGuard` still does not exist.
+- No patch application and no repair verification: `repair.verified` is always `false`. A fixer proposal is data. The `verifying` stage is still never emitted.
+- The API server does not start or supervise the worker; there is no process manager, health endpoint or metrics for it. Logs are JSON lines on stderr.
+- The frontend is unchanged. Its workspace text still says no worker or result endpoint exists, and it does not call `/result`. That text is now stale and needs a deliberate frontend change.
+- The worker and API must run from the same `backend/` directory (or use the same absolute `DATABASE_PATH`) on one host, never a network filesystem.
+- The availability gate checks only that `docker version` answers; a missing `node:22-alpine` image or a failed isolation read-back still fails each job closed (`infrastructure-unavailable`), consuming that job.
+- Staging directories are keyed by fixture name, so a leftover directory from a crashed run makes later runs of that fixture refuse (`staging-failed`) until an operator removes it. Recovery proves containers only.
+- With agents enabled (`kiro-v2` or `kiro-v3`), bounded redacted evidence leaves the machine for Kiro's service. The default is `off`. Real `kiro-cli` behaviour inside the worker has not been observed.
+
+### Assumptions that may be wrong (each should fail loudly in tests or fail closed at run time)
+
+- `worker-main.ts` uses top-level `await` (module `NodeNext`, target ES2022); it is compiled by both `tsc` configs but never imported by tests.
+- `assert.ok(r.started, ...)` narrowing in `worker-process.test.ts`, and the `Extract<StartResult, ...>` types, may need small type adjustments.
+- `confirmRecoveryCleanup` requeue semantics are relied on in `job-result.test.ts` (requeue after a first-attempt fence; `expireQueuedDeadlines` with a time one hour ahead) as read from `leases.ts`.
+- The real `ControlledPipeline` is constructed in two tests with a fake docker CLI; if the temporary directory path contains characters the sandbox forbids, it becomes "unconfigured", which does not change those tests' expectations.
+- The agents-enabled test relies on the adapter reporting an unstartable `kiro-cli` as a non-`ok` outcome (documented in the agent foundation entry) rather than throwing.
+
+### Pending external
+
+```
+pnpm exec tsc -p tsconfig.json
+pnpm exec tsc -p tsconfig.test.json
+pnpm run build:test
+node --test dist-test/test/worker-config.test.js dist-test/test/worker-service.test.js dist-test/test/worker-process.test.js dist-test/test/job-result.test.js
+node --test dist-test/test/*.js
+```
+Fix any compile or test failures, then record the results here, in `.kiro/PROJECT.md` and in `.kiro/KIRO_USAGE.md`. A real-Docker run of the worker (a catalogued fixture with a prepopulated cache, with and without Docker running, and a stop during a job) has not been written as a harness and has not been performed; do it by hand and record it before relying on any of this. See `README.md`, "Local worker", for the operator steps.
+
+
+
+
+---
+
+## 2026-11-15: external verification of the worker process and result endpoint (docs only)
+
+Kiro ran no commands and changed no source for this record. Results are reported by the user from external runs. This supersedes the "written, NOT compiled or run" status of the "opt-in local worker process and durable result endpoint" entry above; that entry is left as history.
+
+### Verified
+
+- Production TypeScript compilation (`tsconfig.json`) passed.
+- Test TypeScript compilation (`tsconfig.test.json`) passed.
+- 87 new focused tests passed (`worker-config`, `worker-service`, `worker-process`, `job-result`).
+- The full backend suite passed (total count not supplied to Kiro).
+
+### Limits
+
+- These tests use mocked Docker: a recording fake docker CLI, a fake pipeline, a fake cleanup check and fake agents. They show the loop, authorization, fencing and result flow, not real container isolation.
+- **No real-Docker run of the worker has been performed.** Nothing in this record claims one. See the next entry for the harness that can perform it.
+
+---
+
+## 2026-11-15: opt-in real-Docker worker end-to-end harness (written by Kiro, NOT compiled or run)
+
+Kiro made file edits only: no shell, no `tsc`, no tests, no Docker. **Nothing here is verified and no real-Docker worker run has occurred.** Edits are under `backend/` only: `src/test/manual-worker-e2e-check.ts` (new), `worker-e2e.env` (new, one line), and one script in `package.json`. No production source, dependency, frontend or schema change.
+
+### What the harness does
+
+`src/test/manual-worker-e2e-check.ts` is skipped unless `GRAVEYARD_MANUAL_WORKER_E2E=1`, so `pnpm test` (which globs `dist-test/test/*.js`) reports it as skipped and never touches Docker. The single explicit command is `pnpm run test:worker-e2e`, which builds the test output and runs only this file with `--env-file=worker-e2e.env` (that file holds just the opt-in switch). It then:
+
+1. Fails closed, before creating anything, unless: `GRAVEYARD_NPM_FIXTURE_DIR` and `GRAVEYARD_NPM_CACHE_DIR` are set (the same operator inputs as `manual-controlled-pipeline-check.ts`: an `is-number@7.0.0` `package.json` + `package-lock.json`, and a prepopulated offline npm cache), the cache is not under `backend/.tmp-fixtures`, the compiled `fixture-pipeline-driver.js` exists, `docker version` answers, and `node:22-alpine` exists locally. Docker is never faked and nothing is pulled.
+2. Creates three `run-<hex>` directories under gitignored `backend/.tmp-fixtures`: database plus catalog, fixtures root (one `pass` fixture: operator package files plus the trusted generated `build.mjs`/`test.mjs` from `controlled-pipeline-fixtures.ts`), and staging root. The real `data/` database and any user data are never opened.
+3. Starts the real API (`buildApp`) on `127.0.0.1` with an ephemeral port, on the temporary database.
+4. Starts the real worker through `startWorker` with an explicit environment object, catalog `{ "https://github.com/graveyard-local/controlled-fixture": "pass" }` (a lookup key only, never contacted), agents `off`. No seam except the log sink is injected, so `spawnExecutor`, `ControlledPipeline` and the Docker cleanup proof are the real ones.
+5. Creates a job with consent over HTTP, checks 401 without a token and 403 with another well-formed token, then polls `GET /api/jobs/:id/result` with the owner token every 500 ms for at most 240 s.
+6. Expects: `status` completed, `stage` done, `outcome` passing, stored `verdict` verified, `repair.verified` and `repair.patchApplied` both `false`, no infrastructure record, `Cache-Control: no-store`, and no token in any result body or worker log.
+7. Cleanup, in order: `worker.stop()` (a running job is aborted and settled only with cleanup proof), `app.close()`, an independent `docker ps -a` query by label `graveyard.execution-id` and by container name for both possible attempts (`<jobId>:1`, `<jobId>:2`), then `removeRunDir` for each temporary directory (exact-path, no recursive delete, refuses anything not a `run-<hex>` directory directly under the owned parent). Any leftover container or undeleted directory is a reported problem and fails the test.
+
+### Run (outside the restricted sandbox; PowerShell, from `backend/`)
+
+```powershell
+$env:GRAVEYARD_NPM_FIXTURE_DIR = "C:\path\to\is-number7-fixture"
+$env:GRAVEYARD_NPM_CACHE_DIR = "C:\path\to\npm-cache"
+pnpm run test:worker-e2e
+```
+
+Docker Desktop must be running and `node:22-alpine` must be present locally. A fail-closed message (`FAIL-CLOSED: ...`) means a precondition was missing; the run then makes no claim about the worker.
+
+### Assumptions that a first run may contradict
+
+- `node --env-file=worker-e2e.env --test <file>` is accepted together on the installed Node version (Node 22.13+ supports both flags).
+- The compiled driver is at `dist-test/fixture-pipeline-driver.js`, which is where `composeWorker` looks for it when running from `dist-test/test/`.
+- Everything the controlled-pipeline harness assumed (npm output, noexec tmpfs, Docker Desktop bind-source form) still applies and fails closed.
+- Type details in the harness (`Extract<StartResult, ...>`, `node:http` typings) were not compiled.
+
+### Not covered even if it passes
+
+One passing fixture on one machine. No failing-fixture, uncatalogued-URL, timeout, cancel, mid-job stop or Docker-outage case against real Docker. No agents, no acquisition, no arbitrary repository, no patch apply, no frontend. A pass shows that the real API, the real worker and real Docker produced a durable `passing` result for a controlled fixture; it is not a repair and not production proof.
+
+### Next steps
+
+1. Run `pnpm run test:worker-e2e` and record the output here and in `.kiro/PROJECT.md`. Until then, no real-Docker worker run is claimed.
+2. Add real-Docker cases for a failing fixture, an uncatalogued URL and a stop during a job.
+
+
+
+---
+
+## 2026-11-15: real-Docker worker end-to-end run: external verification (docs only)
+
+Kiro ran no commands and changed no source (no shell). Results are reported by the user from external runs. This supersedes the "NOT compiled or run" and "no real-Docker worker run has occurred" status of the "opt-in real-Docker worker end-to-end harness" entry and of the worker-process limits above. Those entries are left as history.
+
+### Verified
+
+- Environment: 2026-11-15, Docker Desktop server 29.9.2, local `node:22-alpine` image (never pulled).
+- Before the harness: both TypeScript builds passed, 87 focused tests passed, and the full backend suite passed.
+- The harness (`src/test/manual-worker-e2e-check.ts`, `pnpm run test:worker-e2e`) compiled and passed: 1 test passed.
+- Composition: one controlled single-package offline `is-number@7.0.0` fixture, the real API on localhost, the real separate worker composition and real Docker, agents off.
+- Observed outcome: job `completed`, stage `done`, outcome `passing`; `GET /api/jobs/:id/result` was read with the owner token; container cleanup was confirmed.
+
+### Limits (not shown)
+
+- Real GitHub cloning or any acquisition inside a job.
+- Agents enabled on this job. Agents were off.
+- Repair, patch application or verification (`repair.verified` and `repair.patchApplied` remain `false`). `passing` is the unmodified fixture passing its tests.
+- Arbitrary or untrusted repositories, failing-fixture, uncatalogued-URL, timeout, cancel, mid-job stop and Docker-outage cases against real Docker, other machines, production safety.
+
+Authorship: Kiro wrote the worker, result endpoint and harness source; an external assistant reviewed and ran them.
+
+### Next steps
+
+1. Real-Docker cases for a failing fixture, an uncatalogued URL and a stop during a job.
+2. Frontend update for the now-stale "no worker or result endpoint" text, only as a deliberate frontend change.
