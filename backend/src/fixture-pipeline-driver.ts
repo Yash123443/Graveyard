@@ -305,6 +305,21 @@ function copyFixture(sourceDir: string, workDir: string): CopyResult {
   return { ok: true, present };
 }
 
+/**
+ * True only if the work copy of test.mjs is a bounded regular file (no symlink) whose bytes equal the
+ * staged file in the read-only source dir. Any read error or mismatch is false. A consistency check
+ * for the trusted fixture workflow, not containment of hostile code.
+ */
+function stagedTestUnchanged(sourceDir: string, workDir: string): boolean {
+  try {
+    const staged = readRegularFile(join(sourceDir, "test.mjs"));
+    const copied = readRegularFile(join(workDir, "test.mjs"));
+    return staged.length === copied.length && staged.equals(copied);
+  } catch {
+    return false;
+  }
+}
+
 function errCode(e: unknown): string {
   const code = (e as NodeJS.ErrnoException | undefined)?.code;
   return typeof code === "string" ? code : "unknown";
@@ -457,6 +472,16 @@ export async function runFixturePipeline(options: FixturePipelineOptions = {}): 
   } else if (signal?.aborted) {
     failed = cancelled = true;
     stages.push({ stage: "test", status: "failed", reason: "cancelled", detail: "cancelled", durationMs: 0 });
+  } else if (!stagedTestUnchanged(sourceDir, workDir)) {
+    // Build shares /work with the copied test. Fail closed if it no longer matches the staged one.
+    failed = true;
+    stages.push({
+      stage: "test",
+      status: "failed",
+      reason: "refused",
+      detail: "test.mjs in the work dir does not match the staged fixture test",
+      durationMs: 0,
+    });
   } else {
     await runStage(
       "test",

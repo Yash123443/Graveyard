@@ -484,11 +484,14 @@ describe("GithubJobRunner through JobWorker: supported repository", () => {
     const rig = makeRig({ make: failureResult, agents });
     const id = newJob();
     await rig.worker.runOnce();
-    assert.deepEqual(stageNames(id), ["cloning", "analyzing", "building", "testing", "diagnosing", "repairing"]);
+    assert.deepEqual(stageNames(id), ["cloning", "analyzing", "building", "testing", "diagnosing", "repairing", "verifying"]);
     const result = resultOf(id) as Record<string, unknown>;
     assert.equal(result["verdict"], "repository-failing");
     assert.equal(result["sourceKind"], "github-pinned");
     assert.equal((result["fixer"] as Record<string, unknown>)["applied"], false);
+    // The fake proposal does not match the root build.mjs, so the verifier refuses it and runs nothing.
+    assert.equal((result["verification"] as Record<string, unknown>)["status"], "not-attempted");
+    assert.equal(rig.pipeline.requests.length, 1);
     assert.equal(agents.analyses.length, 1);
     const view = presentResult({ jobId: id, stage: "done", status: "completed", attemptCount: 1, maxAttempts: 2, infraError: null, result });
     assert.equal(view.outcome, "failing-with-patch-proposal");

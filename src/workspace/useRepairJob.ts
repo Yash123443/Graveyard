@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ApiError, TERMINAL_EVENTS, TERMINAL_STATUSES, authHeaders, cancelJob, createJob, describeError, errorFrom, eventsUrl,
-  getJob, isAbort, isTransient, type Credential, type JobMeta,
+  getJob, getResult, isAbort, isTransient, type Credential, type JobMeta, type ResultView,
 } from './api'
 import { clearCredential, loadCredential, saveCredential } from './session'
 import { createSseParser, type SseMessage } from './sse'
 
 export type StreamState = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'closed' | 'stopped'
+export type ResultState = 'idle' | 'loading' | 'ready' | 'error'
 
 export interface JobEvent {
   id: number
@@ -16,7 +17,20 @@ export interface JobEvent {
 }
 
 const MAX_EVENTS = 200
+const RESULT_ATTEMPTS = 4
 const isAuthFailure = (error: unknown) => error instanceof ApiError && (error.status === 401 || error.status === 403)
+
+/** Resolves after `ms`, or immediately when `signal` aborts. */
+const pause = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal.addEventListener('abort', done)
+  })
 
 /** Owns the single current job: credential, metadata, SSE stream and actions. */
 export function useRepairJob() {
@@ -29,6 +43,10 @@ export function useRepairJob() {
   const [submitError, setSubmitError] = useState('')
   const [busy, setBusy] = useState<'idle' | 'submitting' | 'cancelling'>('idle')
   const [reconnectKey, setReconnectKey] = useState(0)
+  const [result, setResult] = useState<ResultView | null>(null)
+  const [resultState, setResultState] = useState<ResultState>('idle')
+  const [resultError, setResultError] = useState('')
+  const [resultKey, setResultKey] = useState(0)
   const busyRef = useRef(false)
 
   const reset = useCallback((message: string) => {
@@ -38,11 +56,16 @@ export function useRepairJob() {
     setEvents([])
     setStream('idle')
     setStreamMessage('')
+    setResult(null)
+    setResultState('idle')
+    setResultError('')
     setNotice(message)
   }, [])
 
   const jobId = cred?.jobId
   const token = cred?.token
+  // The job metadata must belong to the current credential before it can trigger a result request.
+  const jobTerminal = !!job && job.jobId === jobId && TERMINAL_STATUSES.includes(job.status)
 
   useEffect(() => {
     if (!jobId || !token) return
@@ -189,6 +212,57 @@ export function useRepairJob() {
     return () => ac.abort()
   }, [jobId, token, reconnectKey, reset])
 
+  // The result is requested once the job is terminal, both when the live feed reports it and when a
+  // finished job is restored after a reload. A response that is not terminal yet (the job metadata
+  // and the result were read a moment apart) is retried a few times, never trusted as final.
+  useEffect(() => {
+    if (!jobId || !token || !jobTerminal) {
+      setResult(null)
+      setResultState('idle')
+      setResultError('')
+      return
+    }
+    const credential: Credential = { jobId, token }
+    const ac = new AbortController()
+    const { signal } = ac
+    setResult(null)
+    setResultState('loading')
+    setResultError('')
+
+    const load = async () => {
+      for (let attempt = 0; attempt < RESULT_ATTEMPTS && !signal.aborted; attempt++) {
+        try {
+          const view = await getResult(credential, signal)
+          if (signal.aborted) return
+          if (view.jobId !== credential.jobId) throw new ApiError(200, 'The backend returned a result for a different job.')
+          if (view.terminal) {
+            setResult(view)
+            setResultState('ready')
+            return
+          }
+        } catch (error) {
+          if (signal.aborted || isAbort(error)) return
+          if (isAuthFailure(error)) {
+            ac.abort()
+            reset(describeError(error) + ' It was cleared from this tab.')
+            return
+          }
+          if (!isTransient(error)) {
+            setResultState('error')
+            setResultError(describeError(error))
+            return
+          }
+        }
+        await pause(1000 * (attempt + 1), signal)
+      }
+      if (signal.aborted) return
+      setResultState('error')
+      setResultError('The result is not available yet. Try again in a moment.')
+    }
+    void load()
+    return () => ac.abort()
+  }, [jobId, token, jobTerminal, resultKey, reset])
+
   const submit = useCallback(async (repoUrl: string) => {
     if (busyRef.current) return false
     busyRef.current = true
@@ -199,6 +273,9 @@ export function useRepairJob() {
       const stored = saveCredential(created)
       setJob(null)
       setEvents([])
+      setResult(null)
+      setResultState('idle')
+      setResultError('')
       setNotice(stored ? '' : 'This browser blocked session storage, so the job cannot be restored after a reload.')
       setCred(created)
       return true
@@ -239,7 +316,11 @@ export function useRepairJob() {
 
   const forget = useCallback(() => reset(''), [reset])
   const reconnect = useCallback(() => setReconnectKey((key) => key + 1), [])
+  const reloadResult = useCallback(() => setResultKey((key) => key + 1), [])
 
   const terminal = !!job && TERMINAL_STATUSES.includes(job.status)
-  return { hasJob: !!cred, jobId, job, events, stream, streamMessage, notice, submitError, busy, terminal, submit, cancel, forget, reconnect }
+  return {
+    hasJob: !!cred, jobId, job, events, stream, streamMessage, notice, submitError, busy, terminal,
+    result, resultState, resultError, submit, cancel, forget, reconnect, reloadResult,
+  }
 }

@@ -1,14 +1,16 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { checkHealth, looksLikeRepoUrl } from './api'
 import { useRepairJob, type StreamState } from './useRepairJob'
+import { buildResultModel } from './result'
+import ResultPanel from './ResultPanel'
 import './workspace.css'
 
-const STAGES = ['queued', 'cloning', 'analyzing', 'diagnosing', 'repairing', 'building', 'testing', 'verifying'] as const
+const STAGES = ['queued', 'cloning', 'analyzing', 'diagnosing', 'repairing', 'building', 'testing', 'verifying', 'done'] as const
 
 const ROLES = [
   { name: 'Analyst', tone: 'analyst', stages: ['analyzing', 'diagnosing'], duty: 'Investigates the repository and locates the cause.' },
-  { name: 'Fixer', tone: 'fixer', stages: ['repairing'], duty: 'Repairs the broken dependencies.' },
-  { name: 'Tester', tone: 'tester', stages: ['building', 'testing', 'verifying'], duty: 'Builds and tests before anything is called alive.' },
+  { name: 'Fixer', tone: 'fixer', stages: ['repairing'], duty: 'Proposes one bounded patch. It is never applied to your repository.' },
+  { name: 'Tester', tone: 'tester', stages: ['building', 'testing', 'verifying'], duty: 'Builds and tests offline before anything is called repaired.' },
 ] as const
 
 type Health = { state: 'checking' } | { state: 'online'; version: string } | { state: 'offline' }
@@ -80,6 +82,7 @@ export default function Workspace() {
 
   const running = job?.status === 'running'
   const activeStage = job ? STAGES.findIndex((s) => s === job.stage) : -1
+  const resultModel = useMemo(() => (repo.result ? buildResultModel(repo.result) : null), [repo.result])
 
   return (
     <div className="ws-scroll">
@@ -97,8 +100,10 @@ export default function Workspace() {
 
       <main ref={main} tabIndex={-1} className="ws-main" aria-label="Repair workspace">
         <section className="ws-notice" aria-label="Current capabilities">
-          <strong>Honest status.</strong> The backend accepts and stores jobs, but worker execution is not enabled yet. Queued jobs stay
-          queued until you cancel them, and no result or patch endpoint exists, so nothing is repaired here yet.
+          <strong>Honest status.</strong> Jobs are only evaluated if the operator started the opt-in worker. Without it a queued job
+          stays queued until you cancel it. The worker runs operator-prepared fixtures and operator-pinned GitHub commits; any
+          other repository fails as an infrastructure problem and nothing is cloned or run. A patch is called a repair only after
+          it passed install, build and the original tests offline in a disposable copy. Nothing is ever applied to your repository.
         </section>
 
         <div className="ws-grid">
@@ -125,7 +130,8 @@ export default function Workspace() {
               <div className="ws-check">
                 <input id={ids.consent} type="checkbox" checked={consent} disabled={repo.hasJob} onChange={(e) => setConsent(e.target.checked)} />
                 <label htmlFor={ids.consent}>
-                  I consent to this service cloning and analysing this public repository. I understand no repair result is produced yet.
+                  I consent to this service cloning and analysing this public repository. I understand a repair is reported only
+                  if it passes verification, and that most repositories are not supported yet.
                 </label>
               </div>
               <button className="ws-button" type="submit" disabled={repo.hasJob || repo.busy !== 'idle'}>
@@ -217,12 +223,23 @@ export default function Workspace() {
               </ol>
             )}
           </section>
-
-          <section className="ws-card" aria-labelledby="ws-result-title">
-            <h2 id="ws-result-title">Result</h2>
-            <p className="ws-muted">No result is available. The backend has no result or patch endpoint yet, so nothing is shown here.</p>
-          </section>
         </div>
+
+        <section className="ws-card" aria-labelledby="ws-result-title" aria-busy={repo.resultState === 'loading'}>
+          <h2 id="ws-result-title">Result</h2>
+          {!repo.hasJob && <p className="ws-muted">No job in this tab.</p>}
+          {repo.hasJob && job && !repo.terminal && <p className="ws-muted">The job has not finished. Its result appears here when it does.</p>}
+          {repo.terminal && repo.resultState === 'loading' && <p className="ws-muted" role="status">Loading result…</p>}
+          {repo.resultState === 'error' && (
+            <div>
+              <p className="ws-error" role="alert">{repo.resultError}</p>
+              <div className="ws-actions">
+                <button className="ws-button ws-button--quiet" type="button" onClick={repo.reloadResult}>Try again</button>
+              </div>
+            </div>
+          )}
+          {resultModel && repo.jobId && <ResultPanel model={resultModel} jobId={repo.jobId} />}
+        </section>
       </main>
     </div>
   )

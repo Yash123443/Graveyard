@@ -1347,3 +1347,27 @@ The pinned `octocat/Hello-World` job completed with `stage=done` and `outcome=un
 ### 2026-11-16 verification with the default Git image
 
 Kiro added a 16 MiB tmpfs at `/git` with `noexec`, `nosuid` and `nodev` to override the image's anonymous volume. The worker checks the requested options in Docker's inspect response and continues to reject unexpected mounts. Codex compiled both TypeScript projects and passed 123 focused tests, then ran the compiled GitHub harness with the default `alpine/git:2.47.2` image on Docker Desktop 29.9.2. The owner received the expected unsupported result for the pinned Hello-World commit, and the harness confirmed cleanup.
+
+
+## 2026-11-16 — verified local repair slice (written by Kiro, NOT compiled or run)
+
+Source, tests and docs were written with read/search/edit tools only. Nothing was compiled, tested or run against Docker by Kiro.
+
+Commands for the operator (in `backend/`):
+
+- `pnpm exec tsc -p tsconfig.json` and `pnpm exec tsc -p tsconfig.test.json` must both exit 0.
+- `pnpm test` (new: `src/test/repair-verifier.test.ts`; changed: `src/test/github-runner.test.ts` expects the `verifying` stage and a `not-attempted` verification for its fake proposal).
+- Real Docker, opt-in, needs `GRAVEYARD_NPM_FIXTURE_DIR`, `GRAVEYARD_NPM_CACHE_DIR`, Docker and the local `node:22-alpine`: `pnpm run test:worker-e2e` (unchanged passing-fixture scenario) and `pnpm run test:worker-e2e:repair` (broken fixture, scripted Analyst/Fixer, expects `repair-verified`). The scripted agents go through the real contract validators; the live Kiro runtime is not tested.
+- Repository root: `pnpm exec tsc -b` or the usual build, then `node scripts/verify-workspace.mjs` (result presentation checks added).
+
+Design (see `.kiro/PROJECT.md` for the full entry): `src/repair-verifier.ts` verifies one proposal against a disposable copy. Patch class: only the complete original root `build.mjs`; `test.mjs`, `package.json` and the lockfile are copied byte for byte and the original `test.mjs` is required. `applyBuildPatch` re-validates with `parseUnifiedDiff` and applies in memory, re-checking each old line at its exact position. The copy lives in `run-<hex>` under the staging root (fixtures) or under the job's run directory (GitHub, reusing the baseline's verified read-only cache), runs through the existing offline `ControlledPipeline` with the baseline's execution id (only after confirmed baseline cleanup and staging removal, strictly serial), and is removed on every path. Outcomes: `verified`, `tested-failing`, `not-attempted(reason)`; inconclusive runs fail the job as infrastructure; abort records nothing.
+
+Result: the stored payload gains `verification` only when verification was reached; older payloads are unchanged. `GET /api/jobs/:id/result` adds outcomes `repair-verified` and `patch-failed-verification`, `repair.verified` (true only for `repair-verified` after an independent re-check including the sha256 of the diff) and `verifiedDiff`. `repair.patchApplied` is the constant `false`: the original is never modified.
+
+Risks and limits, all unverified: (1) the Docker mount of the clone under the staging root and the second container run under the same execution id have never run; (2) the result payload limit is 64 KiB, a 24 KiB diff plus the rest fits but a larger payload would make `recordLeasedResult` throw and the job end as aborted; (3) the catalog fixture's `package.json` and lockfile are re-read for the copy (not compared with what the baseline mounted); (4) a verified repair only means the fixture's own tests passed offline in the patched copy.
+
+### 2026-11-16 repair verification on Docker Desktop
+
+Codex built the backend and ran the two real worker scenarios on Docker Desktop 29.9.2, using the local `node:22-alpine` image and an offline `is-number@7.0.0` cache. The healthy fixture returned `passing`. The broken fixture returned `repair-verified` after the original build failed and the patched copy passed install, build and the unchanged tests. The owner result contained the exact verified diff, and the harness confirmed that the original files and temporary resource cleanup were intact. The broken fixture used scripted Analyst and Fixer responses and the real validators, worker, Docker and API. A live supported GitHub repair and a live Kiro proposal remain unverified.
+
+Kiro also added exact new-side hunk coordinate validation and checks that the work copy of `test.mjs` still equals the read-only staged copy before the test process starts. This consistency check is for the controlled fixture pipeline.

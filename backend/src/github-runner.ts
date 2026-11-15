@@ -268,7 +268,13 @@ export class GithubJobRunner implements JobRunner {
 
     const packageJson = files.packageJson;
     const packageLock = files.packageLock;
+    const buildMjs = files.buildMjs;
+    const testMjs = files.testMjs;
     const notRunDetail: { text: string | null } = { text: null };
+    // The verified offline cache of the baseline run, reused read-only (never re-acquired) when a
+    // repair proposal is verified. Set only after the baseline acquisition reported `acquired`.
+    const cacheBox: { dir: string | null } = { dir: null };
+    source.originals = () => ({ packageJson, packageLock, buildMjs, testMjs });
     const pipeline: PipelineLike = {
       run: async (req) => {
         const res = await runRegistryThenOffline(
@@ -288,7 +294,10 @@ export class GithubJobRunner implements JobRunner {
             pipeline: req,
           },
         );
-        if (res.pipeline !== null) return res.pipeline;
+        if (res.pipeline !== null) {
+          if (res.acquisition.kind === "acquired") cacheBox.dir = res.acquisition.cacheDir;
+          return res.pipeline;
+        }
         notRunDetail.text = res.detail;
         return notRunPipeline(req.executionId, res.detail);
       },
@@ -299,6 +308,10 @@ export class GithubJobRunner implements JobRunner {
       pipeline,
       cleanupExecution: this.o.cleanupExecution,
       buildNote: "dependencies are fetched through the registry-only proxy, then install, build and test run offline in disposable containers",
+      repair: {
+        workRoot: runDir,
+        makePipeline: (cloneRoot) => (cacheBox.dir === null ? null : this.o.makePipeline(cloneRoot, cacheBox.dir)),
+      },
       ...(this.o.agents === undefined ? {} : { agents: this.o.agents }),
     });
     const outcome = await inner.run(ctx);

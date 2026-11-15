@@ -121,6 +121,52 @@ export async function cancelJob(cred: Credential, signal?: AbortSignal): Promise
   )
 }
 
+/** What `GET /api/jobs/:id/result` returns (backend result-view.ts). Only fields the workspace needs are typed. */
+export interface ResultView {
+  jobId: string
+  status: string
+  stage: string
+  terminal: boolean
+  outcome: string
+  summary: string
+  repair: { verified: boolean; patchApplied: boolean; patchProposed: boolean; diagnosed: boolean }
+  verifiedDiff: string | null
+  result: Record<string, unknown> | null
+  infrastructure: { kind: string; message: string } | null
+}
+
+export function parseResultView(value: unknown): ResultView {
+  if (isRecord(value)) {
+    const { jobId, status, stage, terminal, outcome, summary, repair, verifiedDiff, result, infrastructure } = value
+    if (
+      typeof jobId === 'string' && typeof status === 'string' && typeof stage === 'string' && typeof terminal === 'boolean' &&
+      typeof outcome === 'string' && typeof summary === 'string' && isRecord(repair)
+    ) {
+      const infra =
+        isRecord(infrastructure) && typeof infrastructure.kind === 'string' && typeof infrastructure.message === 'string'
+          ? { kind: infrastructure.kind, message: infrastructure.message }
+          : null
+      return {
+        jobId, status, stage, terminal, outcome, summary,
+        repair: {
+          verified: repair.verified === true,
+          patchApplied: repair.patchApplied === true,
+          patchProposed: repair.patchProposed === true,
+          diagnosed: repair.diagnosed === true,
+        },
+        verifiedDiff: typeof verifiedDiff === 'string' ? verifiedDiff : null,
+        result: isRecord(result) ? result : null,
+        infrastructure: infra,
+      }
+    }
+  }
+  throw new ApiError(200, 'The backend returned an unexpected result.')
+}
+
+export async function getResult(cred: Credential, signal?: AbortSignal): Promise<ResultView> {
+  return parseResultView(await request(`/api/jobs/${encodeURIComponent(cred.jobId)}/result`, { headers: authHeaders(cred.token), signal }))
+}
+
 /** Plain-language message for a failed request. Never includes credentials. */
 export function describeError(error: unknown): string {
   if (!(error instanceof ApiError)) return 'Something unexpected went wrong.'

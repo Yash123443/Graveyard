@@ -40,10 +40,13 @@
  * directory of another process; a leftover staging directory makes later runs of that fixture refuse
  * (`staging-failed`, fail closed).
  *
- * Not done here (honest limits): no patch is applied, so there is no repair verification and the
- * `repairing` stage only means "a proposal was requested"; no acquisition of arbitrary repositories
- * (the git and registry acquisition modules are not connected here); the Analyst and Fixer are
- * advisory text, validated for form only, and their output is labelled `modelAuthored`.
+ * Not done here (honest limits): without the optional `repair` option no patch is applied, so there
+ * is no repair verification and the `repairing` stage only means "a proposal was requested". With
+ * it, the single proposal is applied in memory to a disposable copy and verified offline
+ * (`verifying` stage, repair-verifier.ts); the result then carries a `verification` record and the
+ * original is never modified. No acquisition of arbitrary repositories (the git and registry
+ * acquisition modules are not connected here); the Analyst and Fixer are advisory text, validated
+ * for form only, and their output is labelled `modelAuthored`.
  *
  * @module pipeline-runner
  */
@@ -61,6 +64,13 @@ import {
   type PatchProposal,
 } from "./agent-contract.js";
 import type { AgentOutcome, AnalystRequest, FixerRequest } from "./kiro-agent.js";
+import {
+  readFixtureOriginals,
+  verifyRepair,
+  type RepairOptions,
+  type RepairOriginals,
+  type RepairVerification,
+} from "./repair-verifier.js";
 
 export const REPOSITORY_UNSUPPORTED_REASON =
   "This repository has no controlled execution path: acquisition of arbitrary repositories is not available. Nothing was cloned or run.";
@@ -100,6 +110,11 @@ export interface ControlledSource {
   files: readonly SourceFile[];
   /** Absent for operator-prepared fixtures. */
   origin?: SourceOrigin;
+  /**
+   * Reads the original package.json, lockfile, build.mjs and test.mjs for a repair verification
+   * (catalog: from disk, GitHub: the in-memory root files). Absent: no repair is ever attempted.
+   */
+  originals?: () => RepairOriginals | null;
 }
 
 /** Maps a job's canonical repository URL to a controlled source, or null when there is none. May throw (treated as null). */
@@ -125,6 +140,12 @@ export interface PipelineJobRunnerOptions {
   agents?: AgentsLike;
   /** Optional text for the `building` stage event (the GitHub runner also fetches dependencies there). */
   buildNote?: string;
+  /**
+   * Optional. When set, the single Fixer proposal of a failing repository is applied in memory to a
+   * disposable copy and verified by an offline install, build and test (repair-verifier.ts). Absent:
+   * a proposal is only recorded, never applied or tested.
+   */
+  repair?: RepairOptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +204,7 @@ export function createCatalogResolver(
     const fixture = map.get(repoUrl);
     if (fixture === undefined) return null;
     const files = readEvidence(fixturesRoot, fixture);
-    return files === null ? null : { fixture, files };
+    return files === null ? null : { fixture, files, originals: () => readFixtureOriginals(fixturesRoot, fixture) };
   };
 }
 
@@ -297,8 +318,11 @@ export function buildResultPayload(args: {
   fixer: AgentOutcome<PatchProposal> | null;
   fixerSkipped: "not-configured" | "no-diagnosis";
   origin?: SourceOrigin;
+  /** Present only when the Fixer proposal went through repair verification (refused, tested or verified). */
+  verification?: RepairVerification;
 }): Record<string, unknown> {
   const origin = args.origin;
+  const verification = args.verification;
   return {
     verdict: args.verdict,
     sourceKind: origin === undefined ? "controlled-fixture" : "github-pinned",
@@ -308,11 +332,14 @@ export function buildResultPayload(args: {
     tester: args.tester,
     analyst: projectAnalyst(args.analyst),
     fixer: projectFixer(args.fixer, args.fixerSkipped),
+    ...(verification === undefined ? {} : { verification }),
     notes: [
       origin === undefined
         ? "The source is an operator-prepared controlled fixture, not a fetched repository."
         : "The source is a public GitHub repository fetched at the pinned commit; only its root package.json, package-lock.json, build.mjs and test.mjs were used.",
-      "A patch proposal is never applied; no repair was verified.",
+      verification === undefined
+        ? "A patch proposal is never applied; no repair was verified."
+        : "The patch proposal was never applied to the original source. It was applied only to a disposable copy; the verification record says whether that copy passed.",
     ],
   };
 }
@@ -380,6 +407,7 @@ export class PipelineJobRunner implements JobRunner {
     let analyst: AgentOutcome<Diagnosis> | null = null;
     let fixer: AgentOutcome<PatchProposal> | null = null;
     let fixerSkipped: "not-configured" | "no-diagnosis" = "not-configured";
+    let verification: RepairVerification | undefined;
 
     if (effective.status === "success" && tester.status === "passed") {
       verdict = "verified";
@@ -401,6 +429,25 @@ export class PipelineJobRunner implements JobRunner {
           if (!report.stage("repairing", "the Fixer proposes a patch; it is not applied")) return { kind: "aborted" };
           fixer = await this.callAgent("fixer", () => agents.propose({ diagnosis, evidence, signal: ctx.signal }));
           if (ctx.signal.aborted) return { kind: "aborted" };
+
+          const repair = this.o.repair;
+          if (repair !== undefined && fixer.status === "ok" && source.originals !== undefined) {
+            if (!report.stage("verifying", "the proposal is applied to a disposable copy and verified offline")) return { kind: "aborted" };
+            const buildFile = source.files.find((f) => f.path === "build.mjs");
+            const testFile = source.files.find((f) => f.path === "test.mjs");
+            const attempt = await verifyRepair(repair, {
+              executionId: ctx.executionId,
+              proposal: fixer.value,
+              baseline: effective,
+              evidenceBuild: buildFile === undefined ? null : { text: buildFile.text, complete: buildFile.complete },
+              evidenceTest: testFile === undefined ? null : { text: testFile.text },
+              originals: source.originals,
+              signal: ctx.signal,
+            });
+            if (ctx.signal.aborted || attempt.kind === "aborted") return { kind: "aborted" };
+            if (attempt.kind === "infrastructure") return infra(attempt.reason);
+            verification = attempt.verification;
+          }
         } else {
           fixerSkipped = "no-diagnosis";
         }
@@ -412,6 +459,7 @@ export class PipelineJobRunner implements JobRunner {
     const payload = buildResultPayload({
       verdict, fixture: source.fixture, pipeline: effective, tester, analyst, fixer, fixerSkipped,
       ...(source.origin === undefined ? {} : { origin: source.origin }),
+      ...(verification === undefined ? {} : { verification }),
     });
     if (!report.result(payload)) return { kind: "aborted" };
     return { kind: "completed" };

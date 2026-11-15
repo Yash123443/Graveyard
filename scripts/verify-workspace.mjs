@@ -80,7 +80,64 @@ try {
   }
   assert.ok(isValidToken('a'.repeat(64)) && !isValidToken('A'.repeat(64)) && !isValidToken('a'.repeat(63)))
 
-  console.log('Workspace SSE parser and error classification checks passed.')
+  // Result presentation: a repair is only "verified" when every independent signal agrees.
+  const { parseResultView } = await compile('src/workspace/api.ts', 'api2.mjs')
+  const { buildResultModel, diffFileName } = await compile('src/workspace/result.ts', 'result.mjs')
+  const DIFF = '--- a/build.mjs\n+++ b/build.mjs\n@@ -1 +1 @@\n-x\n+y\n'
+  const stages = (s) => [{ stage: 'prepare', status: 'passed' }, { stage: 'build', status: s, exitCode: s === 'failed' ? 1 : 0, durationMs: 5 }]
+  const verifiedResult = () => ({
+    verdict: 'repository-failing',
+    pipeline: { status: 'failure', stages: stages('failed') },
+    analyst: { status: 'ok', category: 'build-failure', summary: 's', rootCause: 'r', confidence: 'high', affectedFiles: ['build.mjs'] },
+    fixer: { status: 'ok', summary: 'p', diff: DIFF, files: ['build.mjs'], added: 1, removed: 1 },
+    verification: { status: 'verified', reason: 'all-stages-passed', detail: 'd', originalModified: false, measuredMs: 1500, pipelineMs: 900, patched: { status: 'success', stages: stages('passed') } },
+    notes: ['n'],
+  })
+  const view = (over = {}) => parseResultView({
+    jobId: 'job1', status: 'completed', stage: 'done', terminal: true, outcome: 'repair-verified', summary: 'server text',
+    repair: { verified: true, patchApplied: false, patchProposed: true, diagnosed: true }, verifiedDiff: DIFF,
+    result: verifiedResult(), infrastructure: null, ...over,
+  })
+  let m = buildResultModel(view())
+  assert.equal(m.verified, true)
+  assert.equal(m.verifiedDiff, DIFF)
+  assert.equal(m.tone, 'ok')
+  assert.equal(m.baselineStages.length, 2)
+  assert.equal(m.patchedStages.length, 2)
+  assert.equal(m.verification.measuredMs, 1500)
+  assert.equal(m.diagnosis.category, 'build-failure')
+  // Any missing signal removes the diff and the claim.
+  for (const over of [
+    { repair: { verified: false, patchApplied: false, patchProposed: true, diagnosed: true } },
+    { verifiedDiff: null },
+    { verifiedDiff: '' },
+    { outcome: 'failing-with-patch-proposal' },
+    { result: { ...verifiedResult(), verification: { ...verifiedResult().verification, status: 'tested-failing' } } },
+    { result: { ...verifiedResult(), verification: { ...verifiedResult().verification, originalModified: true } } },
+    { result: { ...verifiedResult(), verification: { ...verifiedResult().verification, patched: { status: 'failure' } } } },
+    { result: null },
+  ]) {
+    m = buildResultModel(view(over))
+    assert.equal(m.verified, false, JSON.stringify(over).slice(0, 80))
+    assert.equal(m.verifiedDiff, null)
+  }
+  m = buildResultModel(view({ verifiedDiff: null }))
+  assert.match(m.summary, /could not confirm/)
+  assert.equal(m.tone, 'warn')
+  // Unverified outcomes never offer a diff even though a proposal is shown.
+  m = buildResultModel(view({ outcome: 'failing-with-patch-proposal', repair: { verified: false, patchApplied: false, patchProposed: true, diagnosed: true }, verifiedDiff: null }))
+  assert.equal(m.verifiedDiff, null)
+  assert.equal(m.proposal.diff, DIFF)
+  // Malformed payloads are rejected or ignored, never thrown into the page.
+  assert.throws(() => parseResultView({ jobId: 1 }))
+  assert.throws(() => parseResultView(null))
+  m = buildResultModel(view({ outcome: 'something-new', result: { fixer: 5, pipeline: { stages: 'x' }, notes: 'x' } }))
+  assert.equal(m.verified, false)
+  assert.deepEqual(m.baselineStages, [])
+  assert.match(diffFileName('a/b\\..'), /^graveyard-ab-build\.mjs\.diff$/)
+  assert.match(diffFileName('!!'), /^graveyard-job-build\.mjs\.diff$/)
+
+  console.log('Workspace SSE parser, error classification and result presentation checks passed.')
 } finally {
   await rm(temporary, { recursive: true, force: true })
 }

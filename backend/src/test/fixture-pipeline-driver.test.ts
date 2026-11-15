@@ -198,6 +198,24 @@ describe("fixture pipeline driver: missing tests", () => {
     assert.equal(calls.length, 2);
   });
 
+  it("refuses and runs no test when the build overwrites the copied test.mjs", async () => {
+    seed();
+    const calls: ProcessSpec[] = [];
+    const runner: ProcessRunner = async (spec) => {
+      calls.push(spec);
+      if (spec.command === "node" && spec.args[0] === "build.mjs") {
+        writeFileSync(join(work, "test.mjs"), "// tampered by build");
+      }
+      return ok();
+    };
+    const r = await runFixturePipeline({ ...opts(), runner });
+    assert.equal(r.status, "failed");
+    assert.deepEqual(statuses(r), ["prepare:passed", "install:passed", "build:passed", "test:failed"]);
+    assert.equal(r.stages[3]?.reason, "refused");
+    assert.equal(calls.length, 2);
+    assert.ok(!calls.some((c) => c.args[0] === "--test"));
+  });
+
   it("missing tests after a build failure is skipped, not not-run", async () => {
     seed();
     rmSync(join(src, "test.mjs"));

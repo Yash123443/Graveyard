@@ -368,7 +368,9 @@ export const jobRoutes: FastifyPluginAsync<{ db: DatabaseSync }> = async (
   // 200 always carries the presented state: `terminal:false` and `outcome:"pending"` while the job
   // is queued or running; the durable result once it has completed. See result-view.ts for the
   // outcome vocabulary. A diagnosis or patch proposal is reported as such and never as a repair:
-  // `repair.verified` and `repair.patchApplied` are constant false.
+  // `repair.verified` is true only for outcome `repair-verified` (re-checked verification record of
+  // a patched disposable copy) and `repair.patchApplied` is constant false (the original is never
+  // modified). `verifiedDiff` carries the exact verified diff for that outcome only.
   // The response is built from fixed fields only; token hashes, lease tokens and recovery tokens
   // are never selected.
 

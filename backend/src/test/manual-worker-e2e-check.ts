@@ -40,6 +40,19 @@
  * No GitHub, no registry, no clone, no kiro-cli (agents off), no untrusted repository: the catalog URL
  * is only a lookup key. Docker is never faked.
  *
+ * Second, additional opt-in scenario (GRAVEYARD_MANUAL_WORKER_E2E_REPAIR=1 as well; `pnpm run
+ * test:worker-e2e:repair`): a generated BROKEN fixture (`fail-build`: build.mjs throws, test.mjs is
+ * the passing test file). The real worker runs with `agents: off` in its configuration but is given
+ * SCRIPTED Analyst and Fixer objects through the composeWorker `agents` seam. Their raw outputs (a
+ * diagnosis and a whole-file diff of build.mjs) go through the REAL contract validators against the
+ * evidence the runner supplies, so the result is reproducible. This does NOT exercise the live Kiro
+ * runtime or any model. Everything else is real: the API, the worker, Docker, the offline baseline
+ * run (expected to fail at build), the in-memory patch application, the disposable copy under the
+ * staging root and the second offline install/build/test of that copy under the same execution id.
+ * Expected: outcome repair-verified, repair.verified true, repair.patchApplied false, verifiedDiff equal
+ * to the scripted diff, an unchanged original fixture build.mjs, an empty staging root, no container
+ * left for either execution id. A pass would show this on this machine only.
+ *
  * What a pass shows: this controlled fixture, this operator cache and this Docker daemon produced a
  * durable `passing` result through the real API and worker on this machine. It does not show repair,
  * arbitrary-repository safety, timeout/cancel behaviour of the worker, or a production deployment.
@@ -53,7 +66,18 @@ import { test } from "node:test";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../app.js";
-import { pipelineFixtureScripts } from "../controlled-pipeline-fixtures.js";
+import { pipelineFixtureScripts, type PipelineFixtureKind } from "../controlled-pipeline-fixtures.js";
+import {
+  prepareEvidence,
+  validateDiagnosis,
+  validatePatchProposal,
+  type Diagnosis,
+  type EvidenceItem,
+  type FileEvidence,
+  type PatchProposal,
+} from "../agent-contract.js";
+import type { AgentOutcome } from "../kiro-agent.js";
+import type { AgentsLike } from "../pipeline-runner.js";
 import { LABEL_EXECUTION, containerNameFor, spawnExecutor } from "../docker-sandbox.js";
 import { createRunDir, ensureOwnedParent, removeRunDir, writeFixture } from "../fixture-workspace.js";
 import { executionIdFor } from "../leases.js";
@@ -62,13 +86,14 @@ import type { ResultView } from "../result-view.js";
 import { startWorker, type StartResult } from "../worker-process.js";
 
 const OPT_IN = process.env["GRAVEYARD_MANUAL_WORKER_E2E"] === "1";
+/** Second opt-in for the broken-fixture repair scenario (scripted agents). */
+const REPAIR_OPT_IN = process.env["GRAVEYARD_MANUAL_WORKER_E2E_REPAIR"] === "1";
 const MAX_FILE = 64 * 1024;
 /** Upper bound for the job to reach a terminal state (pipeline container limit is 120 s). */
 const JOB_DEADLINE_MS = 240_000;
 const POLL_MS = 500;
 /** Catalog key only. Never fetched, cloned or contacted. */
 const CATALOG_URL = "https://github.com/graveyard-local/controlled-fixture";
-const FIXTURE_NAME = "pass";
 
 class FailClosed extends Error {}
 
@@ -159,10 +184,131 @@ function isInside(parent: string, child: string): boolean {
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-test(
-  "manual worker end-to-end harness (opt-in: GRAVEYARD_MANUAL_WORKER_E2E=1; real Docker, real API, real worker)",
-  { skip: OPT_IN ? false : "set GRAVEYARD_MANUAL_WORKER_E2E=1 (use `pnpm run test:worker-e2e`) to run against real Docker", timeout: 480_000 },
-  async () => {
+// ---------------------------------------------------------------------------
+// Scenarios
+// ---------------------------------------------------------------------------
+
+interface ScenarioCtx {
+  /** The fixture directory under the temporary fixtures root, as written by this harness. */
+  fixtureDir: string;
+  /** The temporary staging root. */
+  stagingDir: string;
+  /** build.mjs exactly as written before the job ran. */
+  originalBuild: string;
+  problems: string[];
+  log: string[];
+}
+
+interface Scenario {
+  /** Fixture directory name and catalog target. */
+  fixtureName: string;
+  /** Generated, trusted scripts (controlled-pipeline-fixtures.ts). */
+  kind: PipelineFixtureKind;
+  /** Injected deterministic Analyst and Fixer (never kiro-cli). Absent: agents off, nothing injected. */
+  agents?: () => AgentsLike;
+  /** Judges the terminal view; pushes into ctx.problems. */
+  expect: (view: ResultView, ctx: ScenarioCtx) => void;
+}
+
+/** Unified diff that replaces the whole file: every old line removed, every new line added. */
+export function wholeFileDiff(path: string, oldText: string, newText: string): string {
+  const o = oldText.split("\n");
+  const n = newText.split("\n");
+  if (o[o.length - 1] === "") o.pop();
+  if (n[n.length - 1] === "") n.pop();
+  return [`--- a/${path}`, `+++ b/${path}`, `@@ -1,${String(o.length)} +1,${String(n.length)} @@`, ...o.map((l) => `-${l}`), ...n.map((l) => `+${l}`), ""].join("\n");
+}
+
+const BROKEN_BUILD = pipelineFixtureScripts("fail-build")["build.mjs"] as string;
+const FIXED_BUILD = pipelineFixtureScripts("pass")["build.mjs"] as string;
+const REPAIR_DIFF = wholeFileDiff("build.mjs", BROKEN_BUILD, FIXED_BUILD);
+
+/**
+ * Deterministic stand-ins for the model. Their raw outputs go through the REAL contract validators
+ * (validateDiagnosis, validatePatchProposal) against the evidence the runner supplies, so only the
+ * model's words are scripted. This is NOT a test of the live Kiro runtime.
+ */
+function scriptedAgents(): AgentsLike {
+  const prep = (evidence: readonly EvidenceItem[]): ReturnType<typeof prepareEvidence> => prepareEvidence(evidence);
+  return {
+    analyze: (req): Promise<AgentOutcome<Diagnosis>> => {
+      const p = prep(req.evidence);
+      if (!p.ok) return Promise.resolve<AgentOutcome<Diagnosis>>({ status: "rejected", role: "analyst", code: p.code, detail: p.detail });
+      const v = validateDiagnosis(
+        {
+          schemaVersion: 1, role: "analyst", verdict: "diagnosis", category: "build-failure",
+          summary: "build.mjs throws unconditionally",
+          rootCause: "build.mjs raises an intentional error before it writes any build output.",
+          confidence: "high", evidenceRefs: ["stage-result"], affectedFiles: ["build.mjs"],
+        },
+        {
+          evidenceIds: new Set(p.items.map((e) => e.id)),
+          evidencePaths: new Set(p.items.flatMap((e) => (e.kind === "file" && e.path !== null ? [e.path] : []))),
+        },
+      );
+      return Promise.resolve<AgentOutcome<Diagnosis>>(
+        v.ok ? { status: "ok", role: "analyst", value: v.value } : { status: "rejected", role: "analyst", code: v.code, detail: v.detail },
+      );
+    },
+    propose: (req): Promise<AgentOutcome<PatchProposal>> => {
+      const p = prep(req.evidence);
+      if (!p.ok) return Promise.resolve<AgentOutcome<PatchProposal>>({ status: "rejected", role: "fixer", code: p.code, detail: p.detail });
+      const files = new Map<string, FileEvidence>();
+      for (const e of p.items) if (e.kind === "file" && e.path !== null) files.set(e.path, { complete: e.complete, text: e.text });
+      const v = validatePatchProposal(
+        { schemaVersion: 1, role: "fixer", verdict: "patch", summary: "replace the failing build.mjs with the working build", diff: REPAIR_DIFF },
+        files,
+      );
+      return Promise.resolve<AgentOutcome<PatchProposal>>(
+        v.ok ? { status: "ok", role: "fixer", value: v.value } : { status: "rejected", role: "fixer", code: v.code, detail: v.detail },
+      );
+    },
+  };
+}
+
+const PASS_SCENARIO: Scenario = {
+  fixtureName: "pass",
+  kind: "pass",
+  expect: (view, ctx) => {
+    if (view.outcome !== "passing") ctx.problems.push(`outcome ${view.outcome}, expected passing`);
+    if (view.repair.verified !== false || view.repair.patchApplied !== false) ctx.problems.push("repair.verified or repair.patchApplied is not false");
+    if (view.result === null || view.result["verdict"] !== "verified") ctx.problems.push("stored result verdict is not verified");
+    if (view.result !== null && "verification" in view.result) ctx.problems.push("a passing original must carry no verification record");
+  },
+};
+
+const REPAIR_SCENARIO: Scenario = {
+  fixtureName: "broken",
+  kind: "fail-build",
+  agents: scriptedAgents,
+  expect: (view, ctx) => {
+    if (view.outcome !== "repair-verified") ctx.problems.push(`outcome ${view.outcome}, expected repair-verified`);
+    if (view.repair.verified !== true) ctx.problems.push("repair.verified is not true");
+    if (view.repair.patchApplied !== false) ctx.problems.push("repair.patchApplied is not false");
+    if (view.verifiedDiff !== REPAIR_DIFF) ctx.problems.push("verifiedDiff is not the exact scripted diff");
+    const r = view.result;
+    if (r === null || r["verdict"] !== "repository-failing") ctx.problems.push("stored baseline verdict is not repository-failing");
+    const v = r === null ? undefined : (r["verification"] as Record<string, unknown> | undefined);
+    if (v === undefined) {
+      ctx.problems.push("no verification record");
+    } else {
+      if (v["status"] !== "verified") ctx.problems.push(`verification status ${String(v["status"])}, expected verified`);
+      if (typeof v["measuredMs"] !== "number") ctx.problems.push("verification has no measured duration");
+      else ctx.log.push(`verification measured ${String(v["measuredMs"])} ms`);
+    }
+    // The original fixture and the staging root must be untouched and clean.
+    try {
+      if (readFileSync(join(ctx.fixtureDir, "build.mjs"), "utf8") !== ctx.originalBuild) ctx.problems.push("the ORIGINAL fixture build.mjs changed");
+    } catch {
+      ctx.problems.push("the original fixture build.mjs could not be re-read");
+    }
+    const left = readdirSync(ctx.stagingDir);
+    if (left.length !== 0) ctx.problems.push(`staging root is not empty after the job: ${left.join(", ")}`);
+  },
+};
+
+async function runScenario(scn: Scenario): Promise<void> {
+  {
     const log: string[] = [];
     const problems: string[] = [];
     const workerLog: string[] = [];
@@ -210,12 +356,13 @@ test(
       const stagingDir = createRunDir(parent);
       dirs.push(stagingDir);
 
-      writeFixture(fixturesDir, FIXTURE_NAME, {
+      const scripts = pipelineFixtureScripts(scn.kind);
+      const fixtureDir = writeFixture(fixturesDir, scn.fixtureName, {
         "package.json": goodPkg,
         "package-lock.json": goodLock,
-        ...pipelineFixtureScripts("pass"),
+        ...scripts,
       });
-      const cfgDir = writeFixture(dataDir, "cfg", { "catalog.json": JSON.stringify({ [CATALOG_URL]: FIXTURE_NAME }) });
+      const cfgDir = writeFixture(dataDir, "cfg", { "catalog.json": JSON.stringify({ [CATALOG_URL]: scn.fixtureName }) });
       const catalogPath = join(cfgDir, "catalog.json");
       const databasePath = join(dataDir, "e2e.sqlite");
       if (!isInside(parent, databasePath)) throw new FailClosed("temporary database path escaped the owned directory");
@@ -229,7 +376,7 @@ test(
       const port = (address as AddressInfo).port;
       log.push(`API listening on 127.0.0.1:${String(port)}`);
 
-      // ---- Real worker composition: no seams injected except the log sink. ----
+      // ---- Real worker composition. Only the log sink and, for the repair scenario, scripted agents are injected. ----
       const started = startWorker(
         {
           GRAVEYARD_WORKER_ENABLED: "1",
@@ -242,12 +389,19 @@ test(
           GRAVEYARD_WORKER_POLL_MS: "250",
           GRAVEYARD_WORKER_AGENTS: "off",
         },
-        { log: (level, message, fields) => workerLog.push(`${level} ${message}${fields === undefined ? "" : ` ${JSON.stringify(fields)}`}`) },
+        {
+          log: (level, message, fields) => workerLog.push(`${level} ${message}${fields === undefined ? "" : ` ${JSON.stringify(fields)}`}`),
+          ...(scn.agents === undefined ? {} : { agents: scn.agents() }),
+        },
       );
       if (!started.started) throw new FailClosed(`worker refused to start: ${started.message}`);
       worker = started;
       if (worker.composed.config.agents !== "off") throw new FailClosed("agents must be off in this harness");
-      log.push("worker started (real ControlledPipeline, real Docker executor, agents off)");
+      log.push(
+        scn.agents === undefined
+          ? "worker started (real ControlledPipeline, real Docker executor, agents off)"
+          : "worker started (real ControlledPipeline, real Docker executor, SCRIPTED Analyst and Fixer injected; live Kiro is NOT exercised)",
+      );
 
       // ---- Authorized job creation. ----
       const created = await httpCall(port, "POST", "/api/jobs", {}, JSON.stringify({ repoUrl: CATALOG_URL, consent: true }));
@@ -292,12 +446,10 @@ test(
       } else {
         log.push(`terminal: status=${view.status} stage=${view.stage} outcome=${view.outcome}`);
         if (view.status !== "completed") problems.push(`status ${view.status}, expected completed`);
-        if (view.outcome !== "passing") problems.push(`outcome ${view.outcome}, expected passing`);
         if (view.stage !== "done") problems.push(`stage ${view.stage}, expected done`);
-        if (view.repair.verified !== false || view.repair.patchApplied !== false) problems.push("repair.verified or repair.patchApplied is not false");
-        if (view.result === null || view.result["verdict"] !== "verified") problems.push("stored result verdict is not verified");
         if (view.infrastructure !== null) problems.push(`unexpected infrastructure record: ${view.infrastructure.kind}`);
-        if (view.outcome !== "passing" && view.infrastructure !== null) log.push(`infrastructure message: ${view.infrastructure.message}`);
+        if (view.infrastructure !== null) log.push(`infrastructure message: ${view.infrastructure.message}`);
+        scn.expect(view, { fixtureDir, stagingDir, originalBuild: scripts["build.mjs"] as string, problems, log });
       }
     } catch (e) {
       failure = e;
@@ -350,5 +502,20 @@ test(
     }
     if (failure !== undefined) throw failure;
     if (problems.length > 0) throw new Error(`worker e2e harness found ${String(problems.length)} problem(s)`);
+  }
+}
+
+test(
+  "manual worker end-to-end harness (opt-in: GRAVEYARD_MANUAL_WORKER_E2E=1; real Docker, real API, real worker)",
+  { skip: OPT_IN ? false : "set GRAVEYARD_MANUAL_WORKER_E2E=1 (use `pnpm run test:worker-e2e`) to run against real Docker", timeout: 480_000 },
+  () => runScenario(PASS_SCENARIO),
+);
+
+test(
+  "manual worker repair harness (opt-in: GRAVEYARD_MANUAL_WORKER_E2E=1 and GRAVEYARD_MANUAL_WORKER_E2E_REPAIR=1; real Docker, real API, real worker, SCRIPTED agents)",
+  {
+    skip: OPT_IN && REPAIR_OPT_IN ? false : "set GRAVEYARD_MANUAL_WORKER_E2E=1 and GRAVEYARD_MANUAL_WORKER_E2E_REPAIR=1 (use `pnpm run test:worker-e2e:repair`) to run against real Docker",
+    timeout: 720_000,
   },
+  () => runScenario(REPAIR_SCENARIO),
 );

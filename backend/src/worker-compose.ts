@@ -68,6 +68,8 @@ export interface ComposeDeps {
   pipeline?: PipelineLike;
   cleanupExecution?: (executionId: string) => Promise<CleanupProof>;
   agents?: AgentsLike;
+  /** Test seam: the pipeline used to verify a repair on a disposable copy (see repair-verifier.ts). */
+  repairPipeline?: (cloneRoot: string) => PipelineLike | null;
   /** Test seams for the GitHub flow (only used when config.github is set). */
   githubSeams?: Partial<Pick<GithubRunnerOptions, "makeGit" | "readRootFiles" | "registry" | "makePipeline">>;
   workerOptions?: Partial<Pick<WorkerOptions, "timers" | "now" | "leaseMs" | "heartbeatMs" | "abortGraceMs" | "cleanupTimeoutMs">>;
@@ -190,6 +192,27 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
       pipeline,
       cleanupExecution,
       ...(agents === undefined ? {} : { agents }),
+      // Repair verification (repair-verifier.ts): applies the single Fixer proposal in memory to a
+      // disposable copy under the staging root and re-runs the offline pipeline on that copy, with
+      // the same read-only npm cache. A test that injects its own `pipeline` gets no verification
+      // unless it also injects `repairPipeline`, so fakes never reach the real Docker pipeline.
+      ...(deps.pipeline !== undefined && deps.repairPipeline === undefined
+        ? {}
+        : {
+            repair: {
+              workRoot: config.stagingRoot,
+              makePipeline: (cloneRoot: string): PipelineLike | null =>
+                deps.repairPipeline !== undefined
+                  ? deps.repairPipeline(cloneRoot)
+                  : new ControlledPipeline({
+                      executor,
+                      fixturesRoot: cloneRoot,
+                      stagingRoot: config.stagingRoot,
+                      cacheDir: config.cacheDir,
+                      driverPath,
+                    }),
+            },
+          }),
     });
 
     let runner: JobRunner = fixtureRunner;

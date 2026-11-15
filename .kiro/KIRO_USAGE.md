@@ -270,3 +270,9 @@ One bounded request, no shell and no git. Kiro extended `backend/src/test/manual
 - `backend/README.md` documents both modes and the required root files (an is-number@7.0.0 lock, `build.mjs`, `test.mjs`).
 
 No production policy changed, no dependency was added and nothing was published. Not compiled and not run: every behavior above is unverified until an operator runs `tsc -p tsconfig.test.json` and `pnpm run test:github-e2e` (with the variables set) and logs the output in `.kiro/PROJECT.md` and `backend/DEVELOPMENT.md`.
+
+
+
+## 2026-11-16: Verified local repair slice (source, tests and docs only, no shell)
+
+One large request. Kiro read `pipeline-runner.ts`, `agent-contract.ts`, `controlled-pipeline.ts`, `fixture-workspace.ts`, `github-runner.ts`, `registry-pipeline.ts`, `worker-compose.ts`, `worker.ts`, `leases.ts`, `tester.ts`, `result-view.ts`, `kiro-agent.ts` (types), the existing tests, the real-Docker worker harness and the workspace sources, then wrote `repair-verifier.ts`, wired it into `pipeline-runner.ts`, `worker-compose.ts` and `github-runner.ts`, extended `result-view.ts`, added `repair-verifier.test.ts`, a second opt-in scenario in `manual-worker-e2e-check.ts`, and the workspace result view (`api.ts`, `useRepairJob.ts`, `result.ts`, `ResultPanel.tsx`, `Workspace.tsx`, `workspace.css`, `scripts/verify-workspace.mjs`). **No compiler, test or Docker run was available: all of it is unverified.** The scripted Analyst and Fixer in the harness are deterministic stand-ins; the live Kiro runtime and any model were not exercised and no claim about them is made. Record external results in `.kiro/PROJECT.md` and `backend/DEVELOPMENT.md` once an operator has run them.

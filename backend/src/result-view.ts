@@ -4,15 +4,22 @@
  * Pure presentation of durable job state. Nothing here executes anything or reads the database.
  *
  * The central rule: the view says what was OBSERVED and never implies a repair that did not
- * happen. No code path in this backend applies a patch or re-runs the build against patched code,
- * so `repair.verified` and `repair.patchApplied` are the constant `false`. A model-authored
- * diagnosis or patch proposal is reported as exactly that (`diagnosed`, `patchProposed`), never as
- * a fix.
+ * happen. A model-authored diagnosis or patch proposal is reported as exactly that (`diagnosed`,
+ * `patchProposed`), never as a fix. `repair.verified` is true ONLY for outcome `repair-verified`,
+ * which requires a stored verification record that this module re-checks (observed pipeline and
+ * Tester statuses of a patched DISPOSABLE COPY, confirmed cleanup, patch class and the sha256 of the
+ * exact diff). `repair.patchApplied` stays the constant `false`: the original is never modified.
+ * Results stored before repair verification existed, and results without a valid verification
+ * record, keep their earlier outcomes unchanged.
  *
  * Outcomes:
  *   pending                    queued or running (also: blocked awaiting cleanup proof). No result.
  *   passing                    the unmodified controlled fixture built and passed its tests.
- *   failing-with-patch-proposal  the fixture fails; a model-authored patch was proposed, NOT applied.
+ *   repair-verified            the fixture fails; a model-authored patch to the root build.mjs, applied to a
+ *                              disposable copy, installed, built and passed the original tests offline.
+ *   patch-failed-verification  the same, but the patched copy was tested and still failed (tested failure).
+ *   failing-with-patch-proposal  the fixture fails; a model-authored patch was proposed, NOT verified
+ *                              (not attempted, refused, or no verification record).
  *   failing-with-diagnosis     the fixture fails; a model-authored diagnosis exists, no proposal.
  *   failing-undiagnosed        the fixture fails; no diagnosis (agents off, unavailable or no result).
  *   tests-not-run              the build passed but no tests ran. Not a verification.
@@ -26,12 +33,15 @@
  * @module result-view
  */
 
+import { createHash } from "node:crypto";
 import type { JobResultRecord } from "./jobs.js";
 import { isTerminalStatus } from "./jobs.js";
 
 export type ResultOutcome =
   | "pending"
   | "passing"
+  | "repair-verified"
+  | "patch-failed-verification"
   | "failing-with-patch-proposal"
   | "failing-with-diagnosis"
   | "failing-undiagnosed"
@@ -60,15 +70,20 @@ export interface ResultView {
   /** Fixed explanatory text chosen by this module. Never repository or model output. */
   summary: string;
   repair: {
-    /** Always false: nothing re-verifies a patched repository. */
-    verified: false;
-    /** Always false: no patch is ever applied. */
+    /**
+     * True only for outcome `repair-verified`: a patched DISPOSABLE COPY installed, built and passed
+     * its original tests offline, with confirmed cleanup. It never means the original was changed.
+     */
+    verified: boolean;
+    /** Always false: no patch is ever applied to the original source. */
     patchApplied: false;
-    /** A model-authored, unapplied patch proposal is present in `result.fixer`. */
+    /** A model-authored patch proposal is present in `result.fixer`. */
     patchProposed: boolean;
     /** A model-authored diagnosis is present in `result.analyst`. */
     diagnosed: boolean;
   };
+  /** The exact verified diff (outcome `repair-verified` only, after re-checking its sha256), otherwise null. */
+  verifiedDiff: string | null;
   /** The stored result payload of the final attempt (completed jobs only), otherwise null. */
   result: Record<string, unknown> | null;
   /** Infrastructure metadata for failed or timed-out jobs. Never a repository diagnosis. */
@@ -85,6 +100,10 @@ const SUMMARIES: Readonly<Record<ResultOutcome, string>> = {
     "The unmodified operator-prepared fixture built and passed its tests. No repair was performed or needed.",
   "failing-with-patch-proposal":
     "The fixture fails. A model-authored patch was proposed. It was not applied and not verified.",
+  "repair-verified":
+    "The fixture fails. A model-authored patch was applied to a disposable copy only, and that copy installed its locked dependencies, built and passed the original tests offline in the sandbox. The original was not modified. The verified diff can be saved.",
+  "patch-failed-verification":
+    "The fixture fails. A model-authored patch was applied to a disposable copy and tested offline in the sandbox. The copy still failed, so this is not a repair. The original was not modified.",
   "failing-with-diagnosis":
     "The fixture fails. A model-authored diagnosis exists. No patch was proposed, applied or verified.",
   "failing-undiagnosed":
@@ -108,6 +127,10 @@ const GITHUB_SUMMARIES: Readonly<Partial<Record<ResultOutcome, string>>> = {
     "The public GitHub repository, unmodified at the pinned commit, installed its locked dependencies, built and passed its tests in the sandbox. No repair was performed or needed.",
   "failing-with-patch-proposal":
     "The GitHub repository fails at the pinned commit. A model-authored patch was proposed. It was not applied and not verified.",
+  "repair-verified":
+    "The GitHub repository fails at the pinned commit. A model-authored patch was applied to a disposable copy only, and that copy installed its locked dependencies, built and passed the original tests offline in the sandbox. The repository was not modified. The verified diff can be saved.",
+  "patch-failed-verification":
+    "The GitHub repository fails at the pinned commit. A model-authored patch was applied to a disposable copy and tested offline in the sandbox. The copy still failed, so this is not a repair. The repository was not modified.",
   "failing-with-diagnosis":
     "The GitHub repository fails at the pinned commit. A model-authored diagnosis exists. No patch was proposed, applied or verified.",
   "failing-undiagnosed":
@@ -150,7 +173,51 @@ function parseInfrastructure(text: string | null): ResultInfrastructure | null {
   }
 }
 
-function classify(result: Record<string, unknown>): { outcome: ResultOutcome; diagnosed: boolean; patchProposed: boolean } | null {
+function sameStrings(v: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(v) && v.length === expected.length && v.every((x, i) => x === expected[i]);
+}
+
+/**
+ * Re-checks a stored verification record before a repair is claimed. The stored payload comes from
+ * the worker, but this view never trusts a bare "verified" flag: the observed pipeline statuses,
+ * the Tester statuses, the cleanup confirmations, the patch class and the sha256 of the exact diff
+ * must all agree.
+ */
+function verificationHolds(
+  result: Record<string, unknown>,
+  fixer: Record<string, unknown>,
+  v: Record<string, unknown>,
+  expected: "verified" | "tested-failing",
+): boolean {
+  if (v["status"] !== expected || v["patchClass"] !== "root-build-mjs-only" || v["originalModified"] !== false) return false;
+  const diff = fixer["diff"];
+  if (typeof diff !== "string" || diff === "" || v["diffSha256"] !== createHash("sha256").update(diff, "utf8").digest("hex")) return false;
+  if (!sameStrings(v["patchedFiles"], ["build.mjs"]) || !sameStrings(fixer["files"], ["build.mjs"])) return false;
+  const pre = result["pipeline"];
+  const preTester = result["tester"];
+  const baseline = v["baseline"];
+  if (!isObj(pre) || pre["status"] !== "failure" || !isObj(preTester) || preTester["status"] !== "failed") return false;
+  if (!isObj(baseline) || baseline["status"] !== "failure") return false;
+  const patched = v["patched"];
+  const tester = v["tester"];
+  const cleanup = v["cleanup"];
+  if (!isObj(patched) || !isObj(tester) || !isObj(cleanup)) return false;
+  if (cleanup["confirmed"] !== true || cleanup["stagingRemoved"] !== true || cleanup["cloneRemoved"] !== true) return false;
+  if (typeof v["measuredMs"] !== "number" || !Number.isFinite(v["measuredMs"])) return false;
+  return expected === "verified"
+    ? patched["status"] === "success" && tester["status"] === "passed"
+    : patched["status"] === "failure" && tester["status"] === "failed";
+}
+
+interface Classified {
+  outcome: ResultOutcome;
+  diagnosed: boolean;
+  patchProposed: boolean;
+  verified?: boolean;
+  verifiedDiff?: string;
+}
+
+function classify(result: Record<string, unknown>): Classified | null {
   const verdict = result["verdict"];
   if (typeof verdict !== "string" || !(VERDICTS as readonly string[]).includes(verdict)) return null;
   if (verdict === "verified") return { outcome: "passing", diagnosed: false, patchProposed: false };
@@ -166,7 +233,21 @@ function classify(result: Record<string, unknown>): { outcome: ResultOutcome; di
     fixer["modelAuthored"] === true &&
     fixer["proposalOnly"] === true &&
     fixer["applied"] === false;
-  if (patchProposed) return { outcome: "failing-with-patch-proposal", diagnosed, patchProposed };
+  if (patchProposed && isObj(fixer)) {
+    const v = result["verification"];
+    if (isObj(v)) {
+      if (verificationHolds(result, fixer, v, "verified")) {
+        return {
+          outcome: "repair-verified", diagnosed, patchProposed, verified: true,
+          verifiedDiff: fixer["diff"] as string,
+        };
+      }
+      if (verificationHolds(result, fixer, v, "tested-failing")) {
+        return { outcome: "patch-failed-verification", diagnosed, patchProposed };
+      }
+    }
+    return { outcome: "failing-with-patch-proposal", diagnosed, patchProposed };
+  }
   if (diagnosed) return { outcome: "failing-with-diagnosis", diagnosed, patchProposed: false };
   return { outcome: "failing-undiagnosed", diagnosed: false, patchProposed: false };
 }
@@ -177,17 +258,25 @@ export function presentResult(rec: JobResultRecord): ResultView {
   const base = { jobId: rec.jobId, status: rec.status, stage: rec.stage, terminal };
   const make = (
     outcome: ResultOutcome,
-    extra: { result?: Record<string, unknown>; infrastructure?: ResultInfrastructure | null; diagnosed?: boolean; patchProposed?: boolean } = {},
+    extra: {
+      result?: Record<string, unknown>;
+      infrastructure?: ResultInfrastructure | null;
+      diagnosed?: boolean;
+      patchProposed?: boolean;
+      verified?: boolean;
+      verifiedDiff?: string;
+    } = {},
   ): ResultView => ({
     ...base,
     outcome,
     summary: summaryFor(outcome, extra.result),
     repair: {
-      verified: false,
+      verified: extra.verified ?? false,
       patchApplied: false,
       patchProposed: extra.patchProposed ?? false,
       diagnosed: extra.diagnosed ?? false,
     },
+    verifiedDiff: extra.verifiedDiff ?? null,
     result: extra.result ?? null,
     infrastructure: extra.infrastructure ?? null,
   });
@@ -197,7 +286,13 @@ export function presentResult(rec: JobResultRecord): ResultView {
       if (rec.result === null) return make("completed-without-result");
       const c = classify(rec.result);
       if (c === null) return make("completed-without-result");
-      return make(c.outcome, { result: rec.result, diagnosed: c.diagnosed, patchProposed: c.patchProposed });
+      return make(c.outcome, {
+        result: rec.result,
+        diagnosed: c.diagnosed,
+        patchProposed: c.patchProposed,
+        ...(c.verified === undefined ? {} : { verified: c.verified }),
+        ...(c.verifiedDiff === undefined ? {} : { verifiedDiff: c.verifiedDiff }),
+      });
     }
     case "failed":
       return make("infrastructure-failed", { infrastructure: parseInfrastructure(rec.infraError) });
