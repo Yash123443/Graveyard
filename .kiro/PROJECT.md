@@ -123,3 +123,55 @@ See [specs/backend-foundation/tasks.md](specs/backend-foundation/tasks.md) for t
 ## Development log
 
 See [../backend/DEVELOPMENT.md](../backend/DEVELOPMENT.md) for the milestone-by-milestone record of changes, corrections, and verification results.
+
+## 2026-11-15 — real-clone harness and tar handoff (externally verified, narrow)
+
+Kiro added `backend/src/tar-extract.ts`, an optional `afterCheckout` hook in `git-acquisition.ts`, the opt-in `src/test/manual-clone-check.ts` harness, and mocked tests. **Externally verified on 2026-11-15** (supersedes the earlier "nothing was run" status): the opt-in harness cloned `octocat/Hello-World` at SHA `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`, extracted 1 file / 13 bytes through the tar handoff, and cleanup was confirmed. The full backend suite and 60 focused tests passed. This is a narrow result: one tiny public fixture, not production proof. Production acquisition stays disabled and nothing is wired. Details in `backend/DEVELOPMENT.md`.
+
+## 2026-11-15 — archive handoff to node fixture build/test (combined test PENDING external verification)
+
+Kiro added `backend/src/archive-handoff.ts` (confined extraction of a validated tar into a fresh `run-<hex>/<name>` directory, lstat audit, commit/count/byte checks, and `buildGitArchiveTar`), `src/test/archive-handoff.test.ts` (real filesystem under `os.tmpdir()`, no Docker), and the opt-in `src/test/manual-archive-build-check.ts` (`GRAVEYARD_MANUAL_ARCHIVE_BUILD=1`). Nothing was compiled or run by Kiro. The combined test uses locally generated archives in `git archive` layout, not produced by git; no network clone is tested in it. Pending external: both `tsc` configs, full suite, and the opt-in run.
+
+Kiro then edited only the opt-in `backend/src/test/manual-clone-check.ts` (no shell; nothing compiled or run, **pending external verification**). Previously measured externally, not by Kiro: the real-clone harness on octocat/Hello-World at `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d` (1 file / 13 bytes, cleanup confirmed). The harness now passes the real `git archive` bytes to `extractArchiveIntoFixture` (whole-archive validation before any write) into a managed `backend/.tmp-fixtures/run-<hex>/clone` directory, then, for that single known SHA only, runs `NodeFixtureRunner.verify` on the original extracted files with no injected scripts. Expected: build not-run (`no-build-script`), test not-run, overall not-run, no container created, no leftover by execution-id label; the run directory is removed by exact path. Hello-World has no build script, so this is not a build or test success. A passing build/test is shown only by the controlled generated fixtures in `manual-archive-build-check.ts`. The narrow attestation caveat is unchanged. Works with `GRAVEYARD_CLONE_IMAGE=graveyard-git-fixture:local` plus local `node:22-alpine`. Pending external: both `tsc` configs, full suite, and the opt-in run.
+
+
+
+
+## 2026-11-15 — controlled Node fixture build/test runner (externally verified)
+
+Kiro added `backend/src/node-fixture-runner.ts`, `fixture-workspace.ts`, `node-fixture-files.ts`, mocked tests (`node-fixture-runner.test.ts`, `fixture-workspace.test.ts`) and the opt-in harness `src/test/manual-node-fixture-check.ts` (`GRAVEYARD_MANUAL_NODE_FIXTURE=1`, local `node:22-alpine`, generated fixtures under gitignored `backend/.tmp-fixtures`). Fixed build and test commands, network `none`, read-only source mount, bounded `/tmp`, cleanup proof required for any pass; passed/failed/not-run kept distinct (missing tests, timeout, cancel, truncation and unconfirmed cleanup are not-run).
+
+**Externally verified (2026-11-15).** This supersedes the earlier "written, not compiled or run" status for this runner. Kiro ran no commands for this update (docs-only, no source edits, no shell). Recorded from the user's external checks:
+
+- `tsc` production and test configurations both compile.
+- 66 focused mock tests pass.
+- The full backend test suite passed (no count supplied to Kiro).
+- Real Docker 29.9.2 with local `node:22-alpine` passed four controlled cases through the opt-in harness:
+  1. success: build passed, then 2 tests passed;
+  2. failed test: detected as failed;
+  3. failed build: reported failed, tests skipped (not-run);
+  4. no tests: reported not-run, not passed.
+- Container cleanup was confirmed for every stage, and the temporary fixtures were removed.
+- The real Docker test was initially paused, then the user unpaused it.
+
+Authorship: runner and tests written by Kiro; external review and test execution by the user and external assistant.
+
+Limits of this evidence: controlled generated fixtures only. No `npm install`, no untrusted repositories, no worker wiring, no production result. Fixture code controls its own output, so this does not make arbitrary repositories safe. Not wired to the server, worker or jobs.
+
+Next: integrate the acquisition handoff into a controlled build, then secure dependency acquisition, then the worker.
+
+Not covered by this entry and still unverified unless recorded elsewhere: the real-clone harness and tar handoff (section above), and the egress proxy IPv4-only edits.
+
+## External verification: real GitHub acquisition and controlled runner (2026-11-15)
+
+Docs-only update; Kiro ran no commands and changed no source. Recorded from the user's external checks. This supersedes earlier "not compiled or tested" and "pending external verification" notes for the egress proxy IPv4 fix and acquisition work.
+
+- Real GitHub repository `octocat/Hello-World` at exact SHA `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d` was acquired through the proxy. The validated handoff contained one file of 13 bytes.
+- The controlled `NodeFixtureRunner` correctly reported no build script and tests as not run. No runner container was created.
+- Acquisition cleanup was confirmed and the temp directory was removed.
+- The full test suite passed and the test TypeScript compilation passed.
+- Earlier, controlled generated archive to Docker build/test suites passed for the success, fail, missing and tampered cases.
+
+Limits of this evidence: no real GitHub build success, no live jobs, no dependency installation, and no deployed egress guard. The default guard still never attests, so acquisition stays disabled in the product.
+
+Authorship: Kiro wrote the changes; an external assistant reviewed and tested them. No provenance is claimed beyond that.

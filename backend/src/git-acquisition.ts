@@ -24,8 +24,12 @@
  *     checkout and a final identity check.
  *  6. Always removes the container and proves absence (inspect + label query).
  *
- * Not covered: moving the checked-out tree out of the tmpfs (there is no
- * export step yet, so a successful result proves acquisition only), proxy
+ * Handoff: production has no export step, so a successful result proves
+ * acquisition only. The optional `afterCheckout` hook exists solely for the
+ * manual harness (test/manual-clone-check.ts, tar-extract.ts); it is unverified
+ * against real Docker.
+ *
+ * Not covered: production export of the tree out of the tmpfs, proxy
  * enforcement, DNS behaviour inside the network, image provenance (the image
  * must provide `git` and `sleep`, is operator-prepared and allowlisted, and is
  * never pulled), seccomp/AppArmor beyond Docker defaults, and a trusted daemon.
@@ -87,6 +91,20 @@ export interface AcquisitionOptions {
   dockerBinary?: string;
   /** Injectable clock (epoch ms) for deadline tests. */
   now?: () => number;
+  /**
+   * Optional handoff hook, called after the final identity check and before cleanup.
+   * Used only by the manual integration harness. Not set by any production code path.
+   */
+  afterCheckout?: (info: HandoffInfo) => Promise<void>;
+}
+
+export interface HandoffInfo {
+  containerName: string;
+  commit: string;
+  manifest: TreeManifest;
+  dockerBinary: string;
+  remainingMs: number;
+  signal?: AbortSignal;
 }
 
 export interface AcquisitionRequest {
@@ -157,8 +175,10 @@ export class GitAcquisition {
   private readonly limits: AcquisitionLimits;
   private readonly docker: string;
   private readonly now: () => number;
+  private readonly afterCheckout: AcquisitionOptions["afterCheckout"];
 
   constructor(opts: AcquisitionOptions) {
+    this.afterCheckout = opts.afterCheckout;
     if (typeof opts.executor !== "function") throw new Error("executor is required");
     if (typeof opts.egress !== "object" || opts.egress === null || typeof opts.egress.attest !== "function") {
       throw new Error("egress guard is required");
@@ -382,6 +402,23 @@ export class GitAcquisition {
     if (!head.ok) return head.outcome;
     if (head.result.stdout.trim() !== plan.commit) {
       return { kind: "source-rejected", reason: "checked-out HEAD does not match the requested SHA" };
+    }
+
+    // Optional handoff hook (test harness only; never set in production). It runs while the
+    // container still exists and before cleanup. Any throw fails the acquisition closed.
+    if (this.afterCheckout !== undefined) {
+      try {
+        await this.afterCheckout({
+          containerName: plan.name,
+          commit: plan.commit,
+          manifest: manifest.value,
+          dockerBinary: this.docker,
+          remainingMs: Math.max(0, ctx.deadline - this.now()),
+          ...(signal === undefined ? {} : { signal }),
+        });
+      } catch (e) {
+        return { kind: "failed", step: "handoff", reason: sanitize(e instanceof Error ? e.message : "handoff failed") };
+      }
     }
 
     return {

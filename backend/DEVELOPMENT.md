@@ -391,3 +391,155 @@ Edits by Kiro (unverified, not compiled, not run):
 - Tests in `egress-proxy.test.ts`: removed the IPv6 fallback test and the v6+v4 happy path; added rejection of v4+v6, the observed NAT64 pair, v6-only, public v4 mixed with private/loopback/metadata v4 in both orders, and IPv4 pinning with multiple answers.
 
 Pending: external `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json`, `node --test dist-test/test/*.js`, and a Docker re-run to see whether the GitHub request now succeeds. The proxy is still unwired and acquisition stays disabled. No network permissions were added.
+
+## 2026-11-15 — archive handoff into node fixture build/test (combined test PENDING external verification)
+
+Written by Kiro without running any tool. Not compiled, not run.
+
+- `src/archive-handoff.ts`: `extractArchiveIntoFixture(archive, runDir, name, limits, expect)` requires a real (non-symlink) `run-<12 hex>` directory and a strict fixture name, creates `<runDir>/<name>` non-recursively (an existing directory is refused), extracts with `extractTar` through `ConfinedDirSink` (relative-path re-check, resolve prefix check, parent must be a real directory, exclusive create, modes 0644/0755), then compares the archive commit comment, file count and byte total with the expectation and audits the tree with `lstat` (`auditTree`: no symlinks or special files, bounded depth and entries). It never throws; on failure after creation it returns the directory so the caller can run `removeRunDir`. `buildGitArchiveTar` builds a tar in `git archive` layout (pax global header with `comment=<sha>`, directory entries, files). It is not produced by git.
+- `src/test/archive-handoff.test.ts`: real filesystem under `os.tmpdir()`, no Docker. Covers all four fixture kinds, exact manifest/commit/audit, existing-target refusal, commit/count/byte mismatches, bad run directories and names, symlink run directory (skipped if symlinks are not permitted), traversal archive, byte limit, and `removeRunDir` removing the exact tree.
+- `src/test/manual-archive-build-check.ts`: opt-in (`GRAVEYARD_MANUAL_ARCHIVE_BUILD=1`, local `node:22-alpine`, never pulled). For each of pass / fail-test / fail-build / no-tests it extracts the generated archive into a fresh directory, runs `NodeFixtureRunner.verify` (network `none`, read-only `/fixture` mount, isolation read back from `docker inspect` before start; `isolation-violation` is reported as a problem), and expects passed/passed, passed/failed, failed/not-run, passed/not-run. A tampered archive (wrong commit) must be refused with no container. It requires confirmed cleanup for every stage, queries `docker ps -a` by each exact `graveyard.execution-id` label and by name prefix `graveyard-archfix-<run id>`, and removes the run directory with `removeRunDir`.
+
+Scope limits: archives are generated locally, not by `git archive`, and no network clone is tested in this combined test. The real-clone handoff is covered only by the separate narrow result below. No untrusted repository, no `npm install`, no live job, no worker wiring. The read-only mount and network `none` are enforced and checked by the existing sandbox inspect step; this harness does not re-inspect the container independently.
+
+Run (outside the restricted sandbox):
+
+```powershell
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_ARCHIVE_BUILD = "1"
+node --test dist-test/test/manual-archive-build-check.js
+```
+
+Pending external: `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json`, the full suite, and the opt-in run. Record results here and in `.kiro/PROJECT.md`.
+
+### Real clone handoff into NodeFixtureRunner (manual-clone-check.ts) — PENDING
+
+Written by Kiro without running any tool. Previously measured externally (not by Kiro): the real-clone harness on octocat/Hello-World at `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`, 1 file / 13 bytes, cleanup confirmed. Current change, unverified: `manual-clone-check.ts` now extracts the real `git archive` via `extractArchiveIntoFixture` (validation before writes; commit, file and byte expectations from the ls-tree manifest) into `backend/.tmp-fixtures/run-<hex>/clone`, then for that known URL and SHA only (and only if 1 file / 13 bytes and no `build.mjs`) calls `NodeFixtureRunner.verify` on the original files. Expected: build `not-run`/`no-build-script`, test `not-run`, overall `not-run`, no container, no leftover by `graveyard.execution-id` label; `removeRunDir` removes the exact run directory. This is not a build success; a real pass is demonstrated only by `manual-archive-build-check.ts` with controlled generated fixtures. The harness's narrow attestation (internal network, proxy attachments, example.com refusal probe) is not proof of isolation. The audit in `extractArchiveIntoFixture` caps at 1000 entries and depth 8, so larger repositories fail closed.
+
+Run (outside the restricted sandbox; images must exist locally, nothing is pulled):
+
+```powershell
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_CLONE = "1"
+$env:GRAVEYARD_CLONE_REPO_URL = "https://github.com/octocat/Hello-World"
+$env:GRAVEYARD_CLONE_COMMIT = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"
+$env:GRAVEYARD_CLONE_IMAGE = "graveyard-git-fixture:local"
+node --test dist-test/test/manual-clone-check.js
+```
+
+---
+
+## 2026-11-15 — controlled real-clone harness and safe handoff (externally verified, narrow)
+
+Status update (external, 2026-11-15; supersedes the "UNVERIFIED" text below, kept as history): the opt-in real-clone harness cloned `octocat/Hello-World` at SHA `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`, extracted 1 file / 13 bytes via the tar handoff, and cleanup was confirmed. The full suite and 60 focused tests passed. This is narrow: one tiny public repository, not production proof. Kiro ran no commands for this update.
+
+Original status: written by Kiro without running any tool. Acquisition stays disabled in production (`UnavailableEgressGuard`); nothing is wired into the server or worker.
+
+Added or changed:
+- `src/tar-extract.ts`: validate-first tar extractor for `git archive` output. Accepts only regular files, directories and one pax global header. Rejects symlinks, hard links, devices, per-entry pax, GNU long names, unsafe or case-colliding paths, file/dir conflicts, base-256 sizes, bad checksums, trailing data. Bounds archive bytes, file count and content bytes. Nothing is written unless the whole archive validates. Modes are reduced to 0644/0755.
+- `src/git-acquisition.ts`: new optional `afterCheckout` hook (`HandoffInfo`), run after the final HEAD check and before cleanup. A throw becomes `failed` at step `handoff`; cleanup still runs. Production code never sets it.
+- `src/test/manual-clone-check.ts`: opt-in harness (`GRAVEYARD_MANUAL_CLONE=1`). Needs `GRAVEYARD_CLONE_REPO_URL` and `GRAVEYARD_CLONE_COMMIT` (exact 40-hex SHA of a known public fixture); image from `GRAVEYARD_CLONE_IMAGE`, default `alpine/git:2.47.2`, never pulled. Builds the internal network and proxy container like `manual-egress-check.ts` (topology code is copied, not shared). Its guard exists only in that file and attests only after the harness saw the network Internal, the proxy attached to exactly bridge + internal, and a 403 for `example.com:443`. The acquisition container has no mounts. Handoff runs `docker exec ... git archive` with argument arrays, a byte cap and timeout, extracts into a fresh `mkdtemp` directory with exclusive-create, requires file count and bytes to equal the `ls-tree` manifest and the archive commit comment to equal the requested SHA, audits the output with `lstat`, then deletes it. The proxy container bind-mounts one temp directory (four compiled files, read-only).
+- Tests (mocked, in-memory): `src/test/tar-extract.test.ts`, plus two hook tests appended to `git-acquisition.test.ts`.
+
+Run (outside the restricted sandbox):
+
+```powershell
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_CLONE = "1"
+$env:GRAVEYARD_CLONE_REPO_URL = "https://github.com/<owner>/<repo>"
+$env:GRAVEYARD_CLONE_COMMIT = "<full 40-hex sha>"
+node --test dist-test/test/manual-clone-check.js
+```
+
+Not established: that any of this compiles or passes; real `git archive` output compatibility (fixtures with `export-ignore`/`export-subst` or paths over 100 bytes fail closed by design); proxy allowlist enforcement beyond one probe; isolation beyond `--internal`; a production export path. There is still no handoff to a runner. Record external results here and in `.kiro/PROJECT.md`.
+
+
+
+---
+
+## 2026-11-15 — controlled Node fixture build/test runner and opt-in harness (externally verified)
+
+### External verification result (2026-11-15)
+
+Recorded from the user's external checks. Kiro ran no commands for this update (docs-only, no source edits, no shell). This supersedes the earlier "written, NOT executed / unverified" status below, which is kept as history.
+
+- `tsc -p tsconfig.json` and `tsc -p tsconfig.test.json` both pass.
+- 66 focused mock tests pass.
+- The full backend test suite passed (count not supplied to Kiro).
+- Real Docker 29.9.2 with local `node:22-alpine` passed four controlled cases via the opt-in harness:
+  - `pass`: build passed, then 2 tests passed.
+  - `fail-test`: build passed, failing test detected as failed.
+  - `fail-build`: build failed, test stage skipped (not-run).
+  - `no-tests`: build passed, missing tests reported as not-run.
+- Container cleanup was confirmed for every stage, and the temporary fixtures were removed.
+- The real Docker test was initially paused, then the user unpaused it.
+- Authorship: runner, fixtures and tests by Kiro; review and test execution external.
+
+Not established by this result: any `npm install` or dependency acquisition, untrusted or arbitrary repositories (hostile fixture code can still forge its own output), acquisition handoff into a build, `JobWorker`/`JobRunner` wiring, or a production result. Nothing is wired to the server, worker or jobs. The real-clone harness and tar handoff and the egress proxy IPv4-only edits remain separately recorded and are not covered by this entry.
+
+Next steps (supersede the list at the end of this section): integrate the acquisition handoff into a controlled build, then secure dependency acquisition, then the worker.
+
+### Original record (written before the external run)
+
+One Kiro request, edits only (no shell, no dependencies, no frontend). At the time of writing nothing had been compiled or run.
+
+Scope: controlled generated fixtures only. Not wired to the server, worker, `JobRunner` or any job. It does not make arbitrary repositories safe to run.
+
+### Added
+
+- `src/node-fixture-runner.ts`: `NodeFixtureRunner` over `DockerFixtureSandbox` (unchanged). Fixed registry, selected by stage name only:
+  - build: `node /fixture/build.mjs /tmp/out`
+  - test: `node --test --test-reporter=tap` (cwd `/fixture`)
+  No shell, no npm, no install. Image `node:22-alpine`, allowlisted, never pulled. Network `none`, non-root, caps dropped, read-only root, fixture mounted read-only at `/fixture`, writable bounded noexec tmpfs `/tmp` (16 MB), limits 256 MB / 1 cpu / 64 pids / 60 s / 64 KB output per stream.
+  - Each stage runs in its own fresh container, so `/tmp` output does not survive. The fixture's tests rebuild into `/tmp/graveyard-test-out` themselves (deterministic build+test in one container).
+  - `runStage(stage, {executionId, fixture, timeoutMs?, signal?})` and `verify({idPrefix, fixture, ...})` (build as `<prefix>:1`, test as `<prefix>:2`; test is skipped unless the build passed or if the signal aborted between stages).
+- Status rules (pure functions `classifyBuild`, `classifyTest`, `parseBuildMarker`, `parseTapCounts`):
+  - `passed` needs exit 0, untruncated output, machine-checked evidence and confirmed container cleanup. Build: a `GRAVEYARD_BUILD_OK files=<n> bytes=<n>` line (n >= 1) at line start. Test: TAP summary with `tests`, `pass`, `fail`, `cancelled`; `fail` and `cancelled` zero, `pass >= 1`, `pass <= tests`.
+  - `failed`: nonzero exit, or any failed/cancelled count (even with exit 0).
+  - `not-run`: no `build.mjs` (checked host-side, nothing started); zero tests (missing tests); all tests skipped/todo; missing or inconsistent summary; missing build marker; truncated output with exit 0; timeout; cancellation; Docker unavailable; isolation mismatch (container not started); rejected request; a would-be pass whose cleanup was not confirmed (`cleanup-unconfirmed`). A nonzero exit with truncated output is still `failed`.
+  - Overall run: `failed` if any stage failed, `passed` only if both passed, else `not-run`.
+  - Result carries sanitised (printable ASCII) 2000-character stdout/stderr tails, counts, exit code, truncation flag and the sandbox `CleanupProof`.
+- `src/fixture-workspace.ts`: `ensureOwnedParent` (`backend/.tmp-fixtures`, gitignored; refuses a symlink), `createRunDir` (`run-<12 hex>`, non-recursive mkdir), `writeFixture` (strict name and path segment patterns, bounded file count and size, exclusive create), `removeRunDir` (target must be a real directory named `run-<12 hex>` directly under the owned parent; lstat walk unlinks files and symlinks themselves, bounded depth and entries; no recursive `rm`; never throws).
+- `src/node-fixture-files.ts`: four generated fixtures (`pass`, `fail-test`, `fail-build`, `no-tests`). Node built-ins only, no `package.json` dependencies or scripts, no network or child-process use.
+- `src/test/node-fixture-runner.test.ts` (mocked docker CLI): registry and create arguments, build/test status mapping, truncated output, timeout, cancellation (signal reaches `docker start`, pre-aborted creates nothing), Docker unavailable, isolation mismatch, rejected inputs, cleanup proof (unconfirmed downgrades a pass, failure stays failure, thrown start still cleans up), `verify` sequencing.
+- `src/test/fixture-workspace.test.ts`: real filesystem under `os.tmpdir()` only: path validation, exclusive create, removal refusals (wrong name/location, symlink), fixture content sanity. Symlink tests skip if symlinks cannot be created.
+- `src/test/manual-node-fixture-check.ts`: opt-in harness, skipped unless `GRAVEYARD_MANUAL_NODE_FIXTURE=1`. Requires a reachable daemon and a local `node:22-alpine`. Generates the four fixtures under `backend/.tmp-fixtures/run-<hex>`, runs `verify` on each, compares with the expected statuses (pass: passed/passed; fail-test: passed/failed; fail-build: failed/not-run; no-tests: passed/not-run), requires confirmed cleanup for every stage, checks `docker ps -a` for leftovers, removes the directory with `removeRunDir`. Any mismatch fails the test.
+- `backend/.gitignore`: added `.tmp-fixtures/`.
+
+Run (outside the restricted sandbox):
+
+```powershell
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_NODE_FIXTURE = "1"
+node --test dist-test/test/manual-node-fixture-check.js
+```
+
+### Assumptions that real runs may contradict (all fail closed as not-run or isolation-violation)
+
+- `node --test --test-reporter=tap` on `node:22-alpine` prints `# tests/pass/fail/cancelled` summary lines at line start, and exits 0 with `# tests 0` when no test files exist.
+- `node --test` runs and `import()` from `/tmp` work under the noexec tmpfs, read-only root, uid 65532 and the 64-pid, 256 MB limits.
+- Docker Desktop reports the bind-mount `Source` in the same form as the host path passed to `--mount` (otherwise the adapter reports an isolation violation), and file sharing covers `backend/.tmp-fixtures`.
+
+### Not established
+
+- (Historical, superseded by the external verification result at the top of this section for the four controlled fixtures.) Mocked tests prove the mapping logic only; real Docker and Node behaviour is now evidenced only for those four fixtures.
+- Fixture code controls its own output, so a hostile fixture could forge the marker or TAP summary. This is acceptable only for controlled fixtures and is a reason arbitrary repositories remain out of scope.
+- No dependency installation, no network phase, no acquisition handoff, no `JobRunner` integration, no agent runtime. Cleanup proof is only as good as `docker inspect` and the label query.
+
+### Next steps
+
+Superseded: steps 1 and 2 are done (see the external verification result above). Remaining: integrate the acquisition handoff into a controlled build, then secure dependency acquisition, then the worker.
+
+## 2026-11-15: external verification of real GitHub acquisition (docs only)
+
+Kiro ran no commands and changed no source. Results are reported by the user from external runs. This supersedes earlier "pending" and "unverified" statements for the egress proxy IPv4 fix, acquisition and controlled runner; those entries are left as history.
+
+- `octocat/Hello-World` at exact SHA `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d` was acquired via the proxy. The validated handoff held one file of 13 bytes.
+- The controlled `NodeFixtureRunner` reported no build script and tests not run (no failure). No runner container was created.
+- Acquisition cleanup was confirmed and the temp directory removed.
+- Full test suite passed. Test TypeScript compilation passed.
+- Earlier controlled generated archive to Docker build/test suites passed for success, fail, missing and tampered cases.
+
+Not verified: real GitHub build success, live jobs, dependency installation, a deployed egress guard. Acquisition stays disabled by default because the default `EgressGuard` never attests.
+
+Authorship: Kiro wrote the code; an external assistant reviewed and tested it.

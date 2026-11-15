@@ -651,3 +651,33 @@ describe("construction", () => {
     assert.throws(() => acquisitionContainerName("a b:1"));
   });
 });
+
+
+describe("afterCheckout handoff hook (mock)", () => {
+  it("runs after checkout and before cleanup, with identity from the verified acquisition", async () => {
+    const fake = new FakeDocker();
+    let seen: { containerName: string; commit: string; files: number } | undefined;
+    const r = await make(fake, undefined, {
+      afterCheckout: (info) => {
+        seen = { containerName: info.containerName, commit: info.commit, files: info.manifest.files };
+        return Promise.resolve();
+      },
+    }).acquire(req);
+    assert.equal(r.kind, "acquired");
+    assert.deepEqual(seen, { containerName: NAME, commit: SHA, files: 2 });
+    assert.equal(r.cleanup?.confirmed, true);
+  });
+
+  it("a throwing hook fails the acquisition closed and cleanup still runs", async () => {
+    const fake = new FakeDocker();
+    const r = await make(fake, undefined, {
+      afterCheckout: () => Promise.reject(new Error("export \u0007failed")),
+    }).acquire(req);
+    assert.equal(r.kind, "failed");
+    if (r.kind === "failed") {
+      assert.equal(r.step, "handoff");
+      assert.doesNotMatch(r.reason, /\u0007/);
+    }
+    assert.equal(r.cleanup?.confirmed, true);
+  });
+});

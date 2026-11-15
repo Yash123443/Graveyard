@@ -119,6 +119,18 @@ Kiro wrote `src/docker-sandbox.ts` and its mock tests, and later the `json-file`
 
 One bounded, docs-only request. Kiro read `.kiro/PROJECT.md` and `.kiro/specs/backend-foundation/design.md` and created `.kiro/steering/product.md`, `tech.md` and `structure.md`. No shell commands were run, and `backend/`, `src/` and `scripts/` were not touched. Nothing was built or tested.
 
+### Controlled Node fixture runner and external verification (2026-11-15)
+
+Kiro wrote `src/node-fixture-runner.ts`, `fixture-workspace.ts`, `node-fixture-files.ts`, their mocked tests and the opt-in harness `src/test/manual-node-fixture-check.ts` in one bounded request without a shell. This docs-only update records the user's external results; Kiro ran no commands and edited no source. Both `tsc` configurations compile, 66 focused mock tests pass, the full backend suite passed, and real Docker 29.9.2 with `node:22-alpine` passed four controlled cases (success with build and 2 tests, failed test detected, failed build skips tests, no tests reported not-run). Container cleanup was confirmed and temp fixtures were removed. The real Docker test was initially paused, then unpaused by the user. This supersedes the "not compiled or run" status of that request. Scope: controlled fixtures only; no `npm install`, no untrusted repositories, no worker wiring, no production result. Review and test execution were external.
+
+### Archive handoff to node fixture build/test (2026-11-15)
+
+Kiro wrote `backend/src/archive-handoff.ts`, `src/test/archive-handoff.test.ts` and the opt-in `src/test/manual-archive-build-check.ts` without a shell; nothing was compiled or run, so the combined test is pending external verification. The same request corrected stale docs: the real-clone harness was externally verified (octocat/Hello-World at 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d, 1 file / 13 bytes extracted, cleanup confirmed; full suite and 60 focused tests passed), which is narrow and not production proof. The combined test uses locally generated archives, not git output, and tests no network clone. Frontend untouched, no new dependencies.
+
+### Real clone handoff into the controlled build runner (2026-11-15)
+
+Kiro edited only `backend/src/test/manual-clone-check.ts` (opt-in harness) and these records, without a shell; nothing was compiled or run, so the change is pending external verification. Previously measured (externally, not by Kiro): the real-clone harness extracted octocat/Hello-World at 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d (1 file / 13 bytes) with cleanup confirmed, and the archive-handoff combined harness was pending. The harness now hands the real `git archive` bytes to `extractArchiveIntoFixture` (validation before any write) in a managed `run-<hex>` directory and, for that one known SHA only, calls `NodeFixtureRunner.verify` on the original files. Expected: build not-run (`no-build-script`), test not-run, no container. This is not a build or test success; passing runs come only from the controlled generated fixtures in `manual-archive-build-check.ts`. No source outside the harness changed, so no new unit tests were added. The narrow attestation warning is unchanged.
+
 ## Prompting guidelines
 
 - Provide a single, bounded implementation request per session.
@@ -126,3 +138,11 @@ One bounded, docs-only request. Kiro read `.kiro/PROJECT.md` and `.kiro/specs/ba
 - State explicitly what Kiro must not touch (e.g. frontend, shell commands).
 - After each request, review output locally and record results in `backend/DEVELOPMENT.md` before requesting the next milestone.
 - Mark documentation as factual summaries; do not ask Kiro to reproduce transcripts or invent prompts.
+
+## 2026-11-15: docs-only update, external verification of real acquisition
+
+Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `.kiro/KIRO_USAGE.md` and `backend/DEVELOPMENT.md`. Kiro authored the earlier code changes; an external assistant reviewed and tested them. No other provenance is claimed.
+
+Reported externally: `octocat/Hello-World` at SHA `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d` was acquired via the proxy and produced a validated handoff of one file (13 bytes). The controlled `NodeFixtureRunner` reported no build script and tests not run, with no runner container. Acquisition cleanup was confirmed and the temp directory removed. The full test suite and test TypeScript compilation passed. Earlier controlled archive to Docker build/test suites passed for success, fail, missing and tampered cases.
+
+Not shown: real GitHub build success, live jobs, dependency installation, a deployed egress guard. This supersedes the earlier "NOT executed / pending external verification" notes for the acquisition and proxy work, which are left unedited as history.
