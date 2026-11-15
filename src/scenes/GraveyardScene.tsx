@@ -23,6 +23,7 @@ import { Sky } from '../objects/Sky'
 import { LanternAvenue } from '../objects/LanternAvenue'
 import { ProcessionalPath } from '../objects/ProcessionalPath'
 import { CemeteryMemorials } from '../objects/CemeteryMemorials'
+import { HarvestRelics } from '../objects/HarvestRelics'
 
 /** Light rig whose intensity is driven by the scene-1 reveal, so the world starts in near-total darkness. */
 function Lights() {
@@ -80,6 +81,7 @@ export function GraveyardScene() {
       <CircularCemeteryFence />
       <CemeteryGroundDetails />
       <CemeteryMemorials />
+      <HarvestRelics />
       <LanternAvenue />
       <ScatteredGraves />
       <DeadTreeCluster />

@@ -52,17 +52,17 @@ function Spectre({ variant, position, rotY, scale, start }: SpectreProps) {
   return <group ref={holder} position={position} />
 }
 
-/** Purple forensic investigator, with a deep cloth hood and open book. */
+/** Black hooded Analyst with cold cyan eyes and a candlelit skull lantern. */
 export function AnalystCharacter() {
   return <Spectre variant="analyst" position={[-3.15, 0.55, -80.5]} rotY={0.25} scale={1.58} start={0} />
 }
 
-/** Crimson repair specialist: broad hooded occult soul with ember-veined robes and red slit eyes. Right of the grave. */
+/** Red-eyed reaper carrying a candlelit jack-o'-lantern. */
 export function FixerCharacter() {
   return <Spectre variant="fixer" position={[3.15, 0.55, -80.15]} rotY={-0.25} scale={1.58} start={0.24} />
 }
 
-/** Emerald verification specialist: hooded occult soul with green eyes and a restrained spectral orbit. Rises behind the grave. */
+/** Black hooded Tester with violet eyes and a bubbling witch's cauldron. */
 export function TesterCharacter() {
   return <Spectre variant="tester" position={[0, 5.0, -84.4]} rotY={0} scale={1.58} start={0.48} />
 }

@@ -5,8 +5,8 @@ import { seq } from '../animations/sequence'
 import { ritualPower } from '../animations/ritualPower'
 import { createGlowTexture } from '../utils/proceduralTextures'
 
-const colors = ['#ac7bff', '#ff7051', '#6bffc2']
-const origins = [[-2.85, 2.5, 3.6], [2.85, 2.5, 3.95], [0, 7.25, -0.5]]
+const colors = ['#a9efff', '#ffb05b', '#de83ff']
+const origins = [[-4.0, 2.29, 3.42], [1.95, 2.22, 3.25], [-1.06, 6.71, -0.72]]
 const vertexShader = `
   attribute float seed;
   uniform float time, power, pointScale, pixelRatio;

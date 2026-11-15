@@ -145,9 +145,9 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
       if (agentPanel.current) {
         agentPanel.current.style.opacity = String(showAgent)
         agentPanel.current.style.transform = `translate3d(0, ${(1 - showAgent) * 18}px, 0)`
-        agentPanel.current.style.borderColor = ['rgba(165,108,255,.7)', 'rgba(250,85,76,.75)', 'rgba(97,242,155,.75)'][agent]
+        agentPanel.current.style.borderColor = ['rgba(169,239,255,.7)', 'rgba(255,176,91,.75)', 'rgba(222,131,255,.75)'][agent]
       }
-      if (agentName.current) agentName.current.style.color = ['#c5a2ff', '#ff8178', '#8ef5b7'][agent]
+      if (agentName.current) agentName.current.style.color = ['#a9efff', '#ffbe7a', '#e0a0ff'][agent]
       if (agentName.current && agentName.current.textContent !== statuses[agent]) agentName.current.textContent = statuses[agent]
       if (agentLine.current && agentLine.current.textContent !== `“${lines[agent]}”`) agentLine.current.textContent = `“${lines[agent]}”`
       if (agentPurpose.current && agentPurpose.current.textContent !== purposes[agent]) agentPurpose.current.textContent = purposes[agent]

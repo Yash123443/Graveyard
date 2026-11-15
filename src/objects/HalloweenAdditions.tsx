@@ -67,7 +67,7 @@ function CandleCluster({ position, scale = 1 }: { position: [number, number, num
   return <group position={position} scale={scale}>
     {[-0.18, 0, 0.17].map((x, i) => <group key={x} position={[x, i % 2 ? 0.22 : 0.12, 0]}>
       <mesh material={wax} castShadow><cylinderGeometry args={[0.055, 0.07, i % 2 ? 0.46 : 0.28, 10]} /></mesh>
-      <mesh material={flame} position={[0, i % 2 ? 0.27 : 0.18, 0]}><sphereGeometry args={[0.055, 8, 6]} /></mesh>
+      <mesh material={flame} position={[0, i % 2 ? 0.27 : 0.18, 0]} scale={[0.55,1.45,0.55]}><sphereGeometry args={[0.055, 8, 6]} /></mesh>
     </group>)}
   </group>
 }

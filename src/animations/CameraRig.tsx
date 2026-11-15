@@ -8,6 +8,7 @@ import { groundHeight } from '../objects/Ground'
 import { memorialObstacles } from '../objects/CemeteryMemorials'
 import { lanternObstacles } from '../objects/LanternAvenue'
 import { witchObstacles } from '../objects/WitchCorners'
+import { relicObstacles } from '../objects/HarvestRelics'
 
 /**
  * The camera is on a rail. Scroll scrubs along it, but the rail is critically
@@ -103,6 +104,7 @@ export function CameraRig() {
         && !memorialObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
         && !lanternObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
         && !witchObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
+        && !relicObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
     }
     if (roamAllowed > 0) {
       const touring = seq.guided && !seq.exploration.storyStarted

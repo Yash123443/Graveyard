@@ -5,7 +5,7 @@ import { seq, smoothstep } from '../animations/sequence'
 import { ritualPower } from '../animations/ritualPower'
 import { createFogTexture } from '../utils/proceduralTextures'
 
-const colors = ['#a275ff', '#ff7353', '#75ffd1']
+const colors = ['#a9efff', '#ffb05b', '#de83ff']
 
 /** Local environmental response, driven by the same clock as the performers. */
 export function RitualAtmosphere() {

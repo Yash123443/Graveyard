@@ -157,22 +157,29 @@ function FinalGraveBeacon() {
 
 function GiantTree() {
   const { scene } = useGLTF('/models/dead-tree.glb')
-  const tree = useMemo(() => {
+  const { tree, treeMaterials } = useMemo(() => {
     const clone = scene.clone(true)
+    const copies = new Map<THREE.Material, THREE.Material>()
     clone.traverse((node) => {
       const mesh = node as THREE.Mesh
       if (!mesh.isMesh) return
       mesh.castShadow = true
       mesh.receiveShadow = true
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-      materials.forEach((m) => {
-        const mat = m as THREE.MeshStandardMaterial
-        mat.color.multiplyScalar(0.68)
-        mat.roughness = 1
+      const localMaterials = materials.map((original) => {
+        if (!copies.has(original)) {
+          const mat = original.clone() as THREE.MeshStandardMaterial
+          mat.color?.multiplyScalar(0.68)
+          mat.roughness = 1
+          copies.set(original, mat)
+        }
+        return copies.get(original)!
       })
+      mesh.material = Array.isArray(mesh.material) ? localMaterials : localMaterials[0]
     })
-    return clone
+    return { tree: clone, treeMaterials: [...copies.values()] }
   }, [scene])
+  useEffect(() => () => treeMaterials.forEach(material => material.dispose()), [treeMaterials])
   useFrame(({ clock }) => {
     const wind = smoothstep(0.72, 0.9, seq.exploration.storyProgress) * (1 - smoothstep(0.35, 0.8, seq.ending.progress))
     tree.rotation.z = Math.sin(clock.elapsedTime * 0.7) * wind * 0.003

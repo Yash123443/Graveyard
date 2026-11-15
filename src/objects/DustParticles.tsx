@@ -1,9 +1,12 @@
 import { useFrame } from '@react-three/fiber'
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
+import { createGlowTexture } from '../utils/proceduralTextures'
 
 export function DustParticles() {
   const pointsRef = useRef<THREE.Points>(null)
+  const moteMap = useMemo(() => createGlowTexture(32), [])
+  useEffect(() => () => moteMap.dispose(), [moteMap])
   const geometry = useMemo(() => {
     const positions = new Float32Array(720 * 3)
     for (let index = 0; index < 720; index += 1) {
@@ -24,7 +27,7 @@ export function DustParticles() {
 
   return (
     <points ref={pointsRef} geometry={geometry}>
-      <pointsMaterial color="#c7d9e6" size={0.075} transparent opacity={0.45} sizeAttenuation depthWrite={false} />
+      <pointsMaterial map={moteMap} color="#c7d9e6" size={0.075} transparent opacity={0.36} sizeAttenuation depthWrite={false} />
     </points>
   )
 }
