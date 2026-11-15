@@ -543,3 +543,86 @@ Kiro ran no commands and changed no source. Results are reported by the user fro
 Not verified: real GitHub build success, live jobs, dependency installation, a deployed egress guard. Acquisition stays disabled by default because the default `EgressGuard` never attests.
 
 Authorship: Kiro wrote the code; an external assistant reviewed and tested it.
+
+
+
+---
+
+## 2026-11-15 — controlled offline `npm ci` foundation for test fixtures (written, NOT executed)
+
+One Kiro request, edits only. No shell was used: no `tsc`, no tests, no Docker, no npm, no network. **Nothing here is verified.** Pending external: `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json`, the full suite (existing sandbox and node-fixture tests must still pass after the additive sandbox change), then the opt-in harness. Expect to fix compile or test errors. No dependency, frontend, server, worker, job or `JobRunner` changes; no live repository is touched and nothing is claimed about arbitrary repositories.
+
+### Added
+
+- `src/npm-lock-policy.ts` (pure, no I/O): `checkNpmFixture(packageJsonText, lockText)`. A preliminary allowlist, not production security. Accepts only lockfileVersion 2 or 3 with at most 200 `packages` entries, each a plain `node_modules/...` key with a strict semver version, `resolved` exactly `https://registry.npmjs.org/<name>/-/<file>-<version>.tgz` and one 64-byte `sha512-` integrity. Rejects git/http/file/link/tarball/alias specs, workspaces, `overrides`/`resolutions`/`packageManager`/`pnpm`, bundled dependencies, install-time scripts (root `preinstall`/`install`/`postinstall`/`prepare`, entry `hasInstallScript`), `link`, `inBundle`, aliases, `os`/`cpu`/`libc` filters (they make the expected package count unknowable), size overruns (16 KiB / 512 KiB) and malformed JSON. A bounded walk applies the same rules to a legacy v2 `dependencies` tree.
+- `src/npm-install-runner.ts`: `NpmInstallRunner.install({executionId, fixture, timeoutMs?, signal?})`, never throws. Host-side steps run before any process exists: request validation, fixture resolved inside `fixturesRoot`, `package.json` and `package-lock.json` read as regular files (symlinks refused, size capped), policy check. Only those two validated byte strings plus an empty `node_modules` mount point are copied into a fresh directory under `stagingRoot`; nothing else from the source directory is copied, so a stray `.npmrc` or `.git` never reaches the container.
+  - Fixed argv, no shell, nothing from the request: `npm ci --offline --ignore-scripts --no-audit --no-fund --no-update-notifier --logs-max=0 --cache /npm-cache --userconfig /fixture/.npm-user-config --globalconfig /fixture/.npm-global-config`. The two config files are distinct, empty, runner-created files in the read-only staged directory (the earlier `/dev/null` for both made npm exit 1 with `double-loading config`). Neither is `.npmrc`, no host config is copied, and `removeStaged` refuses to delete them if non-empty. UNVERIFIED until rerun externally: `tsc` builds, `node --test`, and the real Docker fixture.
+  - Container (through `DockerFixtureSandbox`): network `none`, non-root `65532:65532`, caps dropped, read-only root, `--pull never`, no environment variables, memory 512 MB, 128 pids, 90 s, 64 KB output per stream, isolation read back from `docker inspect` before start. The staged directory is the read-only `/fixture`; `/fixture/node_modules` and `/tmp` are 64 MB `noexec` tmpfs mounts (the install lives in memory and disappears with the container); the operator's cache is a read-only bind at `/npm-cache`.
+  - Status is independent of build/test status: `success` needs exit 0, untruncated output, npm's own `added N packages` line with N equal to the lock's package count, confirmed container cleanup and removed staging. `failure` is a nonzero npm exit (for example an offline cache miss). `not-run` covers no `package.json`, no lockfile, policy rejection, missing or invalid cache or roots, timeout, cancel (before or during), Docker unavailable, isolation mismatch, truncated or missing or mismatched summary, unconfirmed container cleanup and unremoved staging. Timeout and cancel are never failures or successes.
+- `src/docker-sandbox.ts` (additive, defaults unchanged): optional construction-time `readonlyBinds` and `extraTmpfs` (validated targets, no duplicates or reserved `/tmp` and `/fixture`, tmpfs size 1 to 256 MB). The inspect read-back now requires exactly the expected tmpfs set with `noexec,nosuid,nodev,size=` and exactly the expected bind mounts (read-only, exact source). Without extras the behaviour is the same as before; the tmpfs violation messages are now phrased per mount.
+- `src/test/npm-lock-policy.test.ts`: accepted inputs and about 70 rejection cases (pure).
+- `src/test/npm-install-runner.test.ts`: mocked docker CLI with real temporary directories. Covers the fixed argv and create arguments (no env, ports, volumes, source directory never mounted), staged contents, success, failure, each not-run reason, isolation tampering of the new tmpfs and cache mounts, cleanup and staging-removal downgrades, host-side rejections that must not contact Docker, collision refusal, and sandbox extra validation.
+- `src/test/manual-npm-install-check.ts`: opt-in (`GRAVEYARD_MANUAL_NPM_INSTALL=1`).
+
+### Why the real test needs operator input
+
+A passing install needs a lockfile with real registry `resolved` URLs and real sha512 integrity values, and a cache holding exactly those tarballs. Kiro cannot produce these without the registry and did not invent them. A locally built tarball would not have a registry `resolved` URL and would be rejected by the policy. So the opt-in harness fails closed unless the operator supplies `GRAVEYARD_NPM_FIXTURE_DIR` (a small `package.json` + `package-lock.json`) and `GRAVEYARD_NPM_CACHE_DIR` (a cache prepopulated for exactly that lockfile, prepared outside this harness). The harness mounts the cache read-only, generates its own negative fixtures (an uncached registry-form package, a git-resolved lock, a missing lockfile, a pre-aborted request), and checks confirmed cleanup, an empty staging directory and an independent `docker ps -a`. Run (outside the restricted sandbox):
+
+```powershell
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_NPM_INSTALL = "1"
+$env:GRAVEYARD_NPM_FIXTURE_DIR = "C:\path\to\fixture"
+$env:GRAVEYARD_NPM_CACHE_DIR = "C:\path\to\npm-cache"
+node --test dist-test/test/manual-npm-install-check.js
+```
+
+### Assumptions that real runs may contradict (all fail closed as failure or not-run, never success)
+
+- npm prints `added N package(s) in <time>` at the start of a line with `--no-audit --no-fund`.
+- `npm ci` empties a tmpfs mounted at `node_modules` instead of trying to remove the mount point.
+- A read-only cache is enough for an offline install with `--logs-max=0` (npm may still try to write inside the cache).
+- Docker can mount a tmpfs inside a read-only bind mount when the mount point exists in the source; Docker Desktop reports bind sources in the host form.
+- The image `node:22-alpine` provides `npm` on `PATH` for uid 65532.
+
+### Not established
+
+- That any of this compiles or passes. The mock tests prove mapping logic only.
+- That the policy is complete or secure: it does not check what the packages contain, that an integrity hash matches a registry, or how npm resolves edge cases. It is preliminary and not production security.
+- Success rests on npm's own stdout. The installed tree is not inspected (it lives in a tmpfs that is destroyed with the container), and a hostile package cannot be ruled out of printing at line start, so this is for controlled fixtures only.
+- No build or test runs against the installed modules, no `JobRunner` or worker integration, no acquisition handoff into an install, no network phase, no dependency acquisition from a registry. Nothing uses `NpmInstallRunner` outside the tests.
+- Pending: record external results here and in `.kiro/PROJECT.md`.
+
+
+---
+
+## 2026-11-15 — offline `npm ci` for a controlled fixture: external verification (docs only)
+
+Kiro ran no commands and changed no source. Results are reported by the user from external runs. This supersedes the "written, NOT executed" status of the offline `npm ci` entry above (including its "UNVERIFIED until rerun externally" note on the config fix); that entry is left as history.
+
+### Verified
+
+- Test TypeScript compilation passed.
+- The full backend test suite passed (count not supplied to Kiro).
+- Real Docker 29.9.2 with local `node:22-alpine`, via the opt-in harness `manual-npm-install-check.ts`:
+  - Controlled `is-number@7.0.0` fixture: offline `npm ci` succeeded, 1 of 1 packages.
+  - Uncached package: failed correctly with `ENOTCACHED`.
+  - Git-dependency lockfile: rejected by the lock policy.
+  - No lockfile: not-run.
+  - Pre-aborted request: not-run.
+  - Cleanup was confirmed for every container and every staging directory.
+- The first real run failed with a duplicate npm config error because `/dev/null` was used for both the user and global config. The fix uses distinct, empty, runner-created config files; the passing run includes it.
+
+### Limits
+
+- The npm cache was prepopulated outside the sandbox for the test. Real registry acquisition remains unimplemented; there is no controlled registry-only network phase.
+- The installed `node_modules` lived in a tmpfs and was discarded with the container. It cannot be handed to a build yet.
+- One small controlled fixture. The lock policy is preliminary. Not production safe, not evidence for arbitrary or untrusted repositories.
+- Nothing is wired to the server, `JobWorker`, `JobRunner` or jobs. No live worker, no real agents.
+
+Authorship: Kiro wrote the code and tests; an external assistant reviewed and ran them.
+
+### Next steps
+
+1. Design controlled registry-only dependency acquisition (no unrestricted egress).
+2. Hand an installed dependency tree to the build/test runner.
+3. Worker integration.

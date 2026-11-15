@@ -19,8 +19,9 @@
  *    inspect` and a label query. Anything unproven returns confirmed:false.
  *  - If Docker cannot be reached, nothing runs.
  *
- * Not covered: arbitrary repositories, network egress, dependency installs,
- * seccomp/AppArmor profile choice (Docker defaults apply), user namespaces,
+ * Not covered: arbitrary repositories, network egress, dependency installs by the adapter itself
+ * (npm-install-runner.ts builds a fixed offline `npm ci` on top of the optional readonlyBinds and
+ * extraTmpfs options), seccomp/AppArmor profile choice (Docker defaults apply), user namespaces,
  * rootless mode, concurrent execute()/cleanup() for one execution id, and
  * proof that the Docker daemon itself is trustworthy.
  *
@@ -203,8 +204,29 @@ const MAX_REASON = 300;
 
 const clip = (s: string): string => (s.length > MAX_REASON ? `${s.slice(0, MAX_REASON)}…` : s);
 
+/** Operator-fixed read-only bind mount (for example an offline package cache). Never chosen by a request. */
+export interface ReadonlyBind {
+  /** Absolute host directory. Resolved with realpath at construction. */
+  source: string;
+  /** Absolute container path, for example /npm-cache. */
+  target: string;
+}
+
+/** Operator-fixed extra tmpfs mount (rw, noexec, nosuid, nodev). Never chosen by a request. */
+export interface ExtraTmpfs {
+  target: string;
+  sizeMb: number;
+}
+
+const EXTRA_TARGET_RE = /^\/[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31}){0,2}$/;
+const RESERVED_TARGETS: readonly string[] = ["/tmp", FIXTURE_MOUNT_TARGET];
+
 export interface SandboxOptions {
   executor: ProcessExecutor;
+  /** Optional fixed read-only bind mounts. Default none. */
+  readonlyBinds?: readonly ReadonlyBind[];
+  /** Optional fixed extra tmpfs mounts. Default none. */
+  extraTmpfs?: readonly ExtraTmpfs[];
   /** Exact image references that may be used. Never pulled. */
   allowedImages: readonly string[];
   /** Fixed commands by ID. Each is an argv array run directly (entrypoint is cleared). */
@@ -324,6 +346,8 @@ export class DockerFixtureSandbox {
   private readonly limits: SandboxLimits;
   private readonly docker: string;
   private readonly realpath: (p: string) => string;
+  private readonly binds: ReadonlyBind[] = [];
+  private readonly extraTmpfs: ExtraTmpfs[] = [];
 
   constructor(opts: SandboxOptions) {
     if (typeof opts.executor !== "function") throw new Error("executor is required");
@@ -346,6 +370,26 @@ export class DockerFixtureSandbox {
       if (!isAbsolute(opts.fixturesRoot)) throw new Error("fixturesRoot must be an absolute path");
       this.fixturesRoot = this.realpath(resolve(opts.fixturesRoot));
       if (FORBIDDEN_PATH_CHARS.test(this.fixturesRoot)) throw new Error("fixturesRoot contains forbidden characters");
+    }
+
+    const targets = new Set<string>(RESERVED_TARGETS);
+    for (const b of opts.readonlyBinds ?? []) {
+      if (typeof b?.source !== "string" || !isAbsolute(b.source)) throw new Error("readonly bind source must be absolute");
+      if (typeof b.target !== "string" || !EXTRA_TARGET_RE.test(b.target) || targets.has(b.target)) {
+        throw new Error("invalid or duplicate readonly bind target");
+      }
+      const source = this.realpath(resolve(b.source));
+      if (FORBIDDEN_PATH_CHARS.test(source)) throw new Error("readonly bind source contains forbidden characters");
+      targets.add(b.target);
+      this.binds.push({ source, target: b.target });
+    }
+    for (const t of opts.extraTmpfs ?? []) {
+      if (typeof t?.target !== "string" || !EXTRA_TARGET_RE.test(t.target) || targets.has(t.target)) {
+        throw new Error("invalid or duplicate extra tmpfs target");
+      }
+      if (!Number.isInteger(t.sizeMb) || t.sizeMb < 1 || t.sizeMb > 256) throw new Error("extra tmpfs sizeMb must be 1 to 256");
+      targets.add(t.target);
+      this.extraTmpfs.push({ target: t.target, sizeMb: t.sizeMb });
     }
   }
 
@@ -503,8 +547,14 @@ export class DockerFixtureSandbox {
       "--workdir", plan.fixtureSource === null ? "/tmp" : FIXTURE_MOUNT_TARGET,
       "--entrypoint", "",
     ];
+    for (const t of this.extraTmpfs) {
+      args.push("--tmpfs", `${t.target}:rw,noexec,nosuid,nodev,size=${t.sizeMb}m`);
+    }
     if (plan.fixtureSource !== null) {
       args.push("--mount", `type=bind,source=${plan.fixtureSource},target=${FIXTURE_MOUNT_TARGET},readonly`);
+    }
+    for (const b of this.binds) {
+      args.push("--mount", `type=bind,source=${b.source},target=${b.target},readonly`);
     }
     args.push(plan.image, ...plan.argv);
     return args;
@@ -609,16 +659,20 @@ export class DockerFixtureSandbox {
     if (!isEmpty(host["VolumesFrom"])) v.push("volumes-from set");
     const tmpfs = obj(host["Tmpfs"]);
     const tmpfsKeys = Object.keys(tmpfs);
-    if (tmpfsKeys.length !== 1 || tmpfsKeys[0] !== "/tmp") {
+    const wantTmpfs = new Map<string, number>([["/tmp", l.tmpfsMb]]);
+    for (const t of this.extraTmpfs) wantTmpfs.set(t.target, t.sizeMb);
+    if (tmpfsKeys.length !== wantTmpfs.size || !tmpfsKeys.every((k) => wantTmpfs.has(k))) {
       v.push("unexpected tmpfs mounts");
     } else {
-      const optStr = tmpfs["/tmp"];
-      const opts = typeof optStr === "string" ? optStr.split(",").map((o) => o.trim()) : [];
-      for (const need of ["noexec", "nosuid", "nodev", `size=${l.tmpfsMb}m`]) {
-        if (!opts.includes(need)) v.push(`tmpfs /tmp option ${need} missing`);
-      }
-      if (opts.includes("exec") || opts.includes("suid") || opts.includes("dev") || opts.includes("ro")) {
-        v.push("tmpfs /tmp has a conflicting option");
+      for (const [key, sizeMb] of wantTmpfs) {
+        const optStr = tmpfs[key];
+        const opts = typeof optStr === "string" ? optStr.split(",").map((o) => o.trim()) : [];
+        for (const need of ["noexec", "nosuid", "nodev", `size=${sizeMb}m`]) {
+          if (!opts.includes(need)) v.push(`tmpfs ${key} option ${need} missing`);
+        }
+        if (opts.includes("exec") || opts.includes("suid") || opts.includes("dev") || opts.includes("ro")) {
+          v.push(`tmpfs ${key} has a conflicting option`);
+        }
       }
     }
 
@@ -634,16 +688,25 @@ export class DockerFixtureSandbox {
     }
 
     const mounts = Array.isArray(info["Mounts"]) ? (info["Mounts"] as unknown[]) : [];
-    const wanted = plan.fixtureSource === null ? 0 : 1;
+    const wanted = (plan.fixtureSource === null ? 0 : 1) + this.binds.length;
     if (mounts.length !== wanted) {
       v.push("unexpected mount count");
-    } else if (wanted === 1) {
-      const m = obj(mounts[0]);
-      if (m["Type"] !== "bind" || m["Destination"] !== FIXTURE_MOUNT_TARGET || m["RW"] !== false) {
-        v.push("fixture mount is not a read-only bind at /fixture");
+    } else {
+      if (plan.fixtureSource !== null) {
+        const m = obj(mounts.find((x) => obj(x)["Destination"] === FIXTURE_MOUNT_TARGET) ?? mounts[0]);
+        if (m["Type"] !== "bind" || m["Destination"] !== FIXTURE_MOUNT_TARGET || m["RW"] !== false) {
+          v.push("fixture mount is not a read-only bind at /fixture");
+        }
+        if (typeof m["Source"] !== "string" || m["Source"] !== plan.fixtureSource) {
+          v.push("fixture mount source differs from the resolved fixture path");
+        }
       }
-      if (typeof m["Source"] !== "string" || m["Source"] !== plan.fixtureSource) {
-        v.push("fixture mount source differs from the resolved fixture path");
+      for (const b of this.binds) {
+        const m = obj(mounts.find((x) => obj(x)["Destination"] === b.target));
+        if (m["Type"] !== "bind" || m["RW"] !== false) v.push(`mount at ${b.target} is not a read-only bind`);
+        if (typeof m["Source"] !== "string" || m["Source"] !== b.source) {
+          v.push(`mount source at ${b.target} differs from the configured path`);
+        }
       }
     }
     return v;

@@ -146,3 +146,18 @@ Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `
 Reported externally: `octocat/Hello-World` at SHA `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d` was acquired via the proxy and produced a validated handoff of one file (13 bytes). The controlled `NodeFixtureRunner` reported no build script and tests not run, with no runner container. Acquisition cleanup was confirmed and the temp directory removed. The full test suite and test TypeScript compilation passed. Earlier controlled archive to Docker build/test suites passed for success, fail, missing and tampered cases.
 
 Not shown: real GitHub build success, live jobs, dependency installation, a deployed egress guard. This supersedes the earlier "NOT executed / pending external verification" notes for the acquisition and proxy work, which are left unedited as history.
+
+
+## 2026-11-15: controlled offline npm install foundation (written, not executed)
+
+One bounded request, edits only, no shell. Kiro wrote `backend/src/npm-lock-policy.ts`, `backend/src/npm-install-runner.ts`, an additive change to `backend/src/docker-sandbox.ts` (optional fixed read-only binds and extra tmpfs mounts), `backend/src/test/npm-lock-policy.test.ts`, `backend/src/test/npm-install-runner.test.ts`, the opt-in `backend/src/test/manual-npm-install-check.ts`, and updated `backend/DEVELOPMENT.md`, `.kiro/PROJECT.md` and `.kiro/specs/backend-foundation/tasks.md`. Nothing was compiled or run (no `tsc`, tests, Docker or npm), so all of it is pending external verification. The real-Docker harness needs an operator-supplied fixture and prepopulated cache and fails closed without them; no registry values were invented. No frontend, server, worker, dependency or live-job changes. Controlled test fixtures only; no claim is made about arbitrary repositories.
+
+
+
+## 2026-11-15: docs-only update, external verification of offline npm install
+
+Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `.kiro/KIRO_USAGE.md`, `.kiro/specs/backend-foundation/tasks.md` and `backend/DEVELOPMENT.md`. Kiro authored the offline `npm ci` code; an external assistant reviewed and tested it. No other provenance is claimed. This supersedes the "written, not executed" entry for that request, which is left as history.
+
+Reported externally: test TypeScript compilation passed and the full backend suite passed. On real Docker 29.9.2 with `node:22-alpine`, a controlled offline `npm ci` of `is-number@7.0.0` succeeded 1 of 1. An uncached package failed correctly with `ENOTCACHED`, a git-dependency lockfile was rejected by the policy, and a missing lockfile and a pre-aborted request both reported not-run. All container and staging cleanup was confirmed. An initial duplicate npm config failure (`/dev/null` used for both configs) was fixed with distinct empty config files.
+
+Not shown: registry acquisition (the cache was prepopulated outside the sandbox), handing installed modules to a build (`node_modules` is discarded), production safety, a live worker or agents.

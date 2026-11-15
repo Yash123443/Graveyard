@@ -175,3 +175,35 @@ Docs-only update; Kiro ran no commands and changed no source. Recorded from the 
 Limits of this evidence: no real GitHub build success, no live jobs, no dependency installation, and no deployed egress guard. The default guard still never attests, so acquisition stays disabled in the product.
 
 Authorship: Kiro wrote the changes; an external assistant reviewed and tested them. No provenance is claimed beyond that.
+
+
+
+## 2026-11-15: controlled offline npm install foundation (written by Kiro, NOT executed)
+
+Kiro wrote, without running any tool, a preliminary lockfile policy (`backend/src/npm-lock-policy.ts`), an offline `npm ci` runner for controlled test fixtures (`backend/src/npm-install-runner.ts`, fixed argv `--offline --ignore-scripts --no-audit --no-fund`, Docker network `none`, non-root, bounded resources, tmpfs `node_modules`, read-only operator-supplied cache, explicit cleanup, success/failure/not-run), an additive sandbox change for fixed read-only binds and extra tmpfs, mock tests, and an opt-in harness (`GRAVEYARD_MANUAL_NPM_INSTALL=1`) that needs an operator-supplied fixture and cache and fails closed without them. Details and assumptions are in `backend/DEVELOPMENT.md`.
+
+Status: unverified. Pending external `tsc` (both configs), the full suite, and the opt-in run. Not wired to the server, worker or any job; no live repository execution; policy is preliminary and not production security. Record external results here when available.
+
+
+
+## 2026-11-15: offline npm install, controlled fixture (externally verified, narrow)
+
+Docs-only update; Kiro ran no commands and changed no source. Recorded from the user's external checks. This supersedes the "written by Kiro, NOT executed" and "unverified" status of the offline `npm ci` foundation section above, which is left as history.
+
+- Test TypeScript compilation passed.
+- The full backend test suite passed (count not supplied to Kiro).
+- Real Docker 29.9.2 with local `node:22-alpine` ran the opt-in harness against a controlled `is-number@7.0.0` fixture:
+  - Offline `npm ci` succeeded, 1 of 1 packages.
+  - An uncached package failed correctly with `ENOTCACHED`.
+  - A git-dependency lockfile was rejected by the policy.
+  - A missing lockfile reported not-run.
+  - A pre-aborted request reported not-run.
+- Cleanup was confirmed for every container and every staging directory.
+- The first real run failed with a duplicate npm config error because `/dev/null` was used for both config paths. This was fixed by giving the user and global configs distinct empty files; the passing run above includes that fix.
+
+Limits of this evidence:
+- The npm cache was prepopulated outside the sandbox for this test. Real registry acquisition is not implemented.
+- The installed `node_modules` lived in a tmpfs and was discarded with the container. It cannot yet be handed to a build.
+- One tiny controlled fixture only. Not production safe. No live worker, no real agents, no wiring to the server or jobs, no untrusted repositories.
+
+Authorship: Kiro wrote the code; an external assistant reviewed and tested it.
