@@ -626,3 +626,97 @@ Authorship: Kiro wrote the code and tests; an external assistant reviewed and ra
 1. Design controlled registry-only dependency acquisition (no unrestricted egress).
 2. Hand an installed dependency tree to the build/test runner.
 3. Worker integration.
+
+
+---
+
+## 2026-11-15 — integrated controlled fixture pipeline: host orchestration (written, NOT executed)
+
+Kiro made file edits only. No shell command, `tsc`, test, Docker or npm was run, and no frontend or dependency file was touched. Everything below is **unverified** until an operator runs it and logs the result here and in `.kiro/PROJECT.md`.
+
+### What was added
+
+- `src/controlled-pipeline.ts`: `ControlledPipeline`, a host class for CONTROLLED fixtures only (not a `JobRunner`, not wired to the server, worker or jobs, not for user projects or live jobs).
+  - Host checks before any container: fixture name and path inside `fixturesRoot`; `package.json`, `package-lock.json` and `build.mjs` read as capped regular files (symlinks refused), optional `test.mjs`; `checkNpmFixture` (the existing lock policy) on package.json + lockfile; the compiled driver read from `fixture-pipeline-driver.js` (optionally pinned with `expectedDriverSha256`).
+  - Staging: exactly those files plus the driver (staged as `fixture-pipeline-driver.mjs`) into a fresh directory. A stray `.npmrc` or `.git` never reaches the container. The directory is removed afterwards, and only if it holds exactly the expected files.
+  - Container (existing `DockerFixtureSandbox`): network none, uid 65532, caps dropped, no-new-privileges, read-only root, `--pull never`. Staged dir read-only at `/fixture`, operator npm cache read-only at `/npm-cache`, `/work` and `/tmp` bounded noexec tmpfs (64 MiB each). 512 MiB memory, 128 pids, 120 s, 128 KiB output. Isolation is read back with `docker inspect` before start; cleanup is proven by inspect and a label query.
+  - Fixed command: `node /fixture/fixture-pipeline-driver.mjs`. No request input reaches the argv.
+- `src/fixture-pipeline-driver.ts` (changed): added the container entry point. When the file itself is run it executes the pipeline and writes exactly one JSON line `{"protocol","status","stages"}` to stdout, nothing to stderr. Exit 0 passed, 1 failed or cancelled, 70 internal error. Importing the module does not run anything. Stage timeouts were set to 60/20/20 s so the sum stays under the container limit. Tails on the wire are 1024 characters.
+- `src/fixture-pipeline-driver.ts` (bug fix found while reading): the driver passed the same empty file as `--userconfig` and `--globalconfig`. The earlier `npm ci` runner verification showed npm rejects that ("double-loading config"). The driver now creates two distinct empty files (`.empty-npmrc`, `.empty-npmrc-global`) and `fixture-pipeline-driver.test.ts` was updated. Without this the integrated install stage would have failed on a real run.
+- `src/controlled-pipeline-fixtures.ts`: generated trusted `build.mjs` / `test.mjs` for kinds `pass`, `fail-build`, `fail-test`, `no-tests`. They need only `is-number`; no network, child process or install script.
+- `src/test/controlled-pipeline.test.ts`: mock-Docker tests.
+- `src/test/manual-controlled-pipeline-check.ts`: opt-in real Docker harness.
+
+### Verdict rules
+
+- **success**: container exit 0, untruncated output, empty stderr, strictly valid protocol line (exact keys, four stages in fixed order, consistent statuses, exit code consistent with status), all stages passed (test may be `not-run` only if the host staged no `test.mjs`), npm's `added N packages` in the install tail equal to the lock package count, confirmed container cleanup, staging removed.
+- **failure**: valid protocol, first failing stage is install, build or test with reason `exit-code`, cleanup confirmed, staging removed.
+- **not-run**: everything else. This includes policy rejection, missing inputs or driver, Docker unavailable, isolation mismatch, timeout, cancel, truncated or malformed output, any stage timeout, output limit, spawn error or prepare refusal inside the container, summary mismatch, and unconfirmed cleanup (which also downgrades a failure).
+
+### Opt-in harness
+
+`GRAVEYARD_MANUAL_CONTROLLED_PIPELINE=1`, plus operator-supplied `GRAVEYARD_NPM_FIXTURE_DIR` (is-number@7.0.0 `package.json` + `package-lock.json`) and `GRAVEYARD_NPM_CACHE_DIR` (prepopulated cache). It fails closed without them and needs `pnpm run build:test` first so the compiled driver exists in `dist-test/`. Cases: pass, no-tests, fail-build, fail-test, cache-miss (expect `install-failed`), git-dep (policy rejected, no container), pre-aborted. It checks confirmed cleanup, an empty staging directory and an independent `docker ps -a`.
+
+### Run
+
+```
+pnpm run build:test
+node --test dist-test/test/controlled-pipeline.test.js dist-test/test/fixture-pipeline-driver.test.js
+$env:GRAVEYARD_MANUAL_CONTROLLED_PIPELINE = "1"
+$env:GRAVEYARD_NPM_FIXTURE_DIR = "C:\path\to\is-number7-fixture"
+$env:GRAVEYARD_NPM_CACHE_DIR = "C:\path\to\npm-cache"
+node --test dist-test/test/manual-controlled-pipeline-check.js
+```
+
+### Unverified assumptions (each fails closed if wrong)
+
+- Code compiles under `tsc -p tsconfig.json` and `tsc -p tsconfig.test.json` (never compiled).
+- The mock tests pass, including one test that runs the compiled driver as a subprocess and expects one valid failed report when `/fixture` is absent.
+- Inside the container: npm and `node --test` work on noexec tmpfs as uid 65532 with a read-only root; `npm ci --offline` succeeds with a read-only cache; npm prints `added N packages in <time>`; 64 MiB for `/work` is enough; a single protocol line fits the output cap.
+- Strict protocol checks (empty stderr, exact line) may turn a harmless Docker or Node warning into `not-run`. That is the intended direction.
+
+### Limits
+
+- Controlled fixtures only. The installed tree and build output live in a tmpfs and vanish with the container. The lock policy is preliminary. Success rests on the driver's own report from inside the container; the host does not inspect the installed tree.
+- Not production safe, not evidence for arbitrary or untrusted repositories. Not wired to the server, `JobWorker`, `JobRunner` or any job. No registry acquisition, no real agents.
+
+### Next steps
+
+1. External `tsc` (both configs), full suite, then the opt-in harness; record results here and in `.kiro/PROJECT.md`.
+2. Only after that, consider controlled registry-only acquisition and worker integration.
+
+
+
+---
+
+## 2026-11-15 — integrated controlled fixture pipeline: external verification (docs only)
+
+Kiro ran no commands and changed no source (no shell). Results are reported by the user from external runs. This supersedes the "written, NOT executed" and "unverified" status of the integrated controlled fixture pipeline entry above, including its pending `tsc`, full suite and opt-in run; that entry is left as history.
+
+### Verified
+
+- Test TypeScript build passed.
+- Focused tests passed and the full backend suite passed (counts not supplied to Kiro).
+- Real Docker 29.9.2 with local `node:22-alpine`, offline cached `is-number@7.0.0` fixture, via `manual-controlled-pipeline-check.ts`:
+  - success: install, build and test succeeded;
+  - no-tests: correctly not-run (`tests-not-run`), not a success;
+  - failed build and failed test: reported as failures;
+  - cache miss: reported as a failure;
+  - git dependency: rejected by the lock policy;
+  - pre-aborted request: not-run.
+- Cleanup was proven.
+- The original no-tests success bug was corrected before the final verification; the passing results include that correction.
+
+### Limits
+
+- Controlled generated fixtures only. The npm cache was prepopulated outside the sandbox; no registry download exists.
+- No live jobs, no repository acquisition integration, no runtime agents. Not wired to the server, `JobWorker`, `JobRunner` or jobs.
+- The lock policy is preliminary. Not production safe, not evidence for arbitrary or untrusted repositories.
+
+Authorship: Kiro wrote the source; an external assistant reviewed and tested it.
+
+### Next steps
+
+1. Controlled registry-only dependency acquisition design (no unrestricted egress).
+2. Integrate acquisition handoff with the pipeline.
+3. Worker integration.

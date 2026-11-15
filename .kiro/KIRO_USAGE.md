@@ -161,3 +161,13 @@ Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `
 Reported externally: test TypeScript compilation passed and the full backend suite passed. On real Docker 29.9.2 with `node:22-alpine`, a controlled offline `npm ci` of `is-number@7.0.0` succeeded 1 of 1. An uncached package failed correctly with `ENOTCACHED`, a git-dependency lockfile was rejected by the policy, and a missing lockfile and a pre-aborted request both reported not-run. All container and staging cleanup was confirmed. An initial duplicate npm config failure (`/dev/null` used for both configs) was fixed with distinct empty config files.
 
 Not shown: registry acquisition (the cache was prepopulated outside the sandbox), handing installed modules to a build (`node_modules` is discarded), production safety, a live worker or agents.
+
+
+
+## 2026-11-15: docs-only update, external verification of the integrated controlled fixture pipeline
+
+Kiro ran no commands and changed no source; it edited only `.kiro/PROJECT.md`, `.kiro/KIRO_USAGE.md`, `.kiro/specs/backend-foundation/tasks.md` and `backend/DEVELOPMENT.md`. Kiro authored the pipeline source (`controlled-pipeline.ts`, driver, fixtures, tests, harness); an external assistant reviewed and tested it. No other provenance is claimed. This supersedes the earlier "written, not executed" entry for that request, which is left as history.
+
+Reported externally: test TypeScript build passed, focused tests and the full backend suite passed. On real Docker 29.9.2 with `node:22-alpine` and an offline cached `is-number@7.0.0` fixture: install/build/test succeeded; no-tests was correctly not-run (`tests-not-run`); failed build and failed test were reported as failures; a cache miss failed; a git dependency was rejected; a pre-aborted request was not-run; cleanup was proven. An original bug that reported success for no-tests was corrected before the final verification.
+
+Not shown: live jobs, repository acquisition integration, registry download, runtime agents, production safety.

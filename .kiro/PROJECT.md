@@ -207,3 +207,36 @@ Limits of this evidence:
 - One tiny controlled fixture only. Not production safe. No live worker, no real agents, no wiring to the server or jobs, no untrusted repositories.
 
 Authorship: Kiro wrote the code; an external assistant reviewed and tested it.
+
+
+
+
+## 2026-11-15: integrated controlled fixture pipeline (written by Kiro, NOT executed)
+
+Kiro made file edits only, ran nothing, and touched no frontend or dependency file. Added `backend/src/controlled-pipeline.ts` (host class `ControlledPipeline`: existing lock policy, staging of allowlisted fixture files plus the trusted compiled driver, one container with network none, non-root, caps dropped, read-only operator npm cache, bounded tmpfs `/work` and `/tmp`, `docker inspect` isolation check, proven cleanup, strict one-line JSON protocol, success/failure/not-run), `backend/src/controlled-pipeline-fixtures.ts` (generated trusted build/test scripts), a container entry point in `fixture-pipeline-driver.ts`, mock tests (`controlled-pipeline.test.ts`) and an opt-in harness (`manual-controlled-pipeline-check.ts`, `GRAVEYARD_MANUAL_CONTROLLED_PIPELINE=1`, operator-supplied is-number@7.0.0 fixture and cache, fails closed without them).
+
+Also fixed in `fixture-pipeline-driver.ts`: it used one empty file for both npm user and global config, which the earlier real run showed npm rejects. It now uses two distinct empty files.
+
+Status: unverified. Pending external `tsc` (both configs), the full suite, and the opt-in real Docker run (success, fail build, fail test, cache miss, cleanup). Not wired to the server, worker or any job; controlled fixtures only; no user projects; not production security. Record external results here when available. Details: `backend/DEVELOPMENT.md`.
+
+
+
+## 2026-11-15: integrated controlled fixture pipeline (externally verified, narrow)
+
+Docs-only update; Kiro ran no commands and changed no source (no shell). Recorded from the user's external checks. This supersedes the "written by Kiro, NOT executed" and "unverified" status of the integrated controlled fixture pipeline section above, which is left as history. Earlier "pending" notes for it are superseded.
+
+- Test TypeScript build passed.
+- Focused tests and the full backend suite passed (counts not supplied to Kiro).
+- Real Docker 29.9.2 with local `node:22-alpine`, offline cached `is-number@7.0.0` fixture, through the opt-in harness:
+  - success case: install, build and test all succeeded;
+  - no-tests case: correctly reported not-run (`tests-not-run`), not a success;
+  - failed build and failed test cases: reported as failures;
+  - cache miss: reported as an install failure;
+  - git-dependency lockfile: rejected by the policy;
+  - pre-aborted request: not-run.
+- Cleanup was proven.
+- An original bug where the no-tests case reported success was corrected before the final verification; the passing results above include the correction.
+
+Authorship: Kiro wrote the source; an external assistant reviewed and ran the tests.
+
+Limits: controlled generated fixtures only. No live jobs, no repository acquisition integration, no registry download (the cache was prepopulated outside the sandbox), no runtime agents. Not wired to the server, worker or jobs. Not production safe and not evidence for arbitrary repositories.
