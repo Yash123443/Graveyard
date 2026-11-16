@@ -320,15 +320,174 @@ dependencies only), a lockfileVersion 3 `package-lock.json` with at most 8 flat 
 projects are reported as unsupported with the specific reason. That is a limit of this slice, not a statement
 about the repository.
 
-Everything else is explicit: an unpinned URL fails as `infrastructure-unavailable` (nothing fetched); a refused
+Everything else is explicit: an unpinned URL fails as `infrastructure-unavailable` (nothing fetched; unless unpinned
+intake below is enabled); a refused
 or unverifiable egress, missing Docker, a failed git step, unconfirmed cleanup or an inconclusive pipeline fails
 the job with no result; a tree rejected by the acquisition policy is reported as `unsupported-repository`.
+
+### Unpinned intake (opt-in, source inspection only)
+
+Set `GRAVEYARD_GITHUB_ALLOW_UNPINNED=1` (exactly `1`; `0` or unset is off; any other value is refused at startup)
+in addition to the complete GitHub flow configuration. Then a job for a valid `https://github.com/<owner>/<repo>`
+URL that is in **neither** the fixture catalog nor the pin catalog is no longer refused:
+
+- Precedence is fixture catalog, then operator pin, then unpinned. A pinned URL keeps the exact-SHA behaviour and the
+  full path above. A fixture URL never reaches git.
+- The worker fetches the remote's literal `HEAD` (shallow, depth 1) in the same guarded container (internal network,
+  github.com-only proxy, non-root, no capabilities, no credentials, redirects off, hardened git configuration). There
+  is no ref input: no branch, tag or user-chosen ref can be requested, and other hosts are rejected by URL validation.
+- `rev-parse --verify FETCH_HEAD^{commit}` must print exactly one lowercase 40-hex id; anything else is rejected. That
+  SHA is used for the tree audit, checkout, the checked-out HEAD verification and the root-file handoff.
+- The job **completes** with verdict `source-inspected` (result `outcome` `source-inspected`, `sourceKind`
+  `github-unpinned-head`). The result carries `source.commit` (the resolved immutable SHA, or `null` if source policy
+  rejected the tree before one was recorded), `inspection` (tree file count, bytes, skipped submodules), `analysis`
+  (`pinnedFlowCompatible` plus the exact findings from the manifest analysis, e.g. `no-build-script`), `executed: false`,
+  `requiresOperatorPin: true` and `operatorPin` (`{repoUrl, commit}` to paste into the pin catalog) when tree
+  inspection succeeds. A source-policy rejection includes its finding, has no pin suggestion, and stops before
+  the root files are read. Adding a pin does not bypass that policy.
+- Nothing else happens: no repository script runs, no dependency is fetched (no registry acquisition), no sandbox
+  container is created, no run directory is created, and **no agent runs, so no repository source is sent to Kiro**.
+  The four root files are only parsed as data. The result makes no claim that the repository builds, passes or is broken;
+  `pinnedFlowCompatible` only says whether the manifest fits the narrow supported class (and, without registry egress,
+  that it could not be run).
+- To build, test or repair a compatible repository, the operator adds the reported full SHA to
+  `GRAVEYARD_GITHUB_CATALOG` and the owner submits a new job. A moving HEAD is never executed.
+- Failures stay fail-closed: an unconfirmed acquisition cleanup, a missing resolved SHA, a git failure (private or
+  missing repository, timeout) or an unwritable fenced result fails or aborts the job with no result, exactly as for pins.
+  `cleanup()` proves the same git, sandbox and registry containers absent.
+- With this flag the pin catalog is optional (omitted means no pins). The runs root, git image and all
+  `GRAVEYARD_GITHUB_EGRESS_*` variables remain required and validated. The registry variables stay optional.
+- `GET /api/jobs/:id/result` is unchanged in shape. `source-inspected` is a new value of `outcome` for new results only;
+  existing results classify as before, and a stored `source-inspected` record that is not well formed (wrong `sourceKind`,
+  `executed` not `false`, `pinned` not `false`, or a commit that is not lowercase 40-hex or `null`) is shown as
+  `completed-without-result`. A client must tolerate an unknown `outcome`.
+- Limits: a public repository only; depth 1; the acquisition limits of `acquisition-policy.ts` (20,000 files, 100 MiB tree,
+  300 s total); four root files of at most 64 KiB each. Branches other than the default HEAD, private repositories and
+  submodules are not supported.
+
+### npm scripts mode (opt-in, pinned repositories only)
+
+The backend and test sources type-check. Runtime verification of this mode is pending.
+
+**Enablement.** Set `GRAVEYARD_GITHUB_NPM_SCRIPTS=1` (exactly `1`; `0` or unset is off; any other value is refused at
+startup) in addition to the complete GitHub flow configuration. It also requires `GRAVEYARD_GITHUB_CATALOG` (pins only;
+unpinned intake never executes anything) and all three `GRAVEYARD_REGISTRY_EGRESS_*` variables, and it needs the
+compiled `dist/npm-scripts-driver.js` (`pnpm run build`); startup refuses otherwise. With the flag off, a pinned
+repository whose `package.json` has `scripts` is reported as `unsupported-repository` exactly as before. The existing
+root `build.mjs` flow, fixtures and unpinned intake are unchanged; the new mode is only taken when `package.json`
+declares `scripts`, so the two profiles cannot overlap.
+
+**Supported profile** (anything else completes as `unsupported-repository` with the exact finding, nothing installed or run):
+
+- Root `package.json` with `scripts.build` and `scripts.test`, each a printable-ASCII one-liner of at most 300 characters.
+  The `npm init` placeholder test script is refused. `prebuild`, `postbuild`, `pretest` and `posttest` must not exist,
+  because the mode runs the named scripts with hooks disabled and would otherwise not run the project as its author intended.
+- The unchanged lock policy applies to both manifests: `checkNpmFixture` on the original (no `preinstall`, `install`,
+  `postinstall`, `prepare`, workspaces, overrides or git/url/file/alias specs) and `checkOperatorFixture` on the sanitized
+  manifest (lockfile v3, 1 to 8 flat unscoped registry packages with sha512 integrity, production dependencies only,
+  `package.json` limited to `name`, `version`, `private: true`, `description`, `license` and `dependencies`). In practice
+  this excludes projects with `devDependencies`, `type`, `main`, `bin` or `engines`, so most real projects are unsupported
+  in this slice. That is a limit of this increment, not a statement about a repository.
+- A source snapshot of at most 100 files, 1 MiB, 160 entries and 5 directory levels, with no submodules, no symlinks, no
+  `node_modules`, no root `.npmrc` or `npm-shrinkwrap.json`, and no `.gitattributes` export rules that change the archive.
+
+**Flow.** `cloning` (pinned commit through the github.com-only proxy, as before), `analyzing` (profile check; only a repository
+that passes it has anything exported), `building` (snapshot to host, registry acquisition, offline pipeline), `testing`
+(the Tester judges observed stages), result.
+
+1. The git container exports `git archive` of the pinned commit. The host validates the whole tar with the existing
+   `tar-extract.ts` and `archive-handoff.ts` (no links, safe paths, bounded, commit, file count and byte total equal to
+   the git container's own manifest), extracts it into a new `run-<hex>/src-<hex>` directory, and requires the extracted
+   `package.json` and `package-lock.json` to be byte-identical to the blobs that were analysed. No host execution.
+2. Dependency acquisition receives only the **sanitized manifest**: the original `package.json` with exactly the `scripts`
+   key removed, plus the unchanged lockfile. The existing registry-only proxy, lock integrity validation and cache
+   verification apply unchanged.
+3. The offline container (network `none`, uid 65532, all capabilities dropped, read-only root, no-new-privileges, `--pull never`,
+   512 MB, 1 CPU, 128 pids, 120 s) mounts the snapshot and the verified cache read-only. The in-container driver
+   (`npm-scripts-driver.ts`) copies the snapshot to a bounded tmpfs, installs with `npm ci --offline --ignore-scripts` using
+   the sanitized manifest, restores the original `package.json`, and runs exactly `npm run build --ignore-scripts` and
+   `npm run test --ignore-scripts` (fixed argv, no shell on the driver side). `--ignore-scripts` still runs the named
+   script but not pre/post hooks and never any dependency lifecycle script. Stage limits: install 40 s, build 30 s, test 30 s.
+   Before the test stage the driver verifies that `package.json`, `package-lock.json` and every test-like file (`test/`,
+   `tests/`, `__tests__/`, `spec/`, `*.test.*`, `*.spec.*`) are byte-identical to the snapshot; a build that rewrote them
+   makes the test stage fail as inconclusive instead of passing.
+4. The script commands themselves run through npm's own script shell inside that container. They are repository-authored;
+   the isolation above is what bounds them. The host never runs them.
+
+**Result.** `verdict` `verified` (install, build and test passed) or `repository-failing` (a stage exited nonzero), with
+`sourceKind` `github-pinned` and `runMode` `npm-scripts`, observed stage statuses, exit codes and durations, the declared
+script texts, snapshot digests and the fixed limits. Container output is not stored. Anything inconclusive (timeout,
+truncation, malformed protocol, `added N packages` mismatch, unconfirmed cleanup) fails the job as
+`infrastructure-unavailable`. `GET /api/jobs/:id/result` is unchanged: the outcome is `passing` or `failing-undiagnosed`,
+`repair.verified` is `false` and `repair.patchApplied` is `false`. No repair is ever claimed in this mode.
+
+**Kiro.** Not used in this mode. No Analyst or Fixer call is made, no repository source is sent to Kiro, and the repair
+verifier (root `build.mjs` only) is not used. `analyst` and `fixer` are stored as `not-applicable`.
+
+**Known limits (unverified).** `/work` is a `noexec` tmpfs, so a script that executes a `node_modules/.bin` entry directly
+cannot run and is reported as that stage failing; scripts that call `node <file>` or `node --test` are unaffected. Archive
+paths over 100 bytes need tar extension headers, which the extractor rejects, so such a repository is unsupported. Nothing in
+this mode has been compiled or run against real Docker or GitHub; `NODE_ENV` is `production` for install and build and
+`test` for the test stage.
+
+### Static site audit (pinned repositories, read-only; written without a shell, NOT compiled or run)
+
+A pinned repository with **no `package.json`** and a regular root `index.html` (for example a plain HTML/CSS/JS site) is
+audited instead of being reported as unsupported. There is no new setting: it is part of the GitHub flow and needs no
+registry egress. A repository with a `package.json` (usable or not) never enters this profile, so the `build.mjs` and
+npm-scripts dispatch is unchanged. A repository without a root `index.html` is still `unsupported-repository`.
+Unpinned intake is unchanged and does not audit.
+
+**What runs.** Inside the existing guarded acquisition container (the `afterCheckout` hook, `docker exec` argument arrays,
+non-root, no shell), `static-site-audit.ts` runs the existing `git ls-tree -r -l -z --full-tree <commit>` step, re-validates
+every NUL-separated record and path, requires the entry count to equal the acquisition manifest, and reads only regular
+`*.html`, `*.htm` and `*.css` blobs with `git cat-file blob <40-hex id>`. Images and every other blob are never read or
+copied. The host receives no checkout, archive or file copy, runs no repository code, makes no network request to any site
+asset, and sends nothing to Kiro. The usual acquisition size and policy checks and the cleanup proof of the acquisition
+container (and of the other containers in `cleanup()`) are enforced before the result is recorded.
+
+**Limits.** 40 HTML and 20 CSS files, 256 KiB per file, 2 MiB in total, 2,000 references per file, 60 findings, a 8 KiB
+tag, and the remaining acquisition time. A file over a limit is listed as not read (`oversize`, `file-count-limit`,
+`byte-budget`, `time-budget`), never truncated, and the scope finding says so. A failed or aborted git read, a malformed
+listing or a manifest mismatch fails the job as infrastructure with no result.
+
+**What is checked (partial scope).** `href` of `a`/`area`/`link`, `src` of `img`/`script`/`iframe`/`source`/`embed`/`video`/
+`audio`/`track`, `srcset` of `img`/`source`, `poster` of `video`, `url()` in inline `style` attributes, `<style>` elements and
+CSS files, and CSS `@import "..."`. HTML comments and the text of `script`, `style` (read as CSS), `textarea` and `title`
+never produce HTML references. References built by scripts, `#anchor` targets, other attributes and files not read are not
+checked. A `<base href>` makes that file's references unauditable (reported, not guessed).
+
+**Reference rules.** Entities are decoded; a scheme URL (`http:`, `mailto:`, `data:`, `javascript:`, ...) or `//host` is
+external and never requested; the fragment and query are dropped; each path segment is percent-decoded once (`%20` and
+literal spaces match a file with a space; an encoded `/`, `\` or control character is `unsafe-reference-path`); `.`/`..`
+are collapsed and a path above the repository root is `reference-escapes-site-root` and is never looked up. Root-relative
+paths resolve from the repository root, which is the site root only when the site is served from the root. Matching is
+case-sensitive; a difference only in letter case is `case-mismatch-reference`. A directory or an extensionless page link
+resolves through `<dir>/index.html` or `<path>.html` for pages only.
+
+**Result.** Verdict `static-site-audited` (`sourceKind` `github-pinned`, `profile` `static-site`, `executed: false`,
+`repairAttempted: false`). `GET /api/jobs/:id/result` returns outcome `static-site-audited`, `repair.verified: false`,
+`repair.patchApplied: false`, no diff. Findings are in `result.analysis.findings` (`code`, `detail`), the same place the
+workspace already reads, with a `static-site-scope` finding first (what was read and what was not). Other codes are
+`missing-local-page`, `missing-local-asset`, `case-mismatch-reference`, `reference-escapes-site-root`,
+`unsafe-reference-path` and `base-href-not-audited`. Counts and the not-read list are in `result.audit`. The findings are
+diagnostics, not a repair, and the outcome is neither a pass nor a statement that the site works: no findings is reported
+the same way. A client must tolerate the new `outcome` value (the workspace shows it as an unrecognised result with the
+backend's summary text until the UI is updated).
+
+
+### Kiro usage in this flow
+
+Kiro (the agent adapter, `GRAVEYARD_WORKER_AGENTS`) is never invoked for `source-inspected` jobs and receives no unpinned
+source. It runs only for pinned or fixture jobs, as before, on bounded redacted evidence of a failing build. The code of
+this milestone was written by Kiro CLI in one bounded request without running any tool; see `.kiro/KIRO_USAGE.md`.
 
 ### Variables
 
 | Variable | Meaning |
 |---|---|
-| `GRAVEYARD_GITHUB_CATALOG` | Absolute path of a JSON file `{ "<canonical repo URL>": "<40-hex commit>" }` (at most 50 entries, 16 KiB). A URL may not also be in the fixture catalog. Setting any variable below requires this one. |
+| `GRAVEYARD_GITHUB_CATALOG` | Absolute path of a JSON file `{ "<canonical repo URL>": "<40-hex commit>" }` (at most 50 entries, 16 KiB). A URL may not also be in the fixture catalog. Setting any variable below requires this one, unless `GRAVEYARD_GITHUB_ALLOW_UNPINNED=1`. |
+| `GRAVEYARD_GITHUB_ALLOW_UNPINNED` | Optional, exactly `1` or `0` (default off). Enables source-inspection-only intake of URLs in neither catalog (see "Unpinned intake"). Makes the pin catalog optional; every other requirement stays. |
 | `GRAVEYARD_GITHUB_RUNS_ROOT` | Existing worker-owned directory, separate from the fixtures, staging and cache roots. One `run-<hex>` directory per job, removed before the job ends. |
 | `GRAVEYARD_GITHUB_GIT_IMAGE` | Set this to a locally provisioned image with `git` and `sleep` and no declared Docker volumes. The worker never pulls it. The current fallback, `alpine/git:2.47.2`, declares `/git` and fails the acquisition mount check. |
 | `GRAVEYARD_GITHUB_EGRESS_NETWORK`, `_PROXY_CONTAINER`, `_PROXY_URL` | Required. Internal network, proxy container name and `http://<private IPv4>:<port>` of the github.com-only proxy. |

@@ -36,6 +36,7 @@ import { PipelineJobRunner, REPOSITORY_UNSUPPORTED_REASON, type AgentsLike, type
 import { WorkerConfigError, loadWorkerConfig, parsePins } from "../worker-config.js";
 import { composeWorker } from "../worker-compose.js";
 import { operatorDoc, textsOf } from "./operator-fixture-helpers.js";
+import { auditStaticSite, parseSiteTree, type StaticSiteRead } from "../static-site-audit.js";
 
 const REPO = "https://github.com/o/r";
 const FIXTURE_REPO = "https://github.com/f/fixture";
@@ -119,7 +120,7 @@ class FakeAgents implements AgentsLike {
   }
 }
 
-const acquired = (): AcquisitionResult => ({
+const acquired = (): Extract<AcquisitionResult, { kind: "acquired" }> => ({
   kind: "acquired",
   commit: COMMIT,
   manifest: { files: 3, totalBytes: 100, submodulesSkipped: 0 },
@@ -196,6 +197,12 @@ function makeRig(opts: {
   make?: (req: PipelineRequest) => ControlledPipelineResult;
   agents?: AgentsLike;
   files?: RootFiles;
+  /** Enables unpinned intake on the runner. */
+  allowUnpinned?: boolean;
+  /** Replaces the default pins (REPO and FIXTURE_REPO at COMMIT). */
+  pins?: Map<string, string>;
+  /** Enables the static site audit seam on the runner. */
+  readStaticSite?: (info: HandoffInfo) => Promise<StaticSiteRead>;
 } = {}): Rig {
   const runsRoot = join(tmp, "runs");
   mkdirSync(runsRoot, { recursive: true });
@@ -245,11 +252,13 @@ function makeRig(opts: {
   const runner = new GithubJobRunner({
     fallback,
     fixtureUrls: new Set([FIXTURE_REPO]),
-    pins: new Map([[REPO, COMMIT], [FIXTURE_REPO, COMMIT]]),
+    pins: opts.pins ?? new Map([[REPO, COMMIT], [FIXTURE_REPO, COMMIT]]),
+    ...(opts.allowUnpinned === undefined ? {} : { allowUnpinned: opts.allowUnpinned }),
     runsRoot,
     gitImage: "alpine/git:2.47.2",
     makeGit: gitLike,
     readRootFiles: () => Promise.resolve(git.files),
+    ...(opts.readStaticSite === undefined ? {} : { readStaticSite: opts.readStaticSite }),
     registry:
       registry === null
         ? null
@@ -558,6 +567,71 @@ describe("GithubJobRunner through JobWorker: unsupported repository", () => {
     assert.equal(result["verdict"], "unsupported-repository");
     assert.deepEqual(findingCodes(result), ["source-policy-rejected"]);
     assert.equal(rig.git.hookCalls, 0);
+  });
+});
+
+describe("GithubJobRunner through JobWorker: static site audit", () => {
+  const noPackage: RootFiles = { packageJson: null, packageLock: null, buildMjs: null, testMjs: null, unusable: [] };
+  const audited = (): StaticSiteRead => ({
+    kind: "audited",
+    audit: auditStaticSite(
+      parseSiteTree(`100644 blob ${"1".repeat(40)} 10\tindex.html\0`),
+      [{ path: "index.html", kind: "html", text: '<img src="gone.png">' }],
+      [],
+      { html: 1, css: 0 },
+    ),
+  });
+
+  it("completes a pinned repository with no package.json as static-site-audited and runs nothing", async () => {
+    let calls = 0;
+    const rig = makeRig({ files: noPackage, readStaticSite: () => { calls += 1; return Promise.resolve(audited()); } });
+    const id = newJob();
+    assert.deepEqual(await rig.worker.runOnce(), { kind: "finished", jobId: id, outcome: "completed" });
+    assert.equal(calls, 1);
+    assert.deepEqual(stageNames(id), ["cloning", "analyzing"]);
+    assert.equal(rig.registry?.requests.length, 0);
+    assert.equal(rig.pipeline.requests.length, 0);
+    assert.equal(rig.makePipelineCalls.length, 0);
+    assert.deepEqual(readdirSync(rig.runsRoot), []);
+
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "static-site-audited");
+    assert.equal(result["sourceKind"], "github-pinned");
+    assert.equal(result["executed"], false);
+    assert.deepEqual(findingCodes(result), ["static-site-scope", "missing-local-asset"]);
+    const view = presentResult({ jobId: id, stage: "done", status: "completed", attemptCount: 1, maxAttempts: 2, infraError: null, result });
+    assert.equal(view.outcome, "static-site-audited");
+    assert.equal(view.repair.verified, false);
+  });
+
+  it("keeps the unsupported-repository answer when there is no regular root index.html", async () => {
+    const rig = makeRig({ files: noPackage, readStaticSite: () => Promise.resolve<StaticSiteRead>({ kind: "not-static-site" }) });
+    const id = newJob();
+    await rig.worker.runOnce();
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "unsupported-repository");
+    assert.deepEqual(findingCodes(result), ["no-package-json", "no-package-lock", "no-build-script"]);
+  });
+
+  it("is not consulted when a package.json exists or is unusable (npm and build.mjs dispatch unchanged)", async () => {
+    let calls = 0;
+    const read = (): Promise<StaticSiteRead> => { calls += 1; return Promise.resolve(audited()); };
+    const supported = makeRig({ readStaticSite: read });
+    newJob();
+    await supported.worker.runOnce();
+    const unusable = makeRig({ files: { ...noPackage, unusable: ["package.json"] }, readStaticSite: read });
+    newJob();
+    await unusable.worker.runOnce();
+    assert.equal(calls, 0);
+    assert.equal(supported.pipeline.requests.length, 1);
+  });
+
+  it("fails the job as infrastructure when the audit read fails, with no result", async () => {
+    const rig = makeRig({ files: noPackage, readStaticSite: () => Promise.reject(new Error("a git read failed")) });
+    const id = newJob();
+    await rig.worker.runOnce();
+    assert.equal(row(id)["status"], "failed");
+    assert.equal(resultOf(id), null);
   });
 });
 
@@ -885,6 +959,31 @@ describe("GitHub worker configuration", () => {
     assert.ok(has(problemsOf(() => loadWorkerConfig(env({ GRAVEYARD_GITHUB_RUNS_ROOT: p("runs") }), deps())), "GRAVEYARD_GITHUB_CATALOG"));
   });
 
+  it("makes the pin catalog optional only with GRAVEYARD_GITHUB_ALLOW_UNPINNED=1, keeping every egress setting required", () => {
+    const c = loadWorkerConfig(full({ GRAVEYARD_GITHUB_CATALOG: undefined, GRAVEYARD_GITHUB_ALLOW_UNPINNED: "1" }), deps());
+    assert.equal(c.github?.allowUnpinned, true);
+    assert.deepEqual(c.github?.pins, {});
+    // Pins are still read when both are given.
+    const both = loadWorkerConfig(full({ GRAVEYARD_GITHUB_ALLOW_UNPINNED: "1" }), deps());
+    assert.deepEqual(both.github?.pins, { [REPO]: COMMIT });
+    // Off by default and when 0.
+    assert.equal(loadWorkerConfig(full(), deps()).github?.allowUnpinned, false);
+    assert.equal(loadWorkerConfig(full({ GRAVEYARD_GITHUB_ALLOW_UNPINNED: "0" }), deps()).github?.allowUnpinned, false);
+    // Without the flag the catalog is still required.
+    assert.ok(has(problemsOf(() => loadWorkerConfig(full({ GRAVEYARD_GITHUB_CATALOG: undefined }), deps())), "GRAVEYARD_GITHUB_CATALOG"));
+    assert.ok(has(problemsOf(() => loadWorkerConfig(full({ GRAVEYARD_GITHUB_CATALOG: undefined, GRAVEYARD_GITHUB_ALLOW_UNPINNED: "0" }), deps())), "GRAVEYARD_GITHUB_CATALOG"));
+    // The flag alone does not enable anything: runs root and github.com egress remain required.
+    const alone = problemsOf(() => loadWorkerConfig(env({ GRAVEYARD_GITHUB_ALLOW_UNPINNED: "1" }), deps()));
+    assert.ok(has(alone, "GRAVEYARD_GITHUB_RUNS_ROOT is required"));
+    assert.ok(has(alone, "GRAVEYARD_GITHUB_EGRESS_NETWORK"));
+  });
+
+  it("refuses any value of GRAVEYARD_GITHUB_ALLOW_UNPINNED other than exactly 1 or 0", () => {
+    for (const bad of ["true", "yes", " 1", "1 ", "2", ""]) {
+      assert.ok(has(problemsOf(() => loadWorkerConfig(full({ GRAVEYARD_GITHUB_ALLOW_UNPINNED: bad }), deps())), "GRAVEYARD_GITHUB_ALLOW_UNPINNED"), JSON.stringify(bad));
+    }
+  });
+
   it("refuses a missing runs root and missing egress settings", () => {
     const noRuns = problemsOf(() => loadWorkerConfig(full({ GRAVEYARD_GITHUB_RUNS_ROOT: undefined }), deps()));
     assert.ok(has(noRuns, "GRAVEYARD_GITHUB_RUNS_ROOT is required"));
@@ -1056,5 +1155,161 @@ describe("composeWorker with the GitHub flow", () => {
     assert.equal(c.github, null);
     const composed = composeWorker(c, { pipeline: new FakePipeline(successResult), openDb: () => openDatabase(":memory:"), executor: emptyDocker });
     composed.close();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Unpinned intake (source inspection only)
+// ---------------------------------------------------------------------------
+
+describe("GithubJobRunner: unpinned intake", () => {
+  const OTHER = "https://github.com/x/y";
+  const unpinnedAcquired = (): AcquisitionResult => ({ ...acquired(), resolvedFromHead: true });
+
+  it("is off by default: an unknown URL goes to the fallback and nothing is fetched", async () => {
+    const rig = makeRig();
+    const id = newJob(OTHER);
+    const res = await rig.worker.runOnce();
+    assert.deepEqual(res, { kind: "finished", jobId: id, outcome: "failed" });
+    assert.equal(rig.git.requests.length, 0);
+    assert.equal(infraOf(id)?.kind, "infrastructure-unavailable");
+  });
+
+  it("resolves HEAD, reports the immutable SHA and the manifest findings, and runs, installs and sends nothing", async () => {
+    const agents = new FakeAgents();
+    const rig = makeRig({ allowUnpinned: true, agents });
+    rig.git.script = unpinnedAcquired;
+    const id = newJob(OTHER);
+    const res = await rig.worker.runOnce();
+    assert.deepEqual(res, { kind: "finished", jobId: id, outcome: "completed" });
+
+    assert.equal(rig.git.requests.length, 1);
+    const q = rig.git.requests[0] as AcquisitionRequest;
+    assert.equal(q.repoUrl, OTHER);
+    assert.equal(q.resolveHead, true);
+    assert.equal(q.commit, undefined, "no SHA, branch or ref is supplied for unpinned intake");
+    assert.equal(rig.git.hookCalls, 1);
+
+    assert.equal(rig.registry?.requests.length, 0, "no dependency fetch");
+    assert.equal(rig.makePipelineCalls.length, 0);
+    assert.equal(rig.pipeline.requests.length, 0, "no sandbox run");
+    assert.equal(rig.fixturePipeline.requests.length, 0);
+    assert.equal(agents.analyses.length, 0, "no source is sent to an agent");
+    assert.deepEqual(stageNames(id), ["cloning", "analyzing"]);
+    assert.deepEqual(readdirSync(rig.runsRoot), []);
+
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "source-inspected");
+    assert.equal(result["sourceKind"], "github-unpinned-head");
+    assert.equal(result["executed"], false);
+    assert.equal(result["requiresOperatorPin"], true);
+    assert.deepEqual(result["source"], { repoUrl: OTHER, commit: COMMIT, resolvedFrom: "HEAD", pinned: false });
+    assert.deepEqual(result["operatorPin"], { repoUrl: OTHER, commit: COMMIT });
+    assert.equal((result["analysis"] as Record<string, unknown>)["pinnedFlowCompatible"], true);
+    assert.equal(result["tester"], undefined);
+    assert.equal(result["pipeline"], undefined);
+
+    const view = presentResult({ jobId: id, stage: "done", status: "completed", attemptCount: 1, maxAttempts: 2, infraError: null, result });
+    assert.equal(view.outcome, "source-inspected");
+    assert.equal(view.repair.verified, false);
+    assert.equal(view.repair.patchApplied, false);
+    assert.equal(view.verifiedDiff, null);
+  });
+
+  it("reports unsupported manifest findings under source-inspected, not unsupported-repository", async () => {
+    const rig = makeRig({ allowUnpinned: true, files: { ...supportedFiles(), buildMjs: null } });
+    rig.git.script = unpinnedAcquired;
+    const id = newJob(OTHER);
+    await rig.worker.runOnce();
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "source-inspected");
+    assert.deepEqual(findingCodes(result), ["no-build-script"]);
+    assert.equal((result["analysis"] as Record<string, unknown>)["pinnedFlowCompatible"], false);
+  });
+
+  it("a tree rejected by source policy completes as source-inspected with the resolved SHA when known", async () => {
+    const rig = makeRig({ allowUnpinned: true });
+    rig.git.script = (req) => ({ kind: "source-rejected", reason: "tree contains a symbolic link", commit: COMMIT, cleanup: okProof(req.executionId) });
+    const id = newJob(OTHER);
+    await rig.worker.runOnce();
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "source-inspected");
+    assert.deepEqual(findingCodes(result), ["source-policy-rejected"]);
+    assert.equal((result["source"] as Record<string, unknown>)["commit"], COMMIT);
+    assert.equal(result["inspection"], null);
+    assert.equal(result["operatorPin"], null, "a pin would not bypass a source-policy block");
+    assert.equal(result["requiresOperatorPin"], false);
+    assert.equal(rig.git.hookCalls, 0);
+
+    const rig2 = makeRig({ allowUnpinned: true });
+    rig2.git.script = (req) => ({ kind: "source-rejected", reason: "fetched HEAD did not resolve", cleanup: okProof(req.executionId) });
+    const id2 = newJob(OTHER);
+    await rig2.worker.runOnce();
+    const r2 = resultOf(id2) as Record<string, unknown>;
+    assert.equal((r2["source"] as Record<string, unknown>)["commit"], null);
+    assert.equal(r2["operatorPin"], null);
+  });
+
+  it("keeps precedence: a pin is fetched by SHA and takes the full path, a fixture URL never reaches git", async () => {
+    const rig = makeRig({ allowUnpinned: true });
+    const id = newJob(REPO);
+    await rig.worker.runOnce();
+    const q = rig.git.requests[0] as AcquisitionRequest;
+    assert.equal(q.commit, COMMIT);
+    assert.equal(q.resolveHead, undefined);
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "verified");
+    assert.equal(result["sourceKind"], "github-pinned");
+
+    const rig2 = makeRig({ allowUnpinned: true });
+    newJob(FIXTURE_REPO);
+    await rig2.worker.runOnce();
+    assert.equal(rig2.git.requests.length, 0);
+    assert.equal(rig2.fixturePipeline.requests.length, 1);
+  });
+
+  it("works with an empty pin catalog", async () => {
+    const rig = makeRig({ allowUnpinned: true, pins: new Map() });
+    rig.git.script = unpinnedAcquired;
+    const id = newJob(OTHER);
+    await rig.worker.runOnce();
+    assert.equal((resultOf(id) as Record<string, unknown>)["verdict"], "source-inspected");
+  });
+
+  it("fails closed without a result when cleanup is unconfirmed, the SHA was not reported as resolved, or acquisition failed", async () => {
+    const cases: Array<(req: AcquisitionRequest) => AcquisitionResult> = [
+      () => ({ kind: "failed", step: "fetch", reason: "boom", cleanup: { confirmed: false, reason: "container still present" } }),
+      () => acquired(), // acquired but not marked resolvedFromHead
+      (req) => ({ kind: "failed", step: "fetch", reason: "repository not found", cleanup: okProof(req.executionId) }),
+      () => ({ kind: "network-unavailable", reason: "egress not verified", cleanup: null }),
+    ];
+    for (const c of cases) {
+      const rig = makeRig({ allowUnpinned: true });
+      rig.git.script = c;
+      const id = newJob(OTHER);
+      const res = await rig.worker.runOnce();
+      assert.deepEqual(res, { kind: "finished", jobId: id, outcome: "failed" }, String(cases.indexOf(c)));
+      assert.equal(resultOf(id), null);
+      assert.equal(rig.registry?.requests.length, 0);
+      assert.equal(rig.pipeline.requests.length, 0);
+    }
+  });
+
+  it("the result view does not accept a forged or malformed source-inspected record", () => {
+    const base = {
+      verdict: "source-inspected",
+      sourceKind: "github-unpinned-head",
+      executed: false,
+      source: { repoUrl: OTHER, commit: COMMIT, resolvedFrom: "HEAD", pinned: false },
+    };
+    const view = (result: Record<string, unknown>): string =>
+      presentResult({ jobId: "j", stage: "done", status: "completed", attemptCount: 1, maxAttempts: 2, infraError: null, result }).outcome;
+    assert.equal(view(base), "source-inspected");
+    assert.equal(view({ ...base, sourceKind: "github-pinned" }), "completed-without-result");
+    assert.equal(view({ ...base, executed: true }), "completed-without-result");
+    assert.equal(view({ ...base, source: { ...base.source, pinned: true } }), "completed-without-result");
+    assert.equal(view({ ...base, source: { ...base.source, commit: "main" } }), "completed-without-result");
+    assert.equal(view({ ...base, source: { ...base.source, commit: COMMIT.toUpperCase() } }), "completed-without-result");
   });
 });

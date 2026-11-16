@@ -23,6 +23,15 @@
  * The GitHub flow part was written without a shell and later compiled and unit-tested (fakes) in an
  * external run; it has not run against real Docker or GitHub.
  *
+ * npm-scripts mode (only when config.github.npmScripts is true, GRAVEYARD_GITHUB_NPM_SCRIPTS=1; written
+ * without a shell, NOT compiled or run): additionally wires the bounded snapshot export
+ * (npm-scripts-snapshot.ts) and NpmScriptsPipeline (npm-scripts-pipeline.ts) into GithubJobRunner.
+ * Startup also refuses when the compiled npm-scripts-driver.js is missing. Off by default.
+ *
+ * Static site audit (always wired with the GitHub flow; read-only, no new egress or container):
+ * readStaticSite (static-site-audit.ts) lists the tree and reads capped HTML/CSS blobs in the git
+ * acquisition container for a pinned repository with no package.json and a root index.html.
+ *
  * Test seams (`pipeline`, `cleanupExecution`, `agents`, `executor`, `agentExecutor`, `workerOptions`)
  * exist so the loop, authorization and result flow can be tested with fakes. The real entry point
  * (worker-main.ts) passes none of them except `log`.
@@ -42,8 +51,11 @@ import { KiroAgentAdapter, spawnAgentProcess, type AgentProcessExecutor } from "
 import { GitAcquisition } from "./git-acquisition.js";
 import { OperatorEgressGuard } from "./egress-guard.js";
 import { NpmRegistryAcquisition } from "./npm-registry-acquisition.js";
-import { GithubJobRunner, type GithubRunnerOptions } from "./github-runner.js";
+import { GithubJobRunner, type GithubRunnerOptions, type NpmScriptsOptions } from "./github-runner.js";
 import { readRootFiles } from "./github-source.js";
+import { readStaticSite } from "./static-site-audit.js";
+import { NpmScriptsPipeline } from "./npm-scripts-pipeline.js";
+import { exportSnapshot, spawnBytesExecutor } from "./npm-scripts-snapshot.js";
 import {
   PipelineJobRunner,
   createCatalogResolver,
@@ -71,7 +83,7 @@ export interface ComposeDeps {
   /** Test seam: the pipeline used to verify a repair on a disposable copy (see repair-verifier.ts). */
   repairPipeline?: (cloneRoot: string) => PipelineLike | null;
   /** Test seams for the GitHub flow (only used when config.github is set). */
-  githubSeams?: Partial<Pick<GithubRunnerOptions, "makeGit" | "readRootFiles" | "registry" | "makePipeline">>;
+  githubSeams?: Partial<Pick<GithubRunnerOptions, "makeGit" | "readRootFiles" | "readStaticSite" | "registry" | "makePipeline" | "npmScripts">>;
   workerOptions?: Partial<Pick<WorkerOptions, "timers" | "now" | "leaseMs" | "heartbeatMs" | "abortGraceMs" | "cleanupTimeoutMs">>;
   maxBackoffMs?: number;
 }
@@ -143,11 +155,15 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
   }
   const github = config.github ?? null;
   const seams = deps.githubSeams ?? {};
+  const scriptsDriverPath = join(dirname(fileURLToPath(import.meta.url)), "npm-scripts-driver.js");
   if (github !== null) {
     realDirectory("GRAVEYARD_GITHUB_RUNS_ROOT", github.runsRoot, problems);
     const registryDriver = join(dirname(fileURLToPath(import.meta.url)), "npm-acquire-driver.js");
     if (github.registryEgress !== null && seams.registry === undefined && !isRegularFile(registryDriver)) {
       problems.push("the compiled registry driver (npm-acquire-driver.js) was not found; run the build first");
+    }
+    if (github.npmScripts === true && seams.npmScripts === undefined && !isRegularFile(scriptsDriverPath)) {
+      problems.push("the compiled npm-scripts driver (npm-scripts-driver.js) was not found; run the build first");
     }
   }
   if (problems.length > 0) throw new Error(`worker startup refused:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
@@ -236,14 +252,34 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
                 egress: new OperatorEgressGuard({ executor, host: "registry.npmjs.org", ...github.registryEgress }),
                 stagingRoot: config.stagingRoot,
               });
+      // Opt-in npm-scripts mode: off unless the operator set GRAVEYARD_GITHUB_NPM_SCRIPTS=1 (or a test seam is injected with it).
+      const scriptsOptions: NpmScriptsOptions | undefined =
+        github.npmScripts !== true
+          ? undefined
+          : (seams.npmScripts ?? {
+              exportSnapshot: (info, runDir, expect) => exportSnapshot(spawnBytesExecutor, info, runDir, expect),
+              makePipeline: (a) =>
+                new NpmScriptsPipeline({
+                  executor,
+                  runDir: a.runDir,
+                  snapshot: a.snapshot,
+                  cacheDir: a.cacheDir,
+                  installManifest: a.installManifest,
+                  expectedPackages: a.expectedPackages,
+                  driverPath: scriptsDriverPath,
+                }),
+            });
       runner = new GithubJobRunner({
         fallback: fixtureRunner,
         fixtureUrls: new Set(Object.keys(config.catalog)),
         pins: new Map(Object.entries(github.pins)),
+        allowUnpinned: github.allowUnpinned === true,
         runsRoot: github.runsRoot,
         gitImage: github.gitImage,
         makeGit,
         readRootFiles: seams.readRootFiles ?? ((info) => readRootFiles(executor, info)),
+        // Read-only static site audit (static-site-audit.ts), used only for a pin with no package.json.
+        readStaticSite: seams.readStaticSite ?? ((info) => readStaticSite(executor, info)),
         registry,
         makePipeline:
           seams.makePipeline ??
@@ -251,6 +287,8 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
             new ControlledPipeline({ executor, fixturesRoot: runDir, stagingRoot: config.stagingRoot, cacheDir, driverPath })),
         cleanupExecution,
         ...(agents === undefined ? {} : { agents }),
+        // Opt-in npm-scripts mode (see scriptsOptions above); absent unless explicitly enabled.
+        ...(scriptsOptions === undefined ? {} : { npmScripts: scriptsOptions }),
       });
     }
     const worker = new JobWorker({ db, workerId: config.workerId, runner, ...(deps.workerOptions ?? {}) });

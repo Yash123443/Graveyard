@@ -1378,3 +1378,108 @@ Kiro also added exact new-side hunk coordinate validation and checks that the wo
 - Change in `src/kiro-agent.ts`: `buildKiroArgs(cfg)` no longer takes or emits a prompt. argv is now only `chat --no-interactive --trust-tools= --wrap never [--agent X] [--model Y]`. stdin is the fixed role instructions (with the per-call nonce markers), a blank line, then the existing bounded, redacted evidence packet. Trust-none, no shell, controlled empty cwd, minimal env, nonce delimiters, size limits, timeout and strict output validation are unchanged.
 - `src/test/kiro-agent.test.ts`: asserts the exact argv (no positional input), that instructions, markers and evidence are on stdin in that order and absent from argv, for both Analyst and Fixer.
 - Both TypeScript builds and the backend test suite passed. The standalone live harness passed on Docker Desktop 29.9.2 with the signed-in Kiro CLI and the local single-package fixture. The job returned `repair-verified` after both agent responses passed validation and the patched copy passed its original tests. The exact verified diff was 237 bytes. The harness checked the original files, result ownership and resource cleanup. The live GitHub fixture path still needs a separate run.
+
+## 2026-11-16: unpinned public GitHub intake, source inspection only (written by Kiro; NOT compiled, NOT run)
+
+Written without any shell or test run, at the user's request. Everything below is unverified until external
+results are logged here.
+
+Files changed (backend only): `src/acquisition-policy.ts` (`gitSteps.fetchHead`, `gitSteps.resolveFetchHead`,
+`validateRepoOnly`, `parseResolvedSha`), `src/git-acquisition.ts` (request field `resolveHead: true`, mutually
+exclusive with `commit`; `acquired.resolvedFromHead`; `source-rejected.commit` in unpinned mode only),
+`src/github-runner.ts` (`allowUnpinned`, `runUnpinned`, verdict `source-inspected`), `src/result-view.ts` (outcome
+`source-inspected`, strict well-formedness check), `src/worker-config.ts` (`GRAVEYARD_GITHUB_ALLOW_UNPINNED`,
+`GithubConfig.allowUnpinned`, optional pin catalog only with the flag), `src/worker-compose.ts` (passes the flag),
+`README.md`, `.env.example`, `.kiro/KIRO_USAGE.md`, `.kiro/steering/tech.md`. Tests added (not run):
+`src/test/git-acquisition.test.ts` ("unpinned HEAD intake"), `src/test/github-runner.test.ts` (config cases and
+"unpinned intake" runner cases; the rig gained `allowUnpinned` and `pins` options).
+
+Behaviour: pinned acquisition is unchanged (same git steps and arguments). Unpinned acquisition runs `git fetch
+--depth=1 --no-tags -- <canonical url> HEAD` through the same hardened container, resolves `FETCH_HEAD^{commit}`, requires
+exactly one lowercase 40-hex id and uses it for `ls-tree`, `checkout`, the HEAD check and the root-file handoff. The
+runner never creates a run directory, registry acquisition, pipeline or agent call for an unpinned job.
+
+Not verified: that `git fetch <url> HEAD` behaves as intended against real GitHub through the proxy (including
+redirect refusal for renamed repositories), the exact `rev-parse` output on the real image, compile errors, and every
+new test. Run `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json` and `node --test dist-test/test/*.js`, then record results.
+
+
+## 2026-11-16: opt-in npm scripts mode for pinned repositories (written by Kiro; NOT compiled, NOT run)
+
+Written without any shell or test run, at the user's request. Everything below is unverified until external
+results are logged here. The user will run the build and the tests.
+
+Files added (backend only): `src/npm-scripts-policy.ts` (pure profile check and manifest sanitizer),
+`src/npm-scripts-snapshot.ts` (bounded `git archive` export through the existing tar and archive handoff),
+`src/npm-scripts-driver.ts` (trusted in-container driver, self-contained, same protocol as the fixture pipeline),
+`src/npm-scripts-pipeline.ts` (host side over `DockerFixtureSandbox`, `classifyPipeline`), `src/npm-scripts-flow.ts`
+(pure result building), `src/test/npm-scripts.test.ts` (focused regression tests). Files changed: `src/github-runner.ts`
+(`npmScripts` option, `runNpmScripts`), `src/worker-config.ts` (`GRAVEYARD_GITHUB_NPM_SCRIPTS`, `GithubConfig.npmScripts`),
+`src/worker-compose.ts` (wiring, startup check for `npm-scripts-driver.js`, `githubSeams.npmScripts` test seam),
+`src/pipeline-runner.ts` (`projectPipeline` is now exported; nothing else), `README.md` ("npm scripts mode"), `.env.example`.
+No UI, dependency or lockfile change. `result-view.ts`, the repair verifier, the Kiro adapter and the root `build.mjs`
+flow are untouched.
+
+Behaviour. Default off. With `GRAVEYARD_GITHUB_NPM_SCRIPTS=1` (requires the pin catalog and the registry egress
+variables), a PINNED repository whose root `package.json` declares `scripts` is checked against a narrow profile
+(`scripts.build` and `scripts.test`, no pre/post hooks of them, unchanged lock policy on the original manifest and
+`checkOperatorFixture` on the manifest with only `scripts` removed, at most 100 files / 1 MiB / 160 entries / 5 levels).
+Only a repository that passes has its tree exported. Dependencies are acquired from the sanitized manifest and the
+unchanged lock through the existing registry proxy and cache verification; the offline network-none container then
+runs `npm ci --offline --ignore-scripts`, restores the original `package.json`, and runs `npm run build` and
+`npm run test` with `--ignore-scripts` (named scripts run, hooks and dependency lifecycle scripts do not). Before the test
+stage package.json, the lockfile and test-like files must be byte-identical to the snapshot. Stored result: verdict
+`verified` or `repository-failing`, `runMode: "npm-scripts"`, no Analyst, Fixer or verification record. The result API is
+unchanged (`passing` or `failing-undiagnosed`, `repair.verified: false`). Kiro is not used in this mode.
+
+Fences and cleanup. The sandbox container uses the same execution id label as the other pipelines, so the existing
+cleanup proof covers it. The run directory (snapshot, driver, install manifest, cache) is removed with `removeRunDir`;
+the snapshot bounds are chosen under that function's own depth (6) and entry (500) limits, and a removal failure turns a
+completed run into an infrastructure failure, as before. The two files the host stages into the snapshot are removed
+after the run and count as "staging removed" in the pipeline evidence.
+
+Not verified: compile errors in any new file; every new test; that `npm run` honours `--ignore-scripts` as documented on
+the pinned `node:22-alpine` npm; that npm accepts the handed-over cache for `npm ci --offline` with a multi-package lock
+(also unverified for the build.mjs flow); that `git archive` output from the real `alpine/git` container passes the tar
+extractor and the manifest comparison; the noexec `/work` tmpfs limit on scripts that run `node_modules/.bin` entries; and
+real Docker and GitHub behaviour of any step. Run `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json` and
+`node --test dist-test/test/*.js`, then record the results here and in `.kiro/PROJECT.md`.
+
+
+
+## 2026-11-16: read-only static site audit profile for pinned repositories (written by Kiro; NOT compiled, NOT run)
+
+Written without any shell or test run, at the user's request. Everything below is unverified until external results are
+logged here. Target that motivated it: `Yash123443/mumbai-tour` at `6d193fab40659cb5c568855f8294abf324adc4ea` (static
+HTML/CSS/JS, no `package.json`, root `index.html`, image paths with spaces and escapes). Kiro did not clone, fetch or
+modify that repository; nothing was committed or pushed.
+
+Files added (backend only): `src/static-site-audit.ts` (tree parsing, reference resolution, HTML and CSS extraction, the
+capped reader, the result payload), `src/test/static-site-audit.test.ts`. Files changed: `src/github-runner.ts`
+(`readStaticSite` option, hook call, `finishStaticSite`), `src/worker-compose.ts` (wiring and the `githubSeams.readStaticSite`
+test seam), `src/result-view.ts` (verdict and outcome `static-site-audited`, well-formedness check, summary),
+`src/test/github-runner.test.ts` (one `describe` and a rig option), `README.md`. No UI, dependency, lockfile, config or
+env-variable change. The npm-scripts and root `build.mjs` dispatch is unchanged.
+
+Behaviour. In the acquisition `afterCheckout` hook, after the root files are read: if there is no `package.json` (and none
+is present but unusable) the hook runs `git ls-tree -r -l -z --full-tree <commit>` through the same `docker exec` argument
+array as `github-source.ts`, re-validates records and paths, requires the file count to equal the acquisition manifest, and
+needs a regular root `index.html`; otherwise the normal path continues and the result is `unsupported-repository`. It then
+reads capped regular `.html`/`.htm`/`.css` blobs with `git cat-file blob <id>`; no image or other blob is read and the host
+gets no checkout, archive or copy. The runner uses the audit only after the acquisition cleanup proof is confirmed and the
+acquired commit equals the pin (same checks as every other pinned path). Stored result: verdict `static-site-audited`,
+`executed: false`, `repairAttempted: false`, findings under `analysis.findings` (UI-compatible), counts under `audit`.
+Result API: outcome `static-site-audited`, `repair.verified: false`, `repair.patchApplied: false`; a stored record that is
+not well formed is `completed-without-result`. The workspace UI was not edited and shows an unrecognised outcome with the
+backend summary until it is updated.
+
+Design choices to review. The profile is always on when the GitHub flow is configured (no new flag), because it is
+read-only and adds no egress or container. Unpinned intake does not audit. Root-relative paths resolve from the repository
+root. Directory and extensionless page links resolve through `index.html` or `.html` for pages only (GitHub Pages style);
+a stricter host may differ. Per-file `<base href>` skips that file with a finding. Limits are in `STATIC_SITE_LIMITS`.
+
+Not verified: compile errors in any new or changed file (strict flags, `exactOptionalPropertyTypes`, sticky regex use); every
+new test, including expected finding order and counts written by hand; that the real `alpine/git` `ls-tree -l -z` output
+and `cat-file blob` of the target repository match the fake executor's shape; behaviour on the actual `mumbai-tour`
+commit; parser behaviour on malformed real-world HTML. Run `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json` and
+`node --test dist-test/test/*.js`, then record the results here and in `.kiro/PROJECT.md`.

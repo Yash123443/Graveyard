@@ -40,6 +40,17 @@
  *   GRAVEYARD_REGISTRY_EGRESS_NETWORK / _PROXY_CONTAINER / _PROXY_URL
  *                                optional, all three or none: the registry.npmjs.org-only counterpart. Without it
  *                                repositories in the supported class are reported as not runnable.
+ *   GRAVEYARD_GITHUB_ALLOW_UNPINNED
+ *                                optional, exactly "1" (on) or "0" (off, default). On: a URL in neither catalog is fetched
+ *                                at its literal HEAD in the guarded git container, resolved to a SHA and its root files read
+ *                                as data; the job completes as "source-inspected". Nothing from it is installed, built or run
+ *                                and no source goes to Kiro. It makes GRAVEYARD_GITHUB_CATALOG optional (an omitted catalog
+ *                                means no pins); the runs root, git image and all github.com egress variables stay required.
+ *   GRAVEYARD_GITHUB_NPM_SCRIPTS
+ *                                optional, exactly "1" (on) or "0" (off, default). On: a PINNED repository whose package.json
+ *                                declares scripts and fits the npm-scripts profile (npm-scripts-policy.ts) has a bounded source
+ *                                snapshot run offline with `npm run build` and `npm run test` in the sandbox. Requires
+ *                                GRAVEYARD_GITHUB_CATALOG and the GRAVEYARD_REGISTRY_EGRESS_* variables. No agent, no patch.
  *   The proxy URLs must be http://<private IPv4>:<port>. Nothing here changes the default: without these
  *   variables the worker runs only operator fixtures and no network guard ever attests.
  *
@@ -69,7 +80,11 @@ export const GITHUB_ENV_VARS: readonly string[] = Object.freeze([
   "GRAVEYARD_REGISTRY_EGRESS_NETWORK",
   "GRAVEYARD_REGISTRY_EGRESS_PROXY_CONTAINER",
   "GRAVEYARD_REGISTRY_EGRESS_PROXY_URL",
+  "GRAVEYARD_GITHUB_ALLOW_UNPINNED",
+  "GRAVEYARD_GITHUB_NPM_SCRIPTS",
 ]);
+export const ALLOW_UNPINNED_VAR = "GRAVEYARD_GITHUB_ALLOW_UNPINNED";
+export const NPM_SCRIPTS_VAR = "GRAVEYARD_GITHUB_NPM_SCRIPTS";
 export const DEFAULT_GIT_IMAGE = "alpine/git:2.47.2";
 const IMAGE_RE =
   /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$/;
@@ -91,9 +106,22 @@ export interface EgressSettings {
  * and everything it needs. Its absence leaves the worker exactly as it was: fixtures only.
  */
 export interface GithubConfig {
+  /** Absolute path of the pin catalog, or "" when it was omitted (allowed only with allowUnpinned). */
   catalogPath: string;
-  /** Canonical repository URL to the full lowercase 40-hex commit the operator pinned. */
+  /** Canonical repository URL to the full lowercase 40-hex commit the operator pinned. May be empty only with allowUnpinned. */
   pins: Readonly<Record<string, string>>;
+  /**
+   * Opt-in (GRAVEYARD_GITHUB_ALLOW_UNPINNED=1): URLs in neither catalog are inspected at their
+   * resolved HEAD and reported as "source-inspected". Nothing from them is installed, built or run.
+   * Absent or false: unchanged behaviour.
+   */
+  allowUnpinned?: boolean;
+  /**
+   * Opt-in (GRAVEYARD_GITHUB_NPM_SCRIPTS=1): a PINNED repository whose package.json declares
+   * `scripts` and fits the npm-scripts profile has its `npm run build` and `npm run test` run offline
+   * in the sandbox. Requires the registry egress variables. Present only when true; absent: off.
+   */
+  npmScripts?: boolean;
   /** Existing worker-owned directory; one run directory per job is created inside it. */
   runsRoot: string;
   gitImage: string;
@@ -297,12 +325,28 @@ function loadGithubConfig(
   otherDirs: ReadonlyArray<[string, string]>,
   fixtureCatalog: Readonly<Record<string, string>>,
 ): GithubConfig | null {
-  if (env["GRAVEYARD_GITHUB_CATALOG"] === undefined) {
-    problems.push("GRAVEYARD_GITHUB_CATALOG is required when any other GRAVEYARD_GITHUB_* or GRAVEYARD_REGISTRY_* variable is set");
+  const before = problems.length;
+  // Unpinned intake is opt-in and exactly "1"; "0" is explicit off; anything else is a mistake.
+  const unpinnedRaw = env[ALLOW_UNPINNED_VAR];
+  let allowUnpinned = false;
+  if (unpinnedRaw === "1") allowUnpinned = true;
+  else if (unpinnedRaw !== undefined && unpinnedRaw !== "0") problems.push(`${ALLOW_UNPINNED_VAR} must be exactly 1 or 0`);
+
+  // npm-scripts mode is opt-in and exactly "1"; "0" is explicit off; anything else is a mistake.
+  const scriptsRaw = env[NPM_SCRIPTS_VAR];
+  let npmScripts = false;
+  if (scriptsRaw === "1") npmScripts = true;
+  else if (scriptsRaw !== undefined && scriptsRaw !== "0") problems.push(`${NPM_SCRIPTS_VAR} must be exactly 1 or 0`);
+
+  // The pin catalog is optional ONLY when unpinned intake is enabled. All other settings stay required.
+  const catalogGiven = env["GRAVEYARD_GITHUB_CATALOG"] !== undefined;
+  if (!catalogGiven && !allowUnpinned) {
+    problems.push(
+      `GRAVEYARD_GITHUB_CATALOG is required when any other GRAVEYARD_GITHUB_* or GRAVEYARD_REGISTRY_* variable is set (it is optional only with ${ALLOW_UNPINNED_VAR}=1)`,
+    );
     return null;
   }
-  const before = problems.length;
-  const catalogPath = absPath(env, "GRAVEYARD_GITHUB_CATALOG", problems);
+  const catalogPath = catalogGiven ? absPath(env, "GRAVEYARD_GITHUB_CATALOG", problems) : "";
   const runsRoot = absPath(env, "GRAVEYARD_GITHUB_RUNS_ROOT", problems);
   if (runsRoot !== "") {
     for (const [name, dir] of otherDirs) {
@@ -316,6 +360,12 @@ function loadGithubConfig(
 
   const gitEgress = egressSettings(env, "GRAVEYARD_GITHUB_EGRESS", true, problems);
   const registryEgress = egressSettings(env, "GRAVEYARD_REGISTRY_EGRESS", false, problems);
+  if (npmScripts && registryEgress === null) {
+    problems.push(`${NPM_SCRIPTS_VAR}=1 requires the GRAVEYARD_REGISTRY_EGRESS_* variables (dependencies must be acquired through the registry-only proxy)`);
+  }
+  if (npmScripts && !catalogGiven) {
+    problems.push(`${NPM_SCRIPTS_VAR}=1 applies to pinned repositories only and therefore requires GRAVEYARD_GITHUB_CATALOG`);
+  }
   if (gitEgress !== null && registryEgress !== null) {
     if (gitEgress.network === registryEgress.network || gitEgress.proxyContainer === registryEgress.proxyContainer) {
       problems.push("the GitHub and registry egress must use different networks and different proxy containers");
@@ -348,7 +398,7 @@ function loadGithubConfig(
   }
 
   if (problems.length > before || gitEgress === null) return null;
-  return { catalogPath, pins: Object.freeze(pins), runsRoot, gitImage, gitEgress, registryEgress };
+  return { catalogPath, pins: Object.freeze(pins), runsRoot, gitImage, gitEgress, registryEgress, allowUnpinned, ...(npmScripts ? { npmScripts: true } : {}) };
 }
 
 /**

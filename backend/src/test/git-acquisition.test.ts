@@ -706,3 +706,86 @@ describe("afterCheckout handoff hook (mock)", () => {
     assert.equal(r.cleanup?.confirmed, true);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe("unpinned HEAD intake (mock)", () => {
+  const headReq = { executionId: EXEC, repoUrl: URL_, resolveHead: true as const, image: IMAGE };
+  const execArgs = (fake: FakeDocker, sub: string): readonly string[] => {
+    const c = fake.calls.find((x) => x.args[0] === "exec" && gitKey(x.args) === sub);
+    assert.ok(c, `no ${sub} exec`);
+    return c.args;
+  };
+
+  it("fetches only the literal HEAD, uses the resolved SHA for tree audit, checkout and HEAD verification", async () => {
+    const fake = new FakeDocker();
+    const r = await make(fake).acquire(headReq);
+    assert.equal(r.kind, "acquired");
+    if (r.kind === "acquired") {
+      assert.equal(r.commit, SHA);
+      assert.equal(r.resolvedFromHead, true);
+    }
+    assert.deepEqual(fake.gitOrder, ["init", "fetch", "verify-commit", "ls-tree", "checkout", "head"]);
+    const fetchArgs = execArgs(fake, "fetch");
+    assert.deepEqual(fetchArgs.slice(-3), ["--", URL_, "HEAD"]);
+    assert.ok(fetchArgs.includes("http.followRedirects=false"));
+    assert.ok(!fetchArgs.includes(SHA));
+    assert.ok(execArgs(fake, "verify-commit").includes("FETCH_HEAD^{commit}"));
+    assert.ok(execArgs(fake, "ls-tree").includes(SHA));
+    assert.ok(execArgs(fake, "checkout").includes(SHA));
+    assert.equal(r.cleanup?.confirmed, true);
+    assert.equal(fake.exists, false);
+  });
+
+  it("rejects anything but one lowercase 40-hex id from FETCH_HEAD before listing or checkout", async () => {
+    for (const bad of ["", "\n", SHA.toUpperCase() + "\n", SHA.slice(0, 39) + "\n", `${SHA}\n${OTHER_SHA}\n`, `${SHA}${SHA}\n`, `ref: ${SHA}\n`]) {
+      const fake = new FakeDocker();
+      fake.results["verify-commit"] = res({ stdout: bad });
+      const r = await make(fake).acquire(headReq);
+      assert.equal(r.kind, "source-rejected", JSON.stringify(bad));
+      assert.ok(!fake.gitOrder.includes("ls-tree") && !fake.gitOrder.includes("checkout"));
+      assert.equal(r.cleanup?.confirmed, true);
+    }
+  });
+
+  it("rejects a checked-out HEAD that differs from the resolved SHA, and a tree rejection carries the resolved id", async () => {
+    const fake = new FakeDocker();
+    fake.results["head"] = res({ stdout: `${OTHER_SHA}\n` });
+    const r = await make(fake).acquire(headReq);
+    assert.equal(r.kind, "source-rejected");
+    if (r.kind === "source-rejected") assert.equal(r.commit, SHA);
+
+    const fake2 = new FakeDocker();
+    fake2.results["ls-tree"] = res({ stdout: entry("120000", "5", "link") });
+    const r2 = await make(fake2).acquire(headReq);
+    assert.equal(r2.kind, "source-rejected");
+    if (r2.kind === "source-rejected") assert.equal(r2.commit, SHA);
+    assert.ok(!fake2.gitOrder.includes("checkout"));
+  });
+
+  it("refuses non-GitHub hosts, a commit together with resolveHead, and a non-true flag, touching nothing", async () => {
+    const cases: unknown[] = [
+      { ...headReq, repoUrl: "https://gitlab.com/owner/repo" },
+      { ...headReq, repoUrl: "http://github.com/owner/repo" },
+      { ...headReq, commit: SHA },
+      { ...headReq, resolveHead: "yes" },
+      { ...headReq, resolveHead: false },
+      { executionId: EXEC, repoUrl: URL_, image: IMAGE },
+    ];
+    for (const c of cases) {
+      const fake = new FakeDocker();
+      const g = guard(goodEgress);
+      const r = await make(fake, g).acquire(c as never);
+      assert.equal(r.kind, "rejected", JSON.stringify(c));
+      assert.equal(g.calls, 0);
+      assert.equal(fake.calls.length, 0);
+    }
+  });
+
+  it("still fails closed without verified egress", async () => {
+    const fake = new FakeDocker();
+    const r = await make(fake, new UnavailableEgressGuard()).acquire(headReq);
+    assert.equal(r.kind, "network-unavailable");
+    assert.equal(fake.calls.length, 0);
+  });
+});

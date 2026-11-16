@@ -257,7 +257,7 @@ function validSource(s: ControlledSource | null): s is ControlledSource {
   return true;
 }
 
-function projectPipeline(r: ControlledPipelineResult): Record<string, unknown> {
+export function projectPipeline(r: ControlledPipelineResult): Record<string, unknown> {
   return {
     status: r.status,
     reason: r.reason,

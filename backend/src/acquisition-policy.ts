@@ -152,6 +152,22 @@ export function validateSource(repoUrl: unknown, commit: unknown): Validated<Sou
   return { ok: true, value: { repoUrl: u.url, commit } };
 }
 
+/** Validates only the repository URL (unpinned intake). Canonical https://github.com/owner/repo or a reason. */
+export function validateRepoOnly(repoUrl: unknown): Validated<string> {
+  const u = validateGithubUrl(repoUrl);
+  return u.ok ? { ok: true, value: u.url } : { ok: false, reason: u.reason };
+}
+
+/**
+ * Extracts the immutable commit id from the output of `git rev-parse --verify FETCH_HEAD^{commit}`.
+ * The output must be exactly one lowercase 40-hex id with at most one trailing newline; anything
+ * else (empty, extra lines, uppercase, SHA-256 ids, prefixes) is rejected rather than repaired.
+ */
+export function parseResolvedSha(stdout: string): string | null {
+  const m = /^([0-9a-f]{40})\n?$/.exec(stdout);
+  return m === null ? null : (m[1] as string);
+}
+
 // ---------------------------------------------------------------------------
 // Egress attestation
 // ---------------------------------------------------------------------------
@@ -294,6 +310,14 @@ export const gitSteps = {
   fetch: (repoUrl: string, commit: string, depth: number): string[] => [
     "fetch", "--quiet", `--depth=${depth}`, "--no-tags", "--no-recurse-submodules", "--", repoUrl, commit,
   ],
+  /**
+   * Unpinned intake: shallow-fetches the remote's literal `HEAD` (never a caller-supplied ref).
+   * The result is only FETCH_HEAD; the immutable id comes from `resolveFetchHead`.
+   */
+  fetchHead: (repoUrl: string, depth: number): string[] => [
+    "fetch", "--quiet", `--depth=${depth}`, "--no-tags", "--no-recurse-submodules", "--", repoUrl, "HEAD",
+  ],
+  resolveFetchHead: (): string[] => ["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"],
   verifyCommit: (commit: string): string[] => ["rev-parse", "--verify", "--quiet", `${commit}^{commit}`],
   listTree: (commit: string): string[] => ["ls-tree", "-r", "-l", "-z", "--full-tree", commit],
   checkout: (commit: string): string[] => [

@@ -296,3 +296,18 @@ It needs `GRAVEYARD_MANUAL_WORKER_E2E=1` (from `worker-e2e.env`) and `GRAVEYARD_
 **What it checks.** The fixture is the passing `build.mjs` with exactly one line changed (the `is-number` check is inverted so the build throws); the package files and `test.mjs` are unchanged. The worker runs with `GRAVEYARD_WORKER_AGENTS=kiro-v2` and no injected agent. Asserted: baseline pipeline and Tester failed; Analyst and Fixer responses accepted; the patched disposable copy passed the original tests offline; the returned `verifiedDiff` equals the stored Fixer proposal that was applied, and its sha256 equals the verification record (no canned diff is used); original fixture files unchanged; staging root empty; no leftover containers. If an agent fails, only its fixed status and a short code are printed. The model may fail to give a valid proposal, which fails this check.
 
 Codex compiled and ran the harness. The first live run exposed a CLI input issue. Kiro updated the adapter to send the entire request through stdin. The final standalone run used the live Kiro Analyst and Fixer for a controlled broken fixture and returned `repair-verified` after the real Docker rerun. See `backend/DEVELOPMENT.md` for the verification scope.
+
+### Unpinned public GitHub intake, source inspection only (2026-11-16)
+
+One bounded request, backend and `.kiro/` only; no shell commands, no test runs, frontend, git, dependencies and lockfile untouched. Kiro added the `resolveHead` mode to `GitAcquisition`, the opt-in `GRAVEYARD_GITHUB_ALLOW_UNPINNED` worker configuration, the `source-inspected` verdict and outcome, focused regression tests and documentation. In this flow Kiro (the runtime agent adapter) is never invoked and receives no unpinned repository source. Build and tests have NOT been executed; results pending external verification.
+
+
+### Opt-in npm scripts mode for pinned repositories (2026-11-16)
+
+One bounded request, backend and `.kiro/` only; no shell commands, no test runs, frontend, git, dependencies and lockfile untouched. Kiro designed and wrote the narrow profile check and manifest sanitizer, the bounded `git archive` snapshot export on top of the existing tar and archive handoff, the in-container driver that runs `npm run build` and `npm run test` with hooks and install scripts disabled, the host pipeline, the `GRAVEYARD_GITHUB_NPM_SCRIPTS` configuration and wiring, a focused regression test file and documentation. In this mode Kiro (the runtime agent adapter) is never invoked: no Analyst or Fixer call, no repository source sent to Kiro, no repair verifier, and no repair is ever claimed. The root `build.mjs` flow still uses Kiro and the repair verifier unchanged. Build and tests have NOT been executed; results pending external verification.
+
+
+
+### Read-only static site audit profile for pinned repositories (2026-11-16)
+
+One bounded request, backend and `.kiro/` only; no shell commands, no test runs, no clone or fetch of the external target (`Yash123443/mumbai-tour`), no frontend, git, dependency or lockfile change, nothing committed or pushed. Kiro designed and wrote the tree and reference parser, the capped HTML and CSS reader that runs inside the existing acquisition container, the `static-site-audited` verdict and outcome, focused regression tests and documentation. In this flow Kiro (the runtime agent adapter) is never invoked and receives no repository source; no repair is attempted or claimed. Build and tests have NOT been executed; results pending external verification.

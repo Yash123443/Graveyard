@@ -50,8 +50,10 @@ import {
   checkTreeListing,
   gitHardeningArgs,
   gitSteps,
+  parseResolvedSha,
   sanitize,
   validateEgressAttestation,
+  validateRepoOnly,
   validateSource,
   type AcquisitionLimits,
   type EgressGuard,
@@ -114,14 +116,20 @@ export interface AcquisitionRequest {
   /** `<job id>:<attempt>`, as produced by leases.executionIdFor. */
   executionId: string;
   repoUrl: string;
-  /** Full lowercase 40-hex commit SHA. */
-  commit: string;
+  /** Pinned mode: full lowercase 40-hex commit SHA. Must be absent when `resolveHead` is true. */
+  commit?: string;
+  /**
+   * Explicit unpinned mode. Fetches the remote's literal `HEAD` (depth-limited, same guarded
+   * container, no credentials, no redirects) and resolves it to an immutable SHA. There is no ref
+   * field: a branch, tag or any caller-chosen ref cannot be requested. Mutually exclusive with `commit`.
+   */
+  resolveHead?: true;
   image: string;
   signal?: AbortSignal;
 }
 
 export type AcquisitionOutcome =
-  | { kind: "acquired"; commit: string; manifest: TreeManifest; durationMs: number }
+  | { kind: "acquired"; commit: string; manifest: TreeManifest; durationMs: number; resolvedFromHead?: true }
   /** Request failed validation; nothing was contacted. */
   | { kind: "rejected"; reason: string }
   /** No verified controlled egress. Nothing was created. */
@@ -130,8 +138,11 @@ export type AcquisitionOutcome =
   | { kind: "unavailable"; reason: string }
   /** Container configuration read back from Docker differs from the intent; git never ran. */
   | { kind: "isolation-violation"; reason: string }
-  /** The fetched commit or tree violates source policy; nothing was checked out (or the check failed). */
-  | { kind: "source-rejected"; reason: string }
+  /**
+   * The fetched commit or tree violates source policy; nothing was checked out (or the check failed).
+   * `commit` is set only in unpinned mode, when the resolved id was already known.
+   */
+  | { kind: "source-rejected"; reason: string; commit?: string }
   /** A git step exited nonzero (for example the commit does not exist). */
   | { kind: "failed"; step: string; reason: string }
   | { kind: "timed-out"; step: string }
@@ -144,7 +155,8 @@ interface Plan {
   name: string;
   executionId: string;
   repoUrl: string;
-  commit: string;
+  /** Null: unpinned mode (literal HEAD, resolved inside the container). */
+  commit: string | null;
   image: string;
 }
 
@@ -311,6 +323,20 @@ export class GitAcquisition {
     if (typeof req.image !== "string" || !this.images.has(req.image)) {
       return { reason: "image is not in the allowlist" };
     }
+    const unpinned = (req as { resolveHead?: unknown }).resolveHead;
+    if (unpinned !== undefined && unpinned !== true) return { reason: "resolveHead must be true when present" };
+    if (unpinned === true) {
+      if (req.commit !== undefined) return { reason: "commit and resolveHead are mutually exclusive" };
+      const repo = validateRepoOnly(req.repoUrl);
+      if (!repo.ok) return { reason: repo.reason };
+      return {
+        name: acquisitionContainerName(req.executionId),
+        executionId: req.executionId,
+        repoUrl: repo.value,
+        commit: null,
+        image: req.image,
+      };
+    }
     const src = validateSource(req.repoUrl, req.commit);
     if (!src.ok) return { reason: src.reason };
     return {
@@ -383,30 +409,54 @@ export class GitAcquisition {
     const init = await this.step(ctx, "init", gitSteps.init());
     if (!init.ok) return init.outcome;
 
-    const fetched = await this.step(ctx, "fetch", gitSteps.fetch(plan.repoUrl, plan.commit, this.limits.depth));
-    if (!fetched.ok) return fetched.outcome;
+    let commit: string;
+    if (plan.commit === null) {
+      // Unpinned intake: the literal remote HEAD, shallow, in this same guarded container. The
+      // immutable id is whatever FETCH_HEAD resolves to; it must be exactly one lowercase 40-hex id.
+      const fetchedHead = await this.step(ctx, "fetch", gitSteps.fetchHead(plan.repoUrl, this.limits.depth));
+      if (!fetchedHead.ok) return fetchedHead.outcome;
+      const resolved = await this.step(ctx, "verify-commit", gitSteps.resolveFetchHead());
+      if (!resolved.ok) return resolved.outcome;
+      if (resolved.result.truncated) {
+        return { kind: "source-rejected", reason: "HEAD resolution output was truncated" };
+      }
+      const sha = parseResolvedSha(resolved.result.stdout);
+      if (sha === null) {
+        return { kind: "source-rejected", reason: "fetched HEAD did not resolve to a lowercase 40-hex commit id" };
+      }
+      commit = sha;
+    } else {
+      commit = plan.commit;
+      const fetched = await this.step(ctx, "fetch", gitSteps.fetch(plan.repoUrl, commit, this.limits.depth));
+      if (!fetched.ok) return fetched.outcome;
 
-    const verified = await this.step(ctx, "verify-commit", gitSteps.verifyCommit(plan.commit));
-    if (!verified.ok) return verified.outcome;
-    if (verified.result.stdout.trim() !== plan.commit) {
-      return { kind: "source-rejected", reason: "fetched commit does not match the requested SHA" };
+      const verified = await this.step(ctx, "verify-commit", gitSteps.verifyCommit(commit));
+      if (!verified.ok) return verified.outcome;
+      if (verified.result.stdout.trim() !== commit) {
+        return { kind: "source-rejected", reason: "fetched commit does not match the requested SHA" };
+      }
     }
+    // Rejections after resolution carry the resolved id (unpinned mode only, so pinned outcomes are unchanged).
+    const rejected = (reason: string): AcquisitionOutcome =>
+      plan.commit === null ? { kind: "source-rejected", reason, commit } : { kind: "source-rejected", reason };
 
-    const listing = await this.step(ctx, "list-tree", gitSteps.listTree(plan.commit), this.limits.maxTreeListBytes);
+    const listing = await this.step(ctx, "list-tree", gitSteps.listTree(commit), this.limits.maxTreeListBytes);
     if (!listing.ok) return listing.outcome;
-    if (listing.result.truncated) {
-      return { kind: "source-rejected", reason: "tree listing exceeds the size limit" };
-    }
+    if (listing.result.truncated) return rejected("tree listing exceeds the size limit");
     const manifest = checkTreeListing(listing.result.stdout, this.limits);
-    if (!manifest.ok) return { kind: "source-rejected", reason: manifest.reason };
+    if (!manifest.ok) return rejected(manifest.reason);
 
-    const checkout = await this.step(ctx, "checkout", gitSteps.checkout(plan.commit));
+    const checkout = await this.step(ctx, "checkout", gitSteps.checkout(commit));
     if (!checkout.ok) return checkout.outcome;
 
     const head = await this.step(ctx, "verify-head", gitSteps.head());
     if (!head.ok) return head.outcome;
-    if (head.result.stdout.trim() !== plan.commit) {
-      return { kind: "source-rejected", reason: "checked-out HEAD does not match the requested SHA" };
+    if (head.result.stdout.trim() !== commit) {
+      return rejected(
+        plan.commit === null
+          ? "checked-out HEAD does not match the resolved SHA"
+          : "checked-out HEAD does not match the requested SHA",
+      );
     }
 
     // Optional handoff hook (test harness only; never set in production). It runs while the
@@ -415,7 +465,7 @@ export class GitAcquisition {
       try {
         await this.afterCheckout({
           containerName: plan.name,
-          commit: plan.commit,
+          commit,
           manifest: manifest.value,
           dockerBinary: this.docker,
           remainingMs: Math.max(0, ctx.deadline - this.now()),
@@ -428,9 +478,10 @@ export class GitAcquisition {
 
     return {
       kind: "acquired",
-      commit: plan.commit,
+      commit,
       manifest: manifest.value,
       durationMs: this.now() - ctx.startedAt,
+      ...(plan.commit === null ? { resolvedFromHead: true as const } : {}),
     };
   }
 

@@ -25,6 +25,12 @@
  *   tests-not-run              the build passed but no tests ran. Not a verification.
  *   unsupported-repository     a pinned GitHub commit was fetched and inspected but is outside the supported class
  *                              (or dependency acquisition is not configured). Nothing was built or run.
+ *   source-inspected           an opt-in UNPINNED public GitHub HEAD was resolved to an immutable commit and its root
+ *                              files read as data. Nothing was installed, built, run or sent to a model; an operator pin
+ *                              is required before execution. Distinct from unsupported-repository. Not a health claim.
+ *   static-site-audited        a pinned GitHub commit with a root index.html and no package.json was read-only audited
+ *                              (HTML and CSS text only): `result.analysis.findings` lists missing local references with
+ *                              a stated partial scope. Diagnostics only: nothing was executed, no repair, no pass claim.
  *   infrastructure-failed      the job could not be evaluated. Says nothing about the repository.
  *   timed-out                  the deadline passed. Says nothing about the repository.
  *   cancelled                  cancelled while queued. Nothing ran.
@@ -47,6 +53,8 @@ export type ResultOutcome =
   | "failing-undiagnosed"
   | "tests-not-run"
   | "unsupported-repository"
+  | "source-inspected"
+  | "static-site-audited"
   | "infrastructure-failed"
   | "timed-out"
   | "cancelled"
@@ -90,7 +98,7 @@ export interface ResultView {
   infrastructure: ResultInfrastructure | null;
 }
 
-const VERDICTS = ["verified", "repository-failing", "tests-not-run", "unsupported-repository"] as const;
+const VERDICTS = ["verified", "repository-failing", "tests-not-run", "unsupported-repository", "source-inspected", "static-site-audited"] as const;
 const INFRA_KINDS = ["deadline-exceeded", "attempts-exhausted", "infrastructure-unavailable", "cleanup-unconfirmed"];
 const MAX_INFRA_MESSAGE = 300;
 
@@ -114,12 +122,20 @@ const SUMMARIES: Readonly<Record<ResultOutcome, string>> = {
     "The repository was fetched at the pinned commit and inspected, but it is outside the supported class (or this deployment cannot run its dependencies). Nothing was built or tested. This is not a verdict that the repository is broken.",
   "infrastructure-failed":
     "The job could not be evaluated because of an infrastructure condition. This is not a diagnosis of the repository.",
+  "source-inspected":
+    "The repository's current HEAD was fetched in a disposable container and its root files were read as data. Nothing was installed, built, tested or repaired, and no source was sent to a model. This is not a verdict that the repository works or is broken. An operator must pin the reported commit before anything is executed.",
+  "static-site-audited":
+    "The pinned commit is a static HTML/CSS/JS site. Its HTML and CSS text was read in a disposable container and local page and asset references were checked against the committed files. The audit is partial (see the findings and notes), nothing was built, run or requested over the network, and no repair was attempted. The findings are diagnostics. No findings does not mean the site works.",
   "timed-out":
     "The job exceeded its deadline. This is an infrastructure outcome, not a verdict on the repository.",
   cancelled: "The job was cancelled while queued. Nothing was executed.",
   "completed-without-result":
     "The job is marked completed but no valid result record was found. Treat this as no result.",
 };
+
+/** Used for an unpinned inspection that source policy stopped before any root file was read. */
+const SOURCE_REJECTED_SUMMARY =
+  "The repository's HEAD was fetched in a disposable container, but source policy stopped the inspection before any root files were read. Nothing was installed, built, tested or repaired, and no source was sent to a model. This is not a verdict that the repository works or is broken. Pinning the commit would not bypass the source-policy block.";
 
 /** Used instead of SUMMARIES when the stored result says the source was a pinned GitHub commit. */
 const GITHUB_SUMMARIES: Readonly<Partial<Record<ResultOutcome, string>>> = {
@@ -138,6 +154,9 @@ const GITHUB_SUMMARIES: Readonly<Partial<Record<ResultOutcome, string>>> = {
 };
 
 function summaryFor(outcome: ResultOutcome, result: Record<string, unknown> | undefined): string {
+  if (outcome === "source-inspected" && result !== undefined && result["inspection"] === null) {
+    return SOURCE_REJECTED_SUMMARY;
+  }
   if (result !== undefined && result["sourceKind"] === "github-pinned") {
     const specific = GITHUB_SUMMARIES[outcome];
     if (specific !== undefined) return specific;
@@ -223,6 +242,39 @@ function classify(result: Record<string, unknown>): Classified | null {
   if (verdict === "verified") return { outcome: "passing", diagnosed: false, patchProposed: false };
   if (verdict === "tests-not-run") return { outcome: "tests-not-run", diagnosed: false, patchProposed: false };
   if (verdict === "unsupported-repository") return { outcome: "unsupported-repository", diagnosed: false, patchProposed: false };
+  if (verdict === "static-site-audited") {
+    // Only a well-formed audit record counts: pinned source with a 40-hex commit, nothing executed,
+    // no repair attempted, and a findings list. Anything else is "no valid result".
+    const src = result["source"];
+    const analysis = result["analysis"];
+    const wellFormed =
+      result["sourceKind"] === "github-pinned" &&
+      result["profile"] === "static-site" &&
+      result["executed"] === false &&
+      result["repairAttempted"] === false &&
+      isObj(src) &&
+      typeof src["commit"] === "string" &&
+      /^[0-9a-f]{40}$/.test(src["commit"]) &&
+      isObj(result["audit"]) &&
+      isObj(analysis) &&
+      Array.isArray(analysis["findings"]);
+    return wellFormed ? { outcome: "static-site-audited", diagnosed: false, patchProposed: false } : null;
+  }
+  if (verdict === "source-inspected") {
+    // Only a well-formed unpinned inspection record counts. It must say nothing was executed, name
+    // the unpinned source kind, and carry either a lowercase 40-hex commit or an explicit null.
+    const src = result["source"];
+    const commit = isObj(src) ? src["commit"] : undefined;
+    const wellFormed =
+      result["sourceKind"] === "github-unpinned-head" &&
+      result["executed"] === false &&
+      isObj(src) &&
+      src["pinned"] === false &&
+      (commit === null || (typeof commit === "string" && /^[0-9a-f]{40}$/.test(commit))) &&
+      // A rejected inspection (no manifest) must not offer a pin, since a pin cannot bypass source policy.
+      (result["inspection"] !== null || result["operatorPin"] === null);
+    return wellFormed ? { outcome: "source-inspected", diagnosed: false, patchProposed: false } : null;
+  }
 
   const analyst = result["analyst"];
   const fixer = result["fixer"];
