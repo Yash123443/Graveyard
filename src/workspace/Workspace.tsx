@@ -100,10 +100,10 @@ export default function Workspace() {
 
       <main ref={main} tabIndex={-1} className="ws-main" aria-label="Repair workspace">
         <section className="ws-notice" aria-label="Current capabilities">
-          <strong>Honest status.</strong> Jobs are only evaluated if the operator started the opt-in worker. Without it a queued job
-          stays queued until you cancel it. The worker runs operator-prepared fixtures and operator-pinned GitHub commits; any
-          other repository fails as an infrastructure problem and nothing is cloned or run. A patch is called a repair only after
-          it passed install, build and the original tests offline in a disposable copy. Nothing is ever applied to your repository.
+          <strong>Honest status.</strong> Jobs are only evaluated if the operator started the opt-in worker; without it a queued job
+          stays queued until you cancel it. The worker handles operator-pinned repositories, and an operator may also enable a
+          read-only intake of unpinned public repositories that only inspects source. A patch is called a repair only after it
+          passed install, build and the original tests offline in a disposable copy, and nothing is ever applied to your repository.
         </section>
 
         <div className="ws-grid">

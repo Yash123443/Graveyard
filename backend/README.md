@@ -472,8 +472,10 @@ workspace already reads, with a `static-site-scope` finding first (what was read
 `missing-local-page`, `missing-local-asset`, `case-mismatch-reference`, `reference-escapes-site-root`,
 `unsafe-reference-path` and `base-href-not-audited`. Counts and the not-read list are in `result.audit`. The findings are
 diagnostics, not a repair, and the outcome is neither a pass nor a statement that the site works: no findings is reported
-the same way. A client must tolerate the new `outcome` value (the workspace shows it as an unrecognised result with the
-backend's summary text until the UI is updated).
+the same way. A client must tolerate the new `outcome` value. The workspace shows this outcome with the audit scope
+(`static-site-scope` finding) and the list of findings, labelled read-only. It shows a count when findings or a validated
+total above zero exist, "no issues within the scope above" only when the total is zero, and "Finding details are
+unavailable" otherwise.
 
 
 ### Kiro usage in this flow

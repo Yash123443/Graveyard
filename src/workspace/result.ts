@@ -40,6 +40,17 @@ export interface VerificationModel {
   pipelineMs: number | null
 }
 
+export interface StaticAuditModel {
+  /** Backend scope statement (what was read and checked). Not a finding. */
+  scope: string | null
+  /** Actual problems, text only, without the machine code. */
+  problems: string[]
+  /** Total problems, only when exactly derivable from the listed problems plus the validated omitted count. */
+  total: number | null
+  /** Problems found but not listed (validated count), or 0. */
+  omitted: number
+}
+
 export interface ResultModel {
   outcome: string
   headline: string
@@ -56,6 +67,7 @@ export interface ResultModel {
   /** The exact verified diff, only when `verified` is true. */
   verifiedDiff: string | null
   findings: string[]
+  staticAudit: StaticAuditModel | null
   infrastructure: string | null
   notes: string[]
 }
@@ -70,6 +82,8 @@ const HEADLINES: Record<string, { text: string; tone: Tone }> = {
   'failing-undiagnosed': { text: 'Failing: no diagnosis, nothing repaired', tone: 'bad' },
   'tests-not-run': { text: 'Build passed, tests did not run', tone: 'warn' },
   'unsupported-repository': { text: 'Outside the supported class, nothing built', tone: 'neutral' },
+  'static-site-audited': { text: 'Static site audit complete', tone: 'neutral' },
+  'source-inspected': { text: 'Repository source inspected', tone: 'neutral' },
   'infrastructure-failed': { text: 'Could not be evaluated (infrastructure)', tone: 'neutral' },
   'timed-out': { text: 'Timed out (infrastructure)', tone: 'neutral' },
   cancelled: { text: 'Cancelled', tone: 'neutral' },
@@ -136,6 +150,51 @@ function confirmedDiff(view: ResultView, result: Record<string, unknown> | null)
   return view.verifiedDiff
 }
 
+const STATIC_PROBLEM_CODES: ReadonlySet<string> = new Set([
+  'missing-local-page',
+  'missing-local-asset',
+  'case-mismatch-reference',
+  'reference-escapes-site-root',
+  'unsafe-reference-path',
+  'base-href-not-audited',
+])
+const STATIC_MAX_FINDINGS = 60
+
+/**
+ * Separates the single scope statement from the actual problems. The total is given only when the
+ * listing is well formed (one scope entry, known codes, within the backend cap) and the omitted
+ * count is a validated non-negative integer: total = listed problems + omitted.
+ */
+function staticAuditOf(result: Record<string, unknown> | null): StaticAuditModel | null {
+  if (result === null) return null
+  const analysis = isRecord(result.analysis) ? result.analysis : null
+  const raw = analysis !== null && Array.isArray(analysis.findings) ? analysis.findings : null
+  if (raw === null) return null
+  let scope: string | null = null
+  let scopeCount = 0
+  let wellFormed = raw.length <= STATIC_MAX_FINDINGS
+  const problems: string[] = []
+  for (const f of raw.slice(0, STATIC_MAX_FINDINGS)) {
+    if (!isRecord(f)) { wellFormed = false; continue }
+    const code = str(f.code, 60)
+    const detail = str(f.detail, 400)
+    if (code === null || detail === null) { wellFormed = false; continue }
+    if (code === 'static-site-scope') {
+      scopeCount += 1
+      scope = detail
+    } else if (STATIC_PROBLEM_CODES.has(code)) {
+      problems.push(detail)
+    } else {
+      wellFormed = false
+    }
+  }
+  const audit = isRecord(result.audit) ? result.audit : null
+  const omittedRaw = audit === null ? null : audit.findingsOmitted
+  const omittedValid = typeof omittedRaw === 'number' && Number.isInteger(omittedRaw) && omittedRaw >= 0 && omittedRaw <= 100000
+  const total = wellFormed && scopeCount === 1 && omittedValid ? problems.length + (omittedRaw as number) : null
+  return { scope: scopeCount === 1 ? scope : null, problems, total, omitted: omittedValid ? (omittedRaw as number) : 0 }
+}
+
 export function buildResultModel(view: ResultView): ResultModel {
   const head = HEADLINES[view.outcome] ?? { text: 'Unrecognised result', tone: 'warn' as Tone }
   const result = view.result
@@ -143,8 +202,9 @@ export function buildResultModel(view: ResultView): ResultModel {
   const verification = result === null ? null : verificationOf(result.verification)
   const patched = result !== null && isRecord(result.verification) ? stagesOf(result.verification.patched) : []
   const analysis = result !== null && isRecord(result.analysis) ? result.analysis : null
+  const staticAudit = view.outcome === 'static-site-audited' ? staticAuditOf(result) : null
   const findings: string[] = []
-  if (analysis !== null && Array.isArray(analysis.findings)) {
+  if (staticAudit === null && analysis !== null && Array.isArray(analysis.findings)) {
     for (const f of analysis.findings.slice(0, 12)) {
       if (!isRecord(f)) continue
       const code = str(f.code, 60)
@@ -168,6 +228,7 @@ export function buildResultModel(view: ResultView): ResultModel {
     verification,
     verifiedDiff: diff,
     findings,
+    staticAudit,
     infrastructure: view.infrastructure ? `${view.infrastructure.kind}: ${view.infrastructure.message}`.slice(0, 400) : null,
     notes: result === null ? [] : strings(result.notes, 6),
   }

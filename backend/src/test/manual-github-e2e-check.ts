@@ -86,6 +86,18 @@
  *     the git acquisition and sandbox containers, and removes both proxies and both networks.
  * It does not modify production policy and publishes nothing. A pass would show only what the
  * assertions list, on this machine, for this one repository and commit.
+ *
+ * STATIC SITE MODE (added later by Kiro; written without being compiled or run, UNVERIFIED).
+ * Opt-in on top of the opt-in above: set GRAVEYARD_GITHUB_E2E_STATIC=1. It cannot be combined with the
+ * supported-fixture variables (fails closed). It uses the same isolated topology, API and worker as the
+ * default mode (github.com proxy only, NO registry egress, agents off) with a different fixed pin:
+ *   https://github.com/yash123443/mumbai-tour @ 6d193fab40659cb5c568855f8294abf324adc4ea
+ * Expected result: completed, done, outcome static-site-audited, verdict static-site-audited,
+ * sourceKind github-pinned with that URL and commit, profile static-site, executed false,
+ * repairAttempted false, repair.verified/patchApplied false, no verifiedDiff, no analyst or fixer
+ * output, no infrastructure record, audit.read.html > 0, 401 and 403 checks, no token leak. The
+ * audit counts and finding codes/details the worker stored are printed (bounded). The audit is
+ * diagnostics only: the harness makes no claim that the site works or is broken.
  */
 
 import { randomBytes, randomInt } from "node:crypto";
@@ -132,6 +144,13 @@ const SUPPORTED_URL_VAR = "GRAVEYARD_GITHUB_E2E_SUPPORTED_URL";
 const SUPPORTED_COMMIT_VAR = "GRAVEYARD_GITHUB_E2E_SUPPORTED_COMMIT";
 /** Supported mode is requested when either variable is set (even empty), so a half-set pair fails closed. */
 const SUPPORTED_REQUESTED = process.env[SUPPORTED_URL_VAR] !== undefined || process.env[SUPPORTED_COMMIT_VAR] !== undefined;
+const STATIC_VAR = "GRAVEYARD_GITHUB_E2E_STATIC";
+/** Static site mode: a fixed public pin, no registry, no agents. Any other non-empty value fails closed. */
+const STATIC_REQUESTED = process.env[STATIC_VAR] === "1";
+const STATIC_URL = "https://github.com/yash123443/mumbai-tour";
+const STATIC_COMMIT = "6d193fab40659cb5c568855f8294abf324adc4ea";
+const MAX_PRINTED_FINDINGS = 25;
+const MAX_PRINTED_DETAIL = 240;
 const SETUP_MS = SUPPORTED_REQUESTED ? 240_000 : 120_000;
 /** Upper bound for the job to reach a terminal state (default mode: the acquisition budget is 300 s). */
 const JOB_DEADLINE_MS = SUPPORTED_REQUESTED ? 720_000 : 360_000;
@@ -289,6 +308,18 @@ test(
       const canonical = validateGithubUrl(PINNED_URL);
       if (!canonical.ok || canonical.url !== PINNED_URL) throw new FailClosed("the pinned URL is not in canonical form");
 
+      const staticVar = process.env[STATIC_VAR];
+      if (staticVar !== undefined && staticVar !== "" && staticVar !== "1") throw new FailClosed(`${STATIC_VAR} must be exactly 1 when set`);
+      if (STATIC_REQUESTED && SUPPORTED_REQUESTED) throw new FailClosed(`${STATIC_VAR}=1 cannot be combined with the supported fixture variables`);
+      if (STATIC_REQUESTED) {
+        const sv = validateGithubUrl(STATIC_URL);
+        if (!sv.ok || sv.url !== STATIC_URL) throw new FailClosed("the static site pin URL is not in canonical form");
+        if (!GIT_SHA_RE.test(STATIC_COMMIT)) throw new FailClosed("the static site pin commit is not a full lowercase 40-hex SHA");
+        targetUrl = STATIC_URL;
+        targetCommit = STATIC_COMMIT;
+        log.push(`mode: static site ${targetUrl} @ ${targetCommit} (no registry, agents off)`);
+      }
+
       // Supported mode: both values are explicit operator input and are validated before Docker is contacted.
       if (SUPPORTED_REQUESTED) {
         const u = process.env[SUPPORTED_URL_VAR] ?? "";
@@ -302,7 +333,7 @@ test(
         targetUrl = u;
         targetCommit = c;
         log.push(`mode: supported fixture ${targetUrl} @ ${targetCommit}`);
-      } else {
+      } else if (!STATIC_REQUESTED) {
         log.push("mode: default pinned Hello-World");
       }
 
@@ -490,7 +521,8 @@ test(
         log.push(`terminal: status=${view.status} stage=${view.stage} outcome=${view.outcome}`);
         if (view.status !== "completed") problems.push(`status ${view.status}, expected completed`);
         if (view.stage !== "done") problems.push(`stage ${view.stage}, expected done`);
-        const expectedOutcome = supported ? "passing" : "unsupported-repository";
+        const expectedOutcome = supported ? "passing" : STATIC_REQUESTED ? "static-site-audited" : "unsupported-repository";
+        if (STATIC_REQUESTED && view.verifiedDiff !== null) problems.push("a verified diff is present, expected none");
         if (view.outcome !== expectedOutcome) problems.push(`outcome ${view.outcome}, expected ${expectedOutcome}`);
         if (view.repair.verified !== false || view.repair.patchApplied !== false) problems.push("repair.verified or repair.patchApplied is not false");
         if (view.repair.patchProposed !== false || view.repair.diagnosed !== false) problems.push("a patch proposal or diagnosis is present, expected none");
@@ -535,6 +567,53 @@ test(
           const fixer = res["fixer"];
           if (!isObj(analyst) || analyst["status"] !== "not-configured") problems.push("analyst is not not-configured (agents must be off)");
           if (!isObj(fixer) || fixer["status"] !== "not-configured") problems.push("fixer is not not-configured (agents must be off)");
+        } else if (STATIC_REQUESTED) {
+          // Nothing was executed and nothing was repaired; the findings are diagnostics, not a verdict on the site.
+          if (res["verdict"] !== "static-site-audited") problems.push(`stored result verdict is ${String(res["verdict"])}, expected static-site-audited`);
+          if (res["sourceKind"] !== "github-pinned") problems.push("stored result sourceKind is not github-pinned");
+          const src = res["source"];
+          if (!isObj(src) || src["repoUrl"] !== STATIC_URL || src["commit"] !== STATIC_COMMIT) problems.push("stored result source is not the pinned static site URL and commit");
+          if (res["profile"] !== "static-site") problems.push(`stored result profile is ${String(res["profile"])}, expected static-site`);
+          if (res["executed"] !== false) problems.push("stored result executed is not false");
+          if (res["repairAttempted"] !== false) problems.push("stored result repairAttempted is not false");
+          const analyst = res["analyst"];
+          const fixer = res["fixer"];
+          if (analyst !== undefined && !(isObj(analyst) && analyst["status"] === "not-configured")) problems.push("analyst output is present (agents must be off)");
+          if (fixer !== undefined && !(isObj(fixer) && fixer["status"] === "not-configured")) problems.push("fixer output is present (agents must be off)");
+
+          const num = (v: unknown): string => (typeof v === "number" && Number.isFinite(v) ? String(v) : "?");
+          const audit = res["audit"];
+          const read = isObj(audit) ? audit["read"] : undefined;
+          const htmlRead = isObj(read) ? read["html"] : undefined;
+          if (typeof htmlRead !== "number" || !(htmlRead > 0)) problems.push(`audit.read.html is ${String(htmlRead)}, expected a number greater than 0`);
+          if (isObj(audit)) {
+            const t = isObj(audit["tree"]) ? audit["tree"] : {};
+            const d = isObj(audit["discovered"]) ? audit["discovered"] : {};
+            const r = isObj(read) ? read : {};
+            const nr = isObj(audit["notRead"]) ? audit["notRead"] : {};
+            const refs = isObj(audit["references"]) ? audit["references"] : {};
+            log.push(`audit tree: files=${num(t["files"])} directories=${num(t["directories"])}`);
+            log.push(`audit discovered: html=${num(d["html"])} css=${num(d["css"])}; read: html=${num(r["html"])} css=${num(r["css"])} bytes=${num(r["bytes"])}; notRead=${num(nr["total"])}; readComplete=${String(audit["readComplete"])}`);
+            log.push(
+              `audit references: ${["extracted", "found", "missing", "caseMismatch", "escapesSiteRoot", "unsafe", "unverifiable", "external", "noTarget", "rootRelative"]
+                .map((k) => `${k}=${num(refs[k])}`)
+                .join(" ")}; baseHrefFiles=${num(audit["baseHrefFiles"])} refsTruncatedFiles=${num(audit["refsTruncatedFiles"])} findingsOmitted=${num(audit["findingsOmitted"])}`,
+            );
+          } else {
+            problems.push("stored result has no audit facts");
+          }
+          const analysis = res["analysis"];
+          const findings = isObj(analysis) && Array.isArray(analysis["findings"]) ? analysis["findings"] : null;
+          if (findings === null) {
+            problems.push("stored result has no analysis findings list");
+          } else {
+            log.push(`audit findings (${String(findings.length)} stored, showing up to ${String(MAX_PRINTED_FINDINGS)}):`);
+            for (const f of findings.slice(0, MAX_PRINTED_FINDINGS)) {
+              const code = isObj(f) && typeof f["code"] === "string" ? f["code"].slice(0, 60) : "?";
+              const detail = isObj(f) && typeof f["detail"] === "string" ? f["detail"].slice(0, MAX_PRINTED_DETAIL) : "?";
+              log.push(`  finding ${code}: ${detail}`);
+            }
+          }
         } else {
           if (res["verdict"] !== "unsupported-repository") problems.push("stored result verdict is not unsupported-repository");
           if (res["sourceKind"] !== "github-pinned") problems.push("stored result sourceKind is not github-pinned");

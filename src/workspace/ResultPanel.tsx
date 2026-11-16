@@ -58,6 +58,31 @@ export default function ResultPanel({ model, jobId }: { model: ResultModel; jobI
       <p>{model.summary}</p>
 
       {model.infrastructure && <p className="ws-hint">{model.infrastructure}</p>}
+      {model.staticAudit && (
+        <div className="ws-substage">
+          <h3>Static site audit findings <small>read-only</small></h3>
+          {model.staticAudit.scope && (
+            <p className="ws-hint"><b>Audit scope:</b> {model.staticAudit.scope}</p>
+          )}
+          {model.staticAudit.problems.length > 0 || (model.staticAudit.total !== null && model.staticAudit.total > 0) ? (
+            <>
+              <p>
+                {model.staticAudit.total !== null
+                  ? `${model.staticAudit.total} ${model.staticAudit.total === 1 ? 'issue' : 'issues'} found`
+                  : 'Issues found'}
+                {model.staticAudit.omitted > 0 && ` (${model.staticAudit.omitted} not listed)`}:
+              </p>
+              <ul className="ws-findings" aria-label="Static site audit findings">
+                {model.staticAudit.problems.map((p, i) => <li key={`${i}-${p}`}>{p}</li>)}
+              </ul>
+            </>
+          ) : model.staticAudit.total === 0 ? (
+            <p className="ws-muted">The audit found no issues within the scope above.</p>
+          ) : (
+            <p className="ws-muted">Finding details are unavailable.</p>
+          )}
+        </div>
+      )}
       {model.findings.length > 0 && (
         <ul className="ws-findings" aria-label="Findings">
           {model.findings.map((f) => <li key={f}>{f}</li>)}
