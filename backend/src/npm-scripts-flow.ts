@@ -9,9 +9,13 @@
  *   verdict "unsupported-repository"  outside the profile (nothing was run)
  * Anything inconclusive (timeout, truncation, malformed protocol, summary mismatch, unconfirmed
  * cleanup, a test stage that did not run) is NOT a result: the job fails as infrastructure.
- * The result view therefore reports "passing" or "failing-undiagnosed". There is never an analyst
- * diagnosis, a fixer proposal or a verification record in this mode: no repository source is sent to
- * Kiro and no patch is proposed, applied or verified, so `repair.verified` is always false.
+ * The result view therefore reports "passing" or "failing-undiagnosed". Without the explicit agent setup
+ * there is never an analyst diagnosis, a fixer proposal or a verification record in this mode: no
+ * repository source is sent to Kiro and no patch is proposed, applied or verified, so
+ * `repair.verified` is always false. With agents configured AND a build-stage failure of a simple
+ * `node FILE` build script, github-runner.ts adds the opt-in verified repair on top of this payload
+ * (npm-scripts-repair.ts: `analyst`, `fixer`, `verification` and `repairEligibility` are added; the
+ * verdict, pipeline, Tester and snapshot facts are unchanged).
  *
  * Container output (the per-stage stdout/stderr tails) is untrusted text and is NOT stored. The
  * result carries only observed statuses, exit codes and durations.

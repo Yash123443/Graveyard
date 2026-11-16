@@ -2,6 +2,26 @@
 
 Project owner: Yash. Branch: backend.
 
+## 2026-11-16: opt-in verified Kiro repair for the pinned npm-scripts profile (written, NOT compiled or run)
+
+Written without a shell, git or any command; nothing here has been compiled or tested, so every statement below describes intended behaviour only. Record external results here once an operator has run `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json` and the suite.
+
+**Switch.** No new variable. It needs the existing `GRAVEYARD_GITHUB_NPM_SCRIPTS=1` (pinned repositories only) AND the existing explicit agent setup (`GRAVEYARD_WORKER_AGENTS=kiro-v2|kiro-v3`). With agents off, or for unpinned and static flows, behaviour is unchanged and no source leaves the host.
+
+**Scope (`npm-scripts-repair.ts`, `build-entry.ts`).** Repair is considered only when the baseline of the unmodified snapshot failed at the build stage (nonzero `npm run build` exit) with prepare and install observed passed, the test stage not run, and cleanup plus staging removal confirmed for exactly the baseline execution id; and `scripts.build` is exactly `node FILE` or `node ./FILE`, FILE a safe root-level `.mjs`/`.cjs`/`.js` name (no directory, extra dots, dotfile, or `test`/`spec` in the name). Anything else keeps the earlier result with an added fixed `repairEligibility` note and no model contact.
+
+**Evidence.** Bounded redacted stage evidence, the two declared script commands (kind `manifest`, no path) and the complete build entry as the only file item. The file is sent only if it is at most 4096 bytes, has no control characters or CR, ends in a newline and is unchanged by secret redaction. Otherwise only the Analyst runs and the Fixer is skipped (`fixer.status: "not-attempted"`, `repairEligibility.skipped: "build-source-unsuitable"`). The original used to apply is re-read from the host snapshot and must equal the text the agents saw; a truncated or redacted original is never applied.
+
+**Apply and verify.** `applyBuildPatch(original, diff, target = "build.mjs")` in `repair-verifier.ts` was generalised (legacy callers unchanged) and re-validates a single-path diff against exact context in memory. The patched file goes into an audited copy of the snapshot: a fresh `run-<hex>` directory under the same run directory, regular files and directories only (no symlinks), exclusive creates, snapshot export bounds, all other files byte-identical, re-read and hash-compared before anything runs. The baseline snapshot is only read. The existing `NpmScriptsPipeline` then runs prepare/install/build/original tests offline with the SAME verified cache directory and the execution id `<job>-fix:<n>`. The copy is removed on every path (`removeRunDir`).
+
+**Verdicts.** `verified` only for pipeline success, Tester `passed`, all four stages observed passed, confirmed container cleanup, removed staging and a removed copy. Observed failure is `tested-failing`. Refusals are `not-attempted` with a fixed reason. A run without a verdict but with confirmed cleanup is `not-attempted` / `verification-inconclusive` (baseline result and advisory outcomes are kept). Unconfirmed cleanup, an unremovable copy, a wrong execution id or an abort fails or aborts the job (no result); `GithubJobRunner.cleanup()` additionally proves `<job>-fix:<n>` absent when this mode and agents are configured, so retries wait for that proof.
+
+**Result gate (`result-view.ts`).** `verificationHolds` now dispatches on `patchClass`: `root-build-mjs-only` (legacy logic untouched) and `npm-scripts-build-entry`, which re-checks `runMode`, the single `targetPath`, the diff headers and sha256, `fixer.files`, file hashes, `distinctExecutionId`, `sameCache`, baseline failed at build with prepare/install passed, cleanup flags and (for verified) all four patched stages. Failing any check downgrades to `failing-with-patch-proposal`.
+
+**Tests.** `src/test/npm-scripts-repair.test.ts` (fakes only): success, out-of-scope proposal, no-patch, unsuitable source, tested failure, inconclusive run, unconfirmed cleanup, wrong execution id, abort, agents off, ineligible failures, verifier refusals (stale evidence, hunk mismatch, symlink, no-op/empty, bad ids), cleanup of the repair id, and result-gate tamper cases.
+
+**Gaps.** Not compiled, not run, no real Docker, GitHub or live Kiro run. The in-container driver, snapshot copy and `removeRunDir` bounds (500 entries) were reasoned about, not measured. The workspace UI still saves a verified diff under its existing filename logic and was not changed; the result carries `verification.targetPath` for a later UI change. A passing re-run is not a review of the patch.
+
 ## 2026-11-06 — foundation milestone
 
 One bounded Kiro CLI implementation request read the backend requirements/design and created the package, TypeScript configuration, Fastify app, environment validation, server startup/shutdown, 16 tests, environment example and README. Kiro was instructed to write only under backend/ and not run shell commands or modify the frontend.
@@ -1483,3 +1503,82 @@ new test, including expected finding order and counts written by hand; that the 
 and `cat-file blob` of the target repository match the fake executor's shape; behaviour on the actual `mumbai-tour`
 commit; parser behaviour on malformed real-world HTML. Run `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json` and
 `node --test dist-test/test/*.js`, then record the results here and in `.kiro/PROJECT.md`.
+
+
+## 2026-11-16: npm-scripts Kiro repair, verification hardening (written by Kiro, NOT compiled, NOT run)
+
+File tools only: no shell, no git, no compiler, no tests, no Docker, no kiro-cli. Backend and `.kiro/` only.
+
+**Why.** A `scripts.test` that does nothing (`echo ok`, `node build.js`, a `node --test` that discovers zero tests) could pass
+every stage and still earn `repair-verified`. For the new `npm-scripts-build-entry` class only, that is closed in two places.
+
+- **Test script (eligibility).** `build-entry.ts` `parseRepairTestScript`: `scripts.test` must be exactly `node --test` or
+  `node --test FILE` with one safe, simple, root-level, test-like file name (`test.mjs` is the live harness form). No flags,
+  reporter options, directories, globs, pipelines, `&&`, `;` or redirects. Outside it the baseline is `not-eligible`
+  (`checkRepairEligibility` takes the test script as a fourth argument), no agent runs and no source is sent to Kiro.
+  `verifyNpmScriptsRepair` also refuses with `test-script-not-supported` (new required input `testScript`).
+- **TAP counts (verification).** For an otherwise passing patched copy, `parseTapCounts` (`node-fixture-runner.ts`, unchanged)
+  runs on the patched test stage's stdout tail. `testCountsAcceptable` requires every count a non-negative integer, `tests >= 1`,
+  `pass >= 1`, `fail = 0`, `cancelled = 0`, and `pass`, `skipped`, `todo` not above `tests`. Missing or failing counts record
+  `not-attempted` / `tests-not-confirmed` and the outcome stays `failing-with-patch-proposal`. The verification record gains
+  `testScript` and `testCounts`; `npmScriptsVerificationHolds` in `result-view.ts` re-checks both (the script for both
+  statuses, the counts for `verified`) before `GET /api/jobs/:id/result` reports `repair-verified`.
+- **Unchanged.** The legacy root `build.mjs` repair class and its measurements, the baseline gate, the container limits, the
+  driver and the Docker, proxy and egress policy.
+
+**Tests** (`src/test/npm-scripts-repair.test.ts`): script parser accept and refuse tables, count acceptance table, eligibility
+refusals for `echo ok`, `node build.js`, a reporter flag, a directory and a chained command, the `node --test test.mjs` form,
+runner and verifier cases for missing, empty, zero, failed, cancelled, inconsistent and indented-only TAP, and result-gate
+tamper cases for removed or zeroed counts and no-op test scripts. The success fixture now carries a TAP summary in the test
+stage tail; no assertion was weakened. **Not compiled or run after this change.**
+
+**Harness.** `src/test/manual-npm-repair-e2e-check.ts` now logs accurately: Kiro receives only `build.js`, the declared build
+and test commands and bounded, redacted stage evidence, not `package.json`, `package-lock.json` or `test.mjs`. It also asserts
+the stored `testCounts`. Invocation (from `backend/`, outside the restricted sandbox):
+
+```powershell
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_NPM_REPAIR_E2E = "1"
+$env:GRAVEYARD_NPM_FIXTURE_DIR = "C:\path\to\fixture"
+$env:GRAVEYARD_NPM_CACHE_DIR = "C:\path\to\npm-cache"
+$env:GRAVEYARD_WORKER_AGENTS = "kiro-v2"
+node --test dist-test/test/manual-npm-repair-e2e-check.js
+```
+
+**Known intermediate verification (reported externally, before this hardening; Kiro observed none of it).** Backend and
+frontend type checks passed. 246 focused tests passed. A real Kiro v2 and offline Docker repair passed for the controlled npm
+`build.js` fixture with a prepopulated, locked cache, with Git acquisition and the registry handoff mocked. **A final rerun
+(both `tsc` configurations, the suite and the live harness) is pending after this hardening;** none of it covers the code
+changed here, and no real GitHub or registry contact is shown.
+
+
+## 2026-11-17: measured results for the npm-scripts Kiro repair milestone (supersedes the pending-validation notes above)
+
+Authorship and verification. Kiro CLI wrote the implementation. Codex performed the verification. The "NOT compiled, NOT run" and
+"final rerun pending" statements in the 2026-11-16 npm-scripts entries describe the state before these runs and are superseded by
+the measurements below (left unedited as history).
+
+Measured on 2026-11-17 (reported by Codex):
+
+- Production frontend Vite build passed.
+- Backend `tsc -p tsconfig.json` and `tsc -p tsconfig.test.json` passed.
+- 257 focused backend tests passed.
+- Controlled fixture: Git acquisition and the registry handoff mocked, offline Docker real, Kiro CLI v2 real.
+- First implementation, full live Analyst, Fixer and Tester: returned the exact one-file verified diff in about 70 s.
+- Final version with the TAP count and protected-test hardening, real Docker with an injected known proposal: 1 test observed
+  passed, and no leftover containers or staging directories.
+- Final attempts with real Kiro did not reproduce a verified repair: two runs returned a diagnosis only, and one returned a
+  valid-shaped proposal that stayed unverified.
+
+Not shown and not claimed:
+
+- The broad `node --test` suite was stopped after a process-launch suite failure. It did not complete, and no claim is made that
+  the full suite passes.
+- No run against a public npm repository has occurred. Git acquisition and the registry were mocked in every live run.
+- Live Kiro repair is not reliable: one early success and three later non-verifying runs. Model output varies between runs.
+
+Harness diagnostics (`src/test/manual-npm-repair-e2e-check.ts`). The harness now prints one `DIAG` line even when the run fails.
+It lists only whitelisted keys (`status`, `code`, `outcome`, `failedStage`) of the recorded pipeline, analyst, fixer and
+verification fields (including `verification.patched` and `verification.tester`), each only if the value is a short lowercase
+code, plus the TAP counts as small integers. Anything else prints `?`. No source text, diff, diagnosis, evidence, command
+output or credential is printed. This edit was not compiled or run.

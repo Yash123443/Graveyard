@@ -45,7 +45,9 @@ export default function ResultPanel({ model, jobId }: { model: ResultModel; jobI
 
   const onSave = () => {
     if (model.verifiedDiff === null) return
-    const ok = saveTextFile(diffFileName(jobId), model.verifiedDiff)
+    const files = model.proposal?.files ?? []
+    const target = files.length === 1 ? files[0] : null
+    const ok = saveTextFile(diffFileName(jobId, target), model.verifiedDiff)
     setSaved(ok)
     setSaveError(ok ? '' : 'This browser blocked the download. Select the diff below and copy it instead.')
   }
@@ -122,7 +124,7 @@ export default function ResultPanel({ model, jobId }: { model: ResultModel; jobI
               {model.verified
                 ? 'applied to a disposable copy only'
                 : model.outcome === 'patch-failed-verification'
-                  ? 'tested in a disposable copy, still failing, not applied'
+                  ? 'verification failed in a disposable copy, not applied'
                   : 'unverified, not applied'}
             </small>
           </h3>

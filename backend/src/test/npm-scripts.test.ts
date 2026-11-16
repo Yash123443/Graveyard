@@ -355,6 +355,26 @@ describe("npm scripts driver", () => {
     }
   });
 
+  it("does not run the tests when the build rewrote root test.mjs or the file named by `node --test FILE`", async () => {
+    const named = `${JSON.stringify({ ...(JSON.parse(texts.packageJson) as object), scripts: { build: "node build.js", test: "node --test ./check.js" } })}\n`;
+    const cases: Array<{ extra: Record<string, string>; file: string }> = [
+      { extra: { "test.mjs": "// original\n" }, file: "test.mjs" },
+      { extra: { "package.json": named, "check.js": "// original\n" }, file: "check.js" },
+    ];
+    for (const c of cases) {
+      rmSync(join(tmp, "fixture"), { recursive: true, force: true });
+      rmSync(join(tmp, "work"), { recursive: true, force: true });
+      const { source, work } = makeSource(c.extra);
+      const { runner, calls } = recorder((n) => {
+        if (n === 2) writeFileSync(join(work, "project", c.file), "// rewritten by the build\n");
+      });
+      const result = await runScriptsPipeline({ sourceDir: source, workDir: work, cacheDir: join(tmp, "cache"), runner });
+      assert.equal(calls.length, 2, `${c.file}: the test script must not run`);
+      const test = result.stages.find((s) => s.stage === "test") as DriverStage;
+      assert.equal(test.reason, "refused", c.file);
+    }
+  });
+
   it("allows a build to change non-test files (generated output)", async () => {
     const { source, work } = makeSource();
     const { runner } = recorder((n) => {

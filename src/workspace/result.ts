@@ -234,8 +234,15 @@ export function buildResultModel(view: ResultView): ResultModel {
   }
 }
 
-/** Plain, safe file name for the saved diff. Derived from the job id, never from repository text. */
-export function diffFileName(jobId: string): string {
+/** A root-level script file name only: no path, no leading dot, one extension of .js, .mjs or .cjs. */
+const SAFE_TARGET = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\.(?:js|mjs|cjs)$/
+
+/**
+ * Plain, safe file name for the saved diff. Derived from the job id and, only if it matches a
+ * simple safe root filename grammar, the proposed target. Anything else falls back to build.mjs.
+ */
+export function diffFileName(jobId: string, target?: string | null): string {
   const safe = jobId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)
-  return `graveyard-${safe || 'job'}-build.mjs.diff`
+  const name = typeof target === 'string' && SAFE_TARGET.test(target) ? target : 'build.mjs'
+  return `graveyard-${safe || 'job'}-${name}.diff`
 }

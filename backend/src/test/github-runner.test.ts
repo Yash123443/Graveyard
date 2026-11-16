@@ -203,6 +203,8 @@ function makeRig(opts: {
   pins?: Map<string, string>;
   /** Enables the static site audit seam on the runner. */
   readStaticSite?: (info: HandoffInfo) => Promise<StaticSiteRead>;
+  /** Replaces the execution-id cleanup check used by the runner (and its fixture fallback). */
+  cleanupExecution?: (id: string) => Promise<CleanupProof>;
 } = {}): Rig {
   const runsRoot = join(tmp, "runs");
   mkdirSync(runsRoot, { recursive: true });
@@ -243,7 +245,7 @@ function makeRig(opts: {
   });
 
   const fixtureSource: SourceFile[] = [{ path: "package.json", text: "{}\n", complete: true }];
-  const cleanupExecution = (id: string): Promise<CleanupProof> => Promise.resolve(okProof(id));
+  const cleanupExecution = opts.cleanupExecution ?? ((id: string): Promise<CleanupProof> => Promise.resolve(okProof(id)));
   const fallback = new PipelineJobRunner({
     resolve: (url) => (url === FIXTURE_REPO ? { fixture: "fx1", files: fixtureSource } : null),
     pipeline: fixturePipeline,
@@ -760,6 +762,41 @@ describe("GithubJobRunner.cleanup", () => {
     const rig = makeRig();
     const p = await rig.runner.cleanup({ ...req(), executionId: "bad id" });
     assert.equal(p.confirmed, false);
+  });
+
+  // The rig has no npmScripts and no agents configured, as after a restart or a configuration flip.
+  it("checks the derived repair execution id even when npm-scripts and agents are disabled", async () => {
+    const seen: string[] = [];
+    const rig = makeRig({
+      cleanupExecution: (id) => {
+        seen.push(id);
+        return Promise.resolve(okProof(id));
+      },
+    });
+    const p = await rig.runner.cleanup(req());
+    assert.equal(p.confirmed, true);
+    assert.deepEqual(seen, ["abc-1:1", "abc-1-fix:1"]);
+    assert.equal(p.confirmed === true ? p.executionId : "", "abc-1:1");
+  });
+
+  it("is unconfirmed when a leftover repair sandbox remains, even with npm-scripts and agents disabled", async () => {
+    const rig = makeRig({
+      cleanupExecution: (id) =>
+        Promise.resolve(id === "abc-1-fix:1" ? { confirmed: false, reason: "repair container still present" } : okProof(id)),
+    });
+    const p = await rig.runner.cleanup(req());
+    assert.equal(p.confirmed, false);
+  });
+
+  it("is unconfirmed when the repair check raises an error or proves another execution", async () => {
+    const raising = makeRig({
+      cleanupExecution: (id) => (id === "abc-1-fix:1" ? Promise.reject(new Error("boom")) : Promise.resolve(okProof(id))),
+    });
+    assert.equal((await raising.runner.cleanup(req())).confirmed, false);
+    const wrong = makeRig({
+      cleanupExecution: (id) => Promise.resolve(id === "abc-1-fix:1" ? okProof("other-fix:1") : okProof(id)),
+    });
+    assert.equal((await wrong.runner.cleanup(req())).confirmed, false);
   });
 });
 

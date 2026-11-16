@@ -79,8 +79,24 @@ export const SCRIPTS_CONTAINER_LIMITS = Object.freeze({
 });
 
 /** Paths that a build must not change before the tests run: tests, the manifest and the lockfile. */
-export const TEST_LIKE_RE = /(^|\/)(test|tests|__tests__|spec|specs)(\/|$)|\.(test|spec)\.[cm]?[jt]sx?$/i;
+export const TEST_LIKE_RE =
+  /(^|\/)(test|tests|__tests__|spec|specs)(\/|$)|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)([^/]*[-_.])?(test|spec)([-_.][^/]*)?\.[cm]?[jt]sx?$/i;
 const ALWAYS_PROTECTED: readonly string[] = ["package.json", "package-lock.json"];
+const NAMED_TEST_RE = /^node --test (?:\.\/)?([A-Za-z0-9_][A-Za-z0-9_.-]*)$/;
+
+/** The safe root filename of an explicit `node --test [./]FILE` script in the original manifest, else null. */
+export function namedTestFile(originalPackageJson: Buffer): string | null {
+  try {
+    const m: unknown = JSON.parse(originalPackageJson.toString("utf8"));
+    const scripts = typeof m === "object" && m !== null ? (m as { scripts?: unknown }).scripts : undefined;
+    const t = typeof scripts === "object" && scripts !== null ? (scripts as { test?: unknown }).test : undefined;
+    const match = typeof t === "string" ? NAMED_TEST_RE.exec(t) : null;
+    const name = match?.[1] ?? null;
+    return name === null || name === "." || name === ".." ? null : name;
+  } catch {
+    return null;
+  }
+}
 
 export interface ScriptsDriverOptions {
   sourceDir?: string;
@@ -333,8 +349,9 @@ function restoreOriginalManifest(p: Prepared): boolean {
 /** True only if package.json, package-lock.json and every test-like file still equal the snapshot bytes. */
 export function protectedFilesUnchanged(p: Prepared): boolean {
   try {
+    const named = namedTestFile(p.originalPackageJson);
     for (const [rel, digest] of p.digests) {
-      if (!ALWAYS_PROTECTED.includes(rel) && !TEST_LIKE_RE.test(rel)) continue;
+      if (!ALWAYS_PROTECTED.includes(rel) && !TEST_LIKE_RE.test(rel) && rel !== named) continue;
       const now = readRegularFile(join(p.projectDir, ...rel.split("/")), SCRIPTS_COPY_LIMITS.maxFileBytes);
       if (sha256(now) !== digest) return false;
     }

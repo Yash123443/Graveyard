@@ -274,7 +274,7 @@ export function projectPipeline(r: ControlledPipelineResult): Record<string, unk
   };
 }
 
-function projectAnalyst(o: AgentOutcome<Diagnosis> | null): Record<string, unknown> {
+export function projectAnalyst(o: AgentOutcome<Diagnosis> | null): Record<string, unknown> {
   if (o === null) return { status: "not-configured" };
   if (o.status !== "ok") return { status: o.status, code: o.code };
   const d = o.value;
@@ -290,7 +290,10 @@ function projectAnalyst(o: AgentOutcome<Diagnosis> | null): Record<string, unkno
   };
 }
 
-function projectFixer(o: AgentOutcome<PatchProposal> | null, reason: "not-configured" | "no-diagnosis"): Record<string, unknown> {
+export function projectFixer(
+  o: AgentOutcome<PatchProposal> | null,
+  reason: "not-configured" | "no-diagnosis" | "not-attempted",
+): Record<string, unknown> {
   if (o === null) return { status: reason };
   if (o.status !== "ok") return { status: o.status, code: o.code };
   const p = o.value;

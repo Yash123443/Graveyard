@@ -47,6 +47,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { parseUnifiedDiff, type PatchProposal } from "./agent-contract.js";
 import type { ControlledPipelineResult, PipelineRequest } from "./controlled-pipeline.js";
+import { isBuildEntryName } from "./build-entry.js";
 import { createRunDir, removeRunDir, writeFixture } from "./fixture-workspace.js";
 import { buildPipelineTesterReport, type PipelineTesterReport } from "./tester.js";
 
@@ -166,19 +167,22 @@ const rej = (reason: NotAttemptedReason): { ok: false; reason: NotAttemptedReaso
  * process. Strict validation (agent-contract) first, then an independent position-by-position
  * application that re-checks every context and removed line against the original.
  */
-export function applyBuildPatch(original: string, diff: string): ApplyResult {
+export function applyBuildPatch(original: string, diff: string, target: string = PATCH_TARGET): ApplyResult {
   if (typeof original !== "string" || typeof diff !== "string") return rej("diff-invalid");
+  // `target` is the one file the diff may touch: the legacy default `build.mjs`, or (npm-scripts
+  // mode) a simple root build entry chosen by the caller from the declared build script.
+  if (!isBuildEntryName(target)) return rej("path-not-allowed");
   if (Buffer.byteLength(original, "utf8") > MAX_FILE_BYTES) return rej("originals-too-large");
   if (original.length === 0 || CONTROL_RE.test(original) || !original.endsWith("\n")) return rej("original-unsuitable");
 
-  const parsed = parseUnifiedDiff(diff, new Map([[PATCH_TARGET, { complete: true, text: original }]]));
+  const parsed = parseUnifiedDiff(diff, new Map([[target, { complete: true, text: original }]]));
   if (!parsed.ok) {
     if (parsed.code === "path-not-in-evidence" || parsed.code === "unsafe-path") return rej("path-not-allowed");
     if (parsed.code === "context-mismatch") return rej("hunk-mismatch");
     return rej("diff-invalid");
   }
   const p = parsed.value;
-  if (p.files.length !== 1 || p.files[0] !== PATCH_TARGET || !p.contextVerified) return rej("path-not-allowed");
+  if (p.files.length !== 1 || p.files[0] !== target || !p.contextVerified) return rej("path-not-allowed");
   if (p.diff !== diff) return rej("diff-invalid"); // must already be the normalised, newline-terminated form
 
   const dl = diff.split("\n");

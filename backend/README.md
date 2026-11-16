@@ -418,11 +418,53 @@ that passes it has anything exported), `building` (snapshot to host, registry ac
 `sourceKind` `github-pinned` and `runMode` `npm-scripts`, observed stage statuses, exit codes and durations, the declared
 script texts, snapshot digests and the fixed limits. Container output is not stored. Anything inconclusive (timeout,
 truncation, malformed protocol, `added N packages` mismatch, unconfirmed cleanup) fails the job as
-`infrastructure-unavailable`. `GET /api/jobs/:id/result` is unchanged: the outcome is `passing` or `failing-undiagnosed`,
-`repair.verified` is `false` and `repair.patchApplied` is `false`. No repair is ever claimed in this mode.
+`infrastructure-unavailable`. With agents off, `GET /api/jobs/:id/result` is unchanged: the outcome is `passing` or
+`failing-undiagnosed`, `repair.verified` is `false` and `repair.patchApplied` is `false`; no repair is claimed. With the
+agent setup and the repair class below, `repair-verified` (and `verifiedDiff`) is possible; `repair.patchApplied` is
+always `false`.
 
-**Kiro.** Not used in this mode. No Analyst or Fixer call is made, no repository source is sent to Kiro, and the repair
-verifier (root `build.mjs` only) is not used. `analyst` and `fixer` are stored as `not-applicable`.
+**Kiro.** Off by default. With agents off (`GRAVEYARD_WORKER_AGENTS=off`, the default) no Analyst or Fixer call is made, no
+repository source is sent to Kiro, and `analyst` and `fixer` are stored as `not-applicable`. Only when the operator
+**also** sets `GRAVEYARD_WORKER_AGENTS` to `kiro-v2` or `kiro-v3` does a narrow repair class apply, and only for a **pinned**
+repository whose baseline run failed at the **build** stage (install passed, cleanup confirmed):
+
+- `scripts.build` is exactly `node FILE` or `node ./FILE` (one safe, simple, root `.mjs`, `.cjs` or `.js` name that is not
+  test-like), and `scripts.test` is exactly `node --test` or `node --test FILE` (one safe root test-like file name such as
+  `test.mjs`; no flags, pipelines, `&&` or other commands). A test script such as `echo ok`, `node build.js` or a glob
+  that finds no tests is outside the class, so it can never earn a verified repair. Outside the class no agent runs
+  and nothing is sent to Kiro.
+- **What Kiro receives:** bounded, redacted stage output of the failed build, the two declared script commands, and the
+  complete build entry file (at most 4 KiB, only if it passes the completeness and redaction check). It does **not**
+  receive `package.json`, `package-lock.json`, the test file or any other file. A proposal can only name the build entry.
+- The proposal is applied in memory to an audited disposable copy of the snapshot, never to the original, and the copy
+  is installed, built and tested offline in the network-`none` container with the same verified cache and a distinct
+  execution id. `repair.patchApplied` stays `false`.
+- **Verification bounds.** `repair-verified` needs every stage passed, the Tester `passed`, confirmed cleanup, and TAP counts
+  parsed from the test stage output of the patched copy (`parseTapCounts`) that show at least one passed test, no failed or
+  cancelled test and consistent totals. Missing, zero or inconsistent counts record `not-attempted` /
+  `tests-not-confirmed` (outcome `failing-with-patch-proposal`, never verified). The counts and the test script are stored
+  in `verification` (`testCounts`, `testScript`) and `GET /api/jobs/:id/result` re-checks both before it reports
+  `repair-verified`. This shows the original tests pass with the patch; it is not a review of the patch and does not show the
+  tests are sufficient.
+- The legacy root `build.mjs` flow and its measurements are unchanged.
+
+**Live harness (opt-in, real Docker and real `kiro-cli`).** `src/test/manual-npm-repair-e2e-check.ts` drives the real
+`GithubJobRunner`, network-`none` pipeline, cleanup proofs and `KiroAgentAdapter` for one controlled fixture whose
+`package.json` declares `build: node build.js` and `test: node --test test.mjs`. Git acquisition, the snapshot handoff and
+registry acquisition are faked (the registry fake only hands over the prepopulated cache); no public repository or registry
+is contacted. From `backend/`:
+
+```powershell
+pnpm run build:test
+$env:GRAVEYARD_MANUAL_NPM_REPAIR_E2E = "1"
+$env:GRAVEYARD_NPM_FIXTURE_DIR = "C:\path\to\fixture"   # package.json + package-lock.json: exactly is-number and is-buffer
+$env:GRAVEYARD_NPM_CACHE_DIR = "C:\path\to\npm-cache"   # prepopulated for exactly that lock
+$env:GRAVEYARD_WORKER_AGENTS = "kiro-v2"                # or kiro-v3
+node --test dist-test/test/manual-npm-repair-e2e-check.js
+```
+
+It makes one Analyst and one Fixer request to the signed-in `kiro-cli`; the harness log states that Kiro receives only
+`build.js`, the declared commands and redacted stage evidence. Without `GRAVEYARD_MANUAL_NPM_REPAIR_E2E=1` it is skipped.
 
 **Known limits (unverified).** `/work` is a `noexec` tmpfs, so a script that executes a `node_modules/.bin` entry directly
 cannot run and is reported as that stage failing; scripts that call `node <file>` or `node --test` are unaffected. Archive
@@ -481,7 +523,10 @@ unavailable" otherwise.
 ### Kiro usage in this flow
 
 Kiro (the agent adapter, `GRAVEYARD_WORKER_AGENTS`) is never invoked for `source-inspected` jobs and receives no unpinned
-source. It runs only for pinned or fixture jobs, as before, on bounded redacted evidence of a failing build. The code of
+source. It runs only for pinned or fixture jobs, as before, on bounded redacted evidence of a failing build. In npm scripts
+mode it runs only with the explicit agent setup, for a build-stage failure of a `node FILE` build script with a
+`node --test [FILE]` test script, and then receives only the build entry file, the declared commands and redacted stage
+evidence. The code of
 this milestone was written by Kiro CLI in one bounded request without running any tool; see `.kiro/KIRO_USAGE.md`.
 
 ### Variables
@@ -759,3 +804,18 @@ backend/
 ├── tsconfig.json           # Production build (src/ → dist/)
 └── tsconfig.test.json      # Test build (src/ + src/test/ → dist-test/)
 ```
+
+## npm-scripts Kiro repair: measured status (2026-11-17)
+
+This supersedes any earlier "not compiled or run" or "final rerun pending" wording about the opt-in npm-scripts repair. Kiro CLI
+wrote the implementation; Codex performed the verification.
+
+Measured on 2026-11-17: the production frontend Vite build, backend `tsc` (both configurations) and 257 focused backend tests
+passed. The controlled fixture used a mocked Git and registry handoff, real offline Docker and Kiro CLI v2. The first
+implementation ran live Analyst, Fixer and Tester and returned the exact one-file verified diff in about 70 s. The final
+version, with TAP count and protected-test hardening, passed on real Docker with an injected known proposal (1 test observed
+passed, no leftover resources). Final attempts with real Kiro did not reproduce that verification: two returned a diagnosis
+only and one returned a valid-shaped proposal that stayed unverified.
+
+Not shown: the broad suite was stopped after a process-launch suite failure, so a full-suite pass is not claimed. No public
+npm repository has been run, and live Kiro repair is not shown to be reliable. See `DEVELOPMENT.md`.

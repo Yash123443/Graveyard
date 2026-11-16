@@ -57,9 +57,15 @@
  * git container (npm-scripts-snapshot.ts), dependencies are acquired from a manifest with `scripts`
  * removed, and `npm run build` / `npm run test` run offline in the network-none container
  * (npm-scripts-pipeline.ts). The result keeps the existing verdicts ("verified",
- * "repository-failing", "unsupported-repository") and adds `runMode: "npm-scripts"`. No agent and no
- * repair verifier is used in this mode and no repair is ever claimed. The root build.mjs flow above
- * is unchanged and is taken whenever package.json has no `scripts`.
+ * "repository-failing", "unsupported-repository") and adds `runMode: "npm-scripts"`. Without the
+ * explicit agent setup no agent and no repair verifier is used in this mode and no repair is ever
+ * claimed. With agents configured (GRAVEYARD_WORKER_AGENTS) AND a baseline that failed at the build
+ * stage of a `node FILE` build script, the opt-in verified repair (npm-scripts-repair.ts) runs the
+ * Analyst and Fixer on bounded redacted evidence plus the complete build entry, and verifies a
+ * validated single-file proposal on an audited disposable copy with the same cache and a distinct
+ * execution id (`deriveRepairExecutionId`, also proven by cleanup()). Written without a shell, NOT
+ * compiled or run. The root build.mjs flow above is unchanged and is taken whenever package.json has
+ * no `scripts`.
  *
  * @module github-runner
  */
@@ -84,6 +90,7 @@ import { runRegistryThenOffline } from "./registry-pipeline.js";
 import type { CleanupProof, CleanupRequest, JobProgress, JobRunner, RunContext, RunOutcome } from "./runner.js";
 import { judgeScriptsRun, scriptsUnsupportedPayload } from "./npm-scripts-flow.js";
 import { declaresScripts, planNpmScripts, type ScriptsFinding } from "./npm-scripts-policy.js";
+import { applyRepairStep, deriveRepairExecutionId, runNpmScriptsRepairStep } from "./npm-scripts-repair.js";
 import type { SnapshotOutcome } from "./npm-scripts-snapshot.js";
 import { staticSiteResultPayload, type StaticSiteAudit, type StaticSiteRead } from "./static-site-audit.js";
 
@@ -462,17 +469,21 @@ export class GithubJobRunner implements JobRunner {
     if (!report.stage("building", "dependencies are fetched through the registry-only proxy, then install, npm run build and npm run test run offline in a disposable container")) {
       return ABORTED;
     }
+    // The verified offline cache of the baseline run, reused (never re-acquired) for a repair verification.
+    const cacheBox: { dir: string | null } = { dir: null };
     const res = await runRegistryThenOffline(
       {
         acquire: (r) => registry.acquire(r),
-        makePipeline: (cacheDir) =>
-          scripts.makePipeline({
+        makePipeline: (cacheDir) => {
+          cacheBox.dir = cacheDir;
+          return scripts.makePipeline({
             runDir,
             snapshot: snapshot.name,
             cacheDir,
             installManifest: plan.sanitizedPackageJson,
             expectedPackages: plan.expectedPackages,
-          }),
+          });
+        },
       },
       {
         acquisition: {
@@ -508,7 +519,37 @@ export class GithubJobRunner implements JobRunner {
       },
     });
     if (judged.kind === "infrastructure") return infra(judged.reason);
-    return report.result(judged.payload) ? { kind: "completed" } : ABORTED;
+    let payload = judged.payload;
+    // Opt-in verified repair: only with the explicit agent setup AND a baseline that failed at the build
+    // stage of a simple `node FILE` build script (npm-scripts-repair.ts). Agents off: nothing changes.
+    const agents = this.o.agents;
+    if (agents !== undefined && payload["verdict"] === "repository-failing") {
+      const step = await runNpmScriptsRepairStep({
+        agents,
+        report,
+        signal: ctx.signal,
+        executionId: ctx.executionId,
+        baseline: res.pipeline,
+        plan,
+        runDir,
+        snapshotName: snapshot.name,
+        cacheDir: cacheBox.dir,
+        makePipeline: (a) =>
+          cacheBox.dir === null || a.cacheDir !== cacheBox.dir
+            ? null
+            : scripts.makePipeline({
+                runDir,
+                snapshot: a.snapshot,
+                cacheDir: a.cacheDir,
+                installManifest: plan.sanitizedPackageJson,
+                expectedPackages: plan.expectedPackages,
+              }),
+      });
+      if (step.kind === "aborted" || ctx.signal.aborted) return ABORTED;
+      if (step.kind === "infrastructure") return infra(step.reason);
+      payload = applyRepairStep(payload, step);
+    }
+    return report.result(payload) ? { kind: "completed" } : ABORTED;
   }
 
   /**
@@ -670,10 +711,24 @@ export class GithubJobRunner implements JobRunner {
       if (reg.executionId !== registryId) return { confirmed: false, reason: "registry cleanup proof is for a different execution" };
     }
 
+    // A previous attempt may have run a verified repair (npm-scripts mode with agents) before a restart or
+    // a configuration change. The patched copy has its own deterministic execution id, so it is proven
+    // absent regardless of the current feature flags.
+    const repairId = deriveRepairExecutionId(req.executionId);
+    if (repairId === null) return { confirmed: false, reason: "the execution id has an unexpected form; cleanup cannot be proven" };
+    let fix: CleanupProof;
+    try {
+      fix = await this.o.cleanupExecution(repairId);
+    } catch {
+      return { confirmed: false, reason: "the repair verification cleanup check raised an error" };
+    }
+    if (fix.confirmed !== true) return fix;
+    if (fix.executionId !== repairId) return { confirmed: false, reason: "repair verification cleanup proof is for a different execution" };
+
     return {
       confirmed: true,
       executionId: req.executionId,
-      evidence: "sandbox, git acquisition and registry acquisition containers are absent for this execution",
+      evidence: "sandbox, git acquisition, registry acquisition and repair verification containers are absent for this execution",
     };
   }
 }

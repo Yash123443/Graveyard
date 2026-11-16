@@ -17,6 +17,9 @@
  *   passing                    the unmodified controlled fixture built and passed its tests.
  *   repair-verified            the fixture fails; a model-authored patch to the root build.mjs, applied to a
  *                              disposable copy, installed, built and passed the original tests offline.
+ *                              Two stored classes are re-checked: `root-build-mjs-only` (build.mjs) and, for
+ *                              runMode "npm-scripts", `npm-scripts-build-entry` (one verified `targetPath`
+ *                              root build entry, baseline failed at build, distinct execution id, same cache).
  *   patch-failed-verification  the same, but the patched copy was tested and still failed (tested failure).
  *   failing-with-patch-proposal  the fixture fails; a model-authored patch was proposed, NOT verified
  *                              (not attempted, refused, or no verification record).
@@ -40,6 +43,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { LEGACY_PATCH_CLASS, NPM_SCRIPTS_PATCH_CLASS, isBuildEntryName, parseRepairTestScript, testCountsAcceptable } from "./build-entry.js";
 import type { JobResultRecord } from "./jobs.js";
 import { isTerminalStatus } from "./jobs.js";
 
@@ -203,6 +207,83 @@ function sameStrings(v: unknown, expected: readonly string[]): boolean {
  * must all agree.
  */
 function verificationHolds(
+  result: Record<string, unknown>,
+  fixer: Record<string, unknown>,
+  v: Record<string, unknown>,
+  expected: "verified" | "tested-failing",
+): boolean {
+  if (v["patchClass"] === LEGACY_PATCH_CLASS) return legacyVerificationHolds(result, fixer, v, expected);
+  if (v["patchClass"] === NPM_SCRIPTS_PATCH_CLASS) return npmScriptsVerificationHolds(result, fixer, v, expected);
+  return false;
+}
+
+const HEX64_RE = /^[0-9a-f]{64}$/;
+const sha256Hex = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
+
+/**
+ * Re-checks a stored verification of the npm-scripts class (npm-scripts-repair.ts): the result is a
+ * pinned npm-scripts run whose baseline failed at the BUILD stage with prepare and install passed;
+ * exactly one root build entry path is patched, in the diff headers, `fixer.files` and the record;
+ * the diff and file hashes are well formed; a distinct execution id and the same cache were used;
+ * every cleanup flag holds; the recorded test script is exactly `node --test` or `node --test FILE`; and,
+ * for `verified`, the patched copy's observed stages all passed and its stored TAP counts show at least one
+ * passed test, none failed or cancelled, and consistent totals.
+ */
+function npmScriptsVerificationHolds(
+  result: Record<string, unknown>,
+  fixer: Record<string, unknown>,
+  v: Record<string, unknown>,
+  expected: "verified" | "tested-failing",
+): boolean {
+  if (v["status"] !== expected || v["originalModified"] !== false) return false;
+  if (result["runMode"] !== "npm-scripts" || result["sourceKind"] !== "github-pinned" || v["runMode"] !== "npm-scripts") return false;
+  const target = v["targetPath"];
+  if (!isBuildEntryName(target)) return false;
+  const diff = fixer["diff"];
+  if (typeof diff !== "string" || diff === "" || v["diffSha256"] !== sha256Hex(diff)) return false;
+  if (!diff.startsWith(`--- a/${target}\n+++ b/${target}\n`)) return false;
+  if (!sameStrings(v["patchedFiles"], [target]) || !sameStrings(fixer["files"], [target])) return false;
+  const orig = v["originalTargetSha256"];
+  const patchedSha = v["patchedTargetSha256"];
+  if (typeof orig !== "string" || typeof patchedSha !== "string" || !HEX64_RE.test(orig) || !HEX64_RE.test(patchedSha) || orig === patchedSha) {
+    return false;
+  }
+  if (v["distinctExecutionId"] !== true || v["sameCache"] !== true) return false;
+  // The recorded test command must be one that can show tests ran (also for a tested failure).
+  if (parseRepairTestScript(v["testScript"]) === null) return false;
+  const pre = result["pipeline"];
+  const preTester = result["tester"];
+  const baseline = v["baseline"];
+  if (!isObj(pre) || pre["status"] !== "failure" || pre["failedStage"] !== "build" || !isObj(preTester) || preTester["status"] !== "failed") return false;
+  if (!isObj(baseline) || baseline["status"] !== "failure" || baseline["failedStage"] !== "build") return false;
+  const preStages = pre["stages"];
+  if (!Array.isArray(preStages)) return false;
+  const stageStatus = (list: unknown[], name: string): unknown => {
+    const s = list.find((x) => isObj(x) && x["stage"] === name);
+    return isObj(s) ? s["status"] : undefined;
+  };
+  if (stageStatus(preStages, "prepare") !== "passed" || stageStatus(preStages, "install") !== "passed" || stageStatus(preStages, "build") !== "failed") {
+    return false;
+  }
+
+  const patched = v["patched"];
+  const tester = v["tester"];
+  const cleanup = v["cleanup"];
+  if (!isObj(patched) || !isObj(tester) || !isObj(cleanup)) return false;
+  if (cleanup["confirmed"] !== true || cleanup["stagingRemoved"] !== true || cleanup["cloneRemoved"] !== true) return false;
+  if (typeof v["measuredMs"] !== "number" || !Number.isFinite(v["measuredMs"])) return false;
+  if (expected === "tested-failing") return patched["status"] === "failure" && tester["status"] === "failed";
+  const patchedStages = patched["stages"];
+  return (
+    patched["status"] === "success" &&
+    tester["status"] === "passed" &&
+    testCountsAcceptable(v["testCounts"]) &&
+    Array.isArray(patchedStages) &&
+    ["prepare", "install", "build", "test"].every((n) => stageStatus(patchedStages, n) === "passed")
+  );
+}
+
+function legacyVerificationHolds(
   result: Record<string, unknown>,
   fixer: Record<string, unknown>,
   v: Record<string, unknown>,
