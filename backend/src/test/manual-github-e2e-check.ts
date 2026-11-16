@@ -98,9 +98,31 @@
  * output, no infrastructure record, audit.read.html > 0, 401 and 403 checks, no token leak. The
  * audit counts and finding codes/details the worker stored are printed (bounded). The audit is
  * diagnostics only: the harness makes no claim that the site works or is broken.
+ *
+ * NPM SCRIPTS REPAIR MODE (added later by Kiro; written without being compiled or run, UNVERIFIED).
+ * Opt-in on top of the supported mode: set GRAVEYARD_GITHUB_E2E_NPM_REPAIR=1 AND both supported variables
+ * (the operator-supplied public URL and full commit SHA). It cannot be combined with
+ * GRAVEYARD_GITHUB_E2E_STATIC=1 (fails closed). Only in this mode the worker environment sets
+ * GRAVEYARD_GITHUB_NPM_SCRIPTS=1 and GRAVEYARD_WORKER_AGENTS=kiro-v2 (LIVE Kiro: the bounded, redacted
+ * build-entry source of that public repository is sent to Kiro). Every other mode keeps agents off.
+ * Same topology (github.com proxy and registry proxy on per-run internal networks), same API and
+ * worker, ONE job, the same time budgets as the supported mode. The operator must supply a public
+ * repository whose scripts.build is `node FILE`, which fails at the build stage, and whose scripts.test is
+ * `node --test` or `node --test FILE` (see npm-scripts-repair.ts); the harness cannot check that.
+ * Expected result (anything else is a problem): completed, done, outcome repair-verified, verdict
+ * repository-failing, runMode npm-scripts, the exact supplied URL and commit, baseline pipeline failed at
+ * build with prepare and install passed, verification status verified with class npm-scripts-build-entry,
+ * the patched copy's prepare/install/build/test passed with TAP counts (at least one passed, none failed or
+ * cancelled), verifiedDiff equal to the stored fixer diff and to its recorded sha256, repair.verified
+ * true, repair.patchApplied false, originalModified false, no infrastructure record. Cleanup also queries
+ * the derived repair execution id (`<uuid>-fix:<n>`) besides the main id. For a result that is not
+ * verified, only fixed-vocabulary status/reason/code fields of the baseline, Analyst, Fixer and
+ * verification are printed (no token, no source, no diff, no model text).
+ * Caveats: it shows nothing about other repositories, the original snapshot is checked only through the
+ * stored record (its run directory is removed with the job), and Kiro's output is not deterministic.
  */
 
-import { randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { request } from "node:http";
@@ -111,6 +133,8 @@ import { fileURLToPath } from "node:url";
 import { buildApp } from "../app.js";
 import { GIT_SHA_RE } from "../acquisition-policy.js";
 import { deriveRegistryExecutionId } from "../github-runner.js";
+import { NPM_SCRIPTS_PATCH_CLASS, isBuildEntryName, testCountsAcceptable } from "../build-entry.js";
+import { deriveRepairExecutionId } from "../npm-scripts-repair.js";
 import { NPM_ACQ_LABEL_ID, npmAcquisitionContainerName } from "../npm-registry-acquisition.js";
 import { ACQ_LABEL_ID, acquisitionContainerName } from "../git-acquisition.js";
 import { EGRESS_PROXY_LABEL, PROBE_SCRIPT } from "../egress-guard.js";
@@ -149,6 +173,9 @@ const STATIC_VAR = "GRAVEYARD_GITHUB_E2E_STATIC";
 const STATIC_REQUESTED = process.env[STATIC_VAR] === "1";
 const STATIC_URL = "https://github.com/yash123443/mumbai-tour";
 const STATIC_COMMIT = "6d193fab40659cb5c568855f8294abf324adc4ea";
+const REPAIR_VAR = "GRAVEYARD_GITHUB_E2E_NPM_REPAIR";
+/** npm scripts repair mode: needs the supported URL/commit, excludes static. Any other non-empty value fails closed. */
+const REPAIR_REQUESTED = process.env[REPAIR_VAR] === "1";
 const MAX_PRINTED_FINDINGS = 25;
 const MAX_PRINTED_DETAIL = 240;
 const SETUP_MS = SUPPORTED_REQUESTED ? 240_000 : 120_000;
@@ -233,6 +260,16 @@ for (const s of ["SIGTERM", "SIGINT"]) process.on(s, () => { proxy.close().final
 `;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+/** Fixed-vocabulary value for logging: short, restricted characters, never free text. */
+const tok = (v: unknown): string =>
+  typeof v === "string" ? (/^[A-Za-z0-9_.:-]{1,80}$/.test(v) ? v : "(unprintable)") : typeof v === "number" && Number.isFinite(v) ? String(v) : v === null ? "null" : "?";
+const sha256Hex = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
+const stageOf = (list: unknown, name: string): Record<string, unknown> | undefined => {
+  const s = Array.isArray(list) ? list.find((x) => isObj(x) && x["stage"] === name) : undefined;
+  return isObj(s) ? s : undefined;
+};
+const stageLine = (list: unknown): string =>
+  (Array.isArray(list) ? list : []).slice(0, 12).map((x) => (isObj(x) ? `${tok(x["stage"])}:${tok(x["status"])}/${tok(x["reason"])}/${tok(x["exitCode"])}` : "?")).join(",");
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 test(
@@ -301,6 +338,105 @@ test(
       return out;
     };
 
+    /** Repair mode assertions on the stored result. Logs only fixed-vocabulary fields when not verified. */
+    const checkNpmRepair = (view: ResultView, res: Record<string, unknown>): void => {
+      const pipe = res["pipeline"];
+      const analyst = res["analyst"];
+      const fixer = res["fixer"];
+      const v = res["verification"];
+      if (view.outcome !== "repair-verified") {
+        log.push(`not verified: verdict=${tok(res["verdict"])} runMode=${tok(res["runMode"])}`);
+        if (isObj(pipe)) log.push(`baseline: status=${tok(pipe["status"])} reason=${tok(pipe["reason"])} failedStage=${tok(pipe["failedStage"])} stages=[${stageLine(pipe["stages"])}]`);
+        else log.push("baseline: no pipeline record");
+        log.push(`analyst: status=${isObj(analyst) ? tok(analyst["status"]) : "missing"} code=${isObj(analyst) ? tok(analyst["code"]) : "-"}`);
+        log.push(`fixer: status=${isObj(fixer) ? tok(fixer["status"]) : "missing"} code=${isObj(fixer) ? tok(fixer["code"]) : "-"}`);
+        if (isObj(v)) {
+          const pv = v["patched"];
+          log.push(`verification: status=${tok(v["status"])} reason=${tok(v["reason"])}${isObj(pv) ? ` patched=${tok(pv["status"])}/${tok(pv["reason"])} stages=[${stageLine(pv["stages"])}]` : ""}`);
+        } else {
+          log.push("verification: none recorded");
+        }
+      }
+      if (res["verdict"] !== "repository-failing") problems.push(`stored result verdict is ${tok(res["verdict"])}, expected repository-failing`);
+      if (res["runMode"] !== "npm-scripts") problems.push(`stored result runMode is ${tok(res["runMode"])}, expected npm-scripts`);
+      if (res["sourceKind"] !== "github-pinned") problems.push("stored result sourceKind is not github-pinned");
+      const src = res["source"];
+      if (!isObj(src) || src["repoUrl"] !== targetUrl || src["commit"] !== targetCommit) problems.push("stored result source is not exactly the supplied public URL and commit");
+
+      // Baseline: the unmodified pinned snapshot failed at build, after prepare and install passed.
+      if (!isObj(pipe)) {
+        problems.push("stored result has no baseline pipeline record");
+      } else {
+        if (pipe["status"] !== "failure" || pipe["failedStage"] !== "build") problems.push(`baseline pipeline ${tok(pipe["status"])}/${tok(pipe["failedStage"])}, expected failure/build`);
+        const st = pipe["stages"];
+        for (const [name, want] of [["prepare", "passed"], ["install", "passed"], ["build", "failed"]] as const) {
+          const s = stageOf(st, name);
+          if (s === undefined || s["status"] !== want) problems.push(`baseline stage ${name} is ${s === undefined ? "missing" : tok(s["status"])}, expected ${want}`);
+        }
+        const t = stageOf(st, "test");
+        if (t !== undefined && t["status"] === "passed") problems.push("baseline test stage passed although the build failed");
+      }
+      const preTester = res["tester"];
+      if (!isObj(preTester) || preTester["status"] !== "failed") problems.push("baseline Tester report is not failed");
+
+      if (!isObj(analyst) || analyst["status"] !== "ok" || analyst["modelAuthored"] !== true) problems.push("Analyst did not produce a diagnosis (status ok, modelAuthored)");
+      if (!isObj(fixer) || fixer["status"] !== "ok" || fixer["modelAuthored"] !== true || fixer["proposalOnly"] !== true || fixer["applied"] !== false) {
+        problems.push("Fixer did not produce an unapplied proposal (status ok, proposalOnly, applied false)");
+      }
+      if (!isObj(v)) {
+        problems.push("stored result has no verification record");
+        return;
+      }
+      if (v["status"] !== "verified" || v["reason"] !== "all-stages-passed") problems.push(`verification ${tok(v["status"])}/${tok(v["reason"])}, expected verified/all-stages-passed`);
+      if (v["patchClass"] !== NPM_SCRIPTS_PATCH_CLASS || v["runMode"] !== "npm-scripts") problems.push(`verification class ${tok(v["patchClass"])} / runMode ${tok(v["runMode"])}, expected ${NPM_SCRIPTS_PATCH_CLASS} / npm-scripts`);
+      const target = v["targetPath"];
+      if (!isBuildEntryName(target)) problems.push("verification targetPath is not a root build entry name");
+      if (v["originalModified"] !== false) problems.push("verification originalModified is not false");
+      if (v["distinctExecutionId"] !== true || v["sameCache"] !== true) problems.push("verification did not use a distinct execution id and the same cache");
+      const cl = v["cleanup"];
+      if (!isObj(cl) || cl["confirmed"] !== true || cl["stagingRemoved"] !== true || cl["cloneRemoved"] !== true) problems.push("verification cleanup is not fully confirmed");
+      const vb = v["baseline"];
+      if (!isObj(vb) || vb["status"] !== "failure" || vb["failedStage"] !== "build") problems.push("verification baseline is not failure/build");
+
+      // The patched disposable copy: prepare, install, build, test passed, and tests were measured.
+      const patched = v["patched"];
+      const vt = v["tester"];
+      if (!isObj(patched) || patched["status"] !== "success") {
+        problems.push("patched copy pipeline did not succeed");
+      } else {
+        for (const name of ["prepare", "install", "build", "test"]) {
+          const s = stageOf(patched["stages"], name);
+          if (s === undefined || s["status"] !== "passed") problems.push(`patched stage ${name} is ${s === undefined ? "missing" : tok(s["status"])}, expected passed`);
+        }
+      }
+      if (!isObj(vt) || vt["status"] !== "passed") problems.push("patched copy Tester report is not passed");
+      if (!testCountsAcceptable(v["testCounts"])) {
+        problems.push("patched test counts were not measured as acceptable (at least one passed, none failed or cancelled)");
+      } else {
+        const tc = v["testCounts"];
+        if (isObj(tc)) log.push(`patched test counts: ${Object.entries(tc).slice(0, 8).map(([k, n]) => `${tok(k)}=${tok(n)}`).join(" ")}`);
+      }
+
+      // The verified diff is exactly the stored proposal and its recorded hash; the original is untouched.
+      const diff = isObj(fixer) ? fixer["diff"] : undefined;
+      if (typeof diff !== "string" || diff === "") {
+        problems.push("stored Fixer proposal has no diff");
+      } else {
+        if (view.verifiedDiff !== diff) problems.push("verifiedDiff is not exactly the stored Fixer diff");
+        if (v["diffSha256"] !== sha256Hex(diff)) problems.push("verification diffSha256 does not match the stored Fixer diff");
+        if (typeof target === "string" && !diff.startsWith(`--- a/${target}\n+++ b/${target}\n`)) problems.push("the diff does not patch exactly the verified build entry");
+      }
+      const files = isObj(fixer) ? fixer["files"] : undefined;
+      const pf = v["patchedFiles"];
+      if (typeof target !== "string" || !Array.isArray(files) || files.length !== 1 || files[0] !== target || !Array.isArray(pf) || pf.length !== 1 || pf[0] !== target) {
+        problems.push("proposal files and verification patchedFiles are not exactly the one build entry");
+      }
+      const o = v["originalTargetSha256"];
+      const p = v["patchedTargetSha256"];
+      if (typeof o !== "string" || typeof p !== "string" || !/^[0-9a-f]{64}$/.test(o) || !/^[0-9a-f]{64}$/.test(p) || o === p) problems.push("original and patched target hashes are not two distinct sha256 values");
+      if (view.repair.patchApplied !== false) problems.push("a patch was reported applied to the original");
+    };
+
     try {
       // ---- Fail-closed preconditions: nothing is created before all of these hold. ----
       const gitImage = process.env["GRAVEYARD_GITHUB_E2E_GIT_IMAGE"] ?? DEFAULT_GIT_IMAGE;
@@ -311,6 +447,10 @@ test(
       const staticVar = process.env[STATIC_VAR];
       if (staticVar !== undefined && staticVar !== "" && staticVar !== "1") throw new FailClosed(`${STATIC_VAR} must be exactly 1 when set`);
       if (STATIC_REQUESTED && SUPPORTED_REQUESTED) throw new FailClosed(`${STATIC_VAR}=1 cannot be combined with the supported fixture variables`);
+      const repairVar = process.env[REPAIR_VAR];
+      if (repairVar !== undefined && repairVar !== "" && repairVar !== "1") throw new FailClosed(`${REPAIR_VAR} must be exactly 1 when set`);
+      if (REPAIR_REQUESTED && STATIC_REQUESTED) throw new FailClosed(`${REPAIR_VAR}=1 cannot be combined with ${STATIC_VAR}=1`);
+      if (REPAIR_REQUESTED && !SUPPORTED_REQUESTED) throw new FailClosed(`${REPAIR_VAR}=1 requires ${SUPPORTED_URL_VAR} and ${SUPPORTED_COMMIT_VAR}`);
       if (STATIC_REQUESTED) {
         const sv = validateGithubUrl(STATIC_URL);
         if (!sv.ok || sv.url !== STATIC_URL) throw new FailClosed("the static site pin URL is not in canonical form");
@@ -332,7 +472,7 @@ test(
         supported = true;
         targetUrl = u;
         targetCommit = c;
-        log.push(`mode: supported fixture ${targetUrl} @ ${targetCommit}`);
+        log.push(`mode: ${REPAIR_REQUESTED ? "npm scripts repair (LIVE Kiro agents kiro-v2, GRAVEYARD_GITHUB_NPM_SCRIPTS=1)" : "supported fixture"} ${targetUrl} @ ${targetCommit}`);
       } else if (!STATIC_REQUESTED) {
         log.push("mode: default pinned Hello-World");
       }
@@ -460,15 +600,17 @@ test(
             : {}),
           GRAVEYARD_WORKER_ID: `ghe2e-${randomBytes(3).toString("hex")}`,
           GRAVEYARD_WORKER_POLL_MS: "250",
-          GRAVEYARD_WORKER_AGENTS: "off",
+          GRAVEYARD_WORKER_AGENTS: REPAIR_REQUESTED ? "kiro-v2" : "off",
+          ...(REPAIR_REQUESTED ? { GRAVEYARD_GITHUB_NPM_SCRIPTS: "1" } : {}),
         },
         { log: (level, message, fields) => workerLog.push(`${level} ${message}${fields === undefined ? "" : ` ${JSON.stringify(fields)}`}`) },
       );
       if (!started.started) throw new FailClosed(`worker refused to start: ${started.message}`);
       worker = started;
       const gh = worker.composed.config.github;
-      if (worker.composed.config.agents !== "off") throw new FailClosed("agents must be off in this harness");
+      if (worker.composed.config.agents !== (REPAIR_REQUESTED ? "kiro-v2" : "off")) throw new FailClosed(`agents must be ${REPAIR_REQUESTED ? "kiro-v2" : "off"} in this mode`);
       if (gh === null || gh === undefined) throw new FailClosed("worker started without the GitHub flow");
+      if ((gh.npmScripts === true) !== REPAIR_REQUESTED) throw new FailClosed("npm scripts mode must be on exactly in npm repair mode");
       if (supported) {
         const re = gh.registryEgress;
         if (re === null || re === undefined || re.network !== names.regNet || re.proxyContainer !== names.regProxy || re.proxyUrl !== `http://${regProxyIp}:${PROXY_PORT}`) {
@@ -479,7 +621,7 @@ test(
       }
       const pinKeys = Object.keys(gh.pins);
       if (pinKeys.length !== 1 || gh.pins[targetUrl] !== targetCommit) throw new FailClosed("the worker's pin catalog is not exactly the one expected pin");
-      log.push(`worker started (real GithubJobRunner and OperatorEgressGuard, real Docker executor, agents off, ${supported ? "registry egress configured" : "no registry egress"})`);
+      log.push(`worker started (real GithubJobRunner and OperatorEgressGuard, real Docker executor, agents ${REPAIR_REQUESTED ? "kiro-v2 (live Kiro), npm scripts on" : "off"}, ${supported ? "registry egress configured" : "no registry egress"})`);
 
       // ---- Authorized job creation. ----
       const created = await httpCall(port, "POST", "/api/jobs", {}, JSON.stringify({ repoUrl: targetUrl, consent: true }));
@@ -521,17 +663,25 @@ test(
         log.push(`terminal: status=${view.status} stage=${view.stage} outcome=${view.outcome}`);
         if (view.status !== "completed") problems.push(`status ${view.status}, expected completed`);
         if (view.stage !== "done") problems.push(`stage ${view.stage}, expected done`);
-        const expectedOutcome = supported ? "passing" : STATIC_REQUESTED ? "static-site-audited" : "unsupported-repository";
+        const expectedOutcome = REPAIR_REQUESTED ? "repair-verified" : supported ? "passing" : STATIC_REQUESTED ? "static-site-audited" : "unsupported-repository";
         if (STATIC_REQUESTED && view.verifiedDiff !== null) problems.push("a verified diff is present, expected none");
         if (view.outcome !== expectedOutcome) problems.push(`outcome ${view.outcome}, expected ${expectedOutcome}`);
-        if (view.repair.verified !== false || view.repair.patchApplied !== false) problems.push("repair.verified or repair.patchApplied is not false");
-        if (view.repair.patchProposed !== false || view.repair.diagnosed !== false) problems.push("a patch proposal or diagnosis is present, expected none");
+        if (REPAIR_REQUESTED) {
+          if (view.repair.verified !== true) problems.push("repair.verified is not true");
+          if (view.repair.patchApplied !== false) problems.push("repair.patchApplied is not false");
+          if (view.repair.patchProposed !== true || view.repair.diagnosed !== true) problems.push("repair.patchProposed or repair.diagnosed is not true");
+        } else {
+          if (view.repair.verified !== false || view.repair.patchApplied !== false) problems.push("repair.verified or repair.patchApplied is not false");
+          if (view.repair.patchProposed !== false || view.repair.diagnosed !== false) problems.push("a patch proposal or diagnosis is present, expected none");
+        }
         if (view.infrastructure !== null) {
           problems.push(`unexpected infrastructure record: ${view.infrastructure.kind}: ${view.infrastructure.message}`);
         }
         const res = view.result;
         if (res === null) {
           problems.push("no stored result");
+        } else if (REPAIR_REQUESTED) {
+          checkNpmRepair(view, res);
         } else if (supported) {
           // The fixture is run unmodified: nothing here edits, patches or substitutes any repository file.
           if (res["verdict"] !== "verified") problems.push(`stored result verdict is ${String(res["verdict"])}, expected verified`);
@@ -665,6 +815,18 @@ test(
               );
             }
           }
+          if (REPAIR_REQUESTED) {
+            // The verified repair runs under the derived id `<uuid>-fix:<n>`; query it by label and by name too.
+            const fixId = deriveRepairExecutionId(id);
+            if (fixId === null) {
+              problems.push(`could not derive the repair execution id for ${id}; repair containers were not queried`);
+            } else {
+              queries.push(
+                ["repair sandbox label", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_EXECUTION}=${fixId}`]],
+                ["repair sandbox name", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `name=${containerNameFor(fixId)}`]],
+              );
+            }
+          }
           for (const [what, args] of queries) {
             const q = await docker(args);
             if (!q.ok) { problems.push(`could not query leftover containers (${what}) for attempt ${String(attempt)}`); continue; }
@@ -677,7 +839,7 @@ test(
             }
           }
         }
-        log.push(`independent docker ps: queried leftover acquisition${supported ? ", registry acquisition" : ""} and sandbox containers for this job's execution ids`);
+        log.push(`independent docker ps: queried leftover acquisition${supported ? ", registry acquisition" : ""}${REPAIR_REQUESTED ? ", repair (derived fix id)" : ""} and sandbox containers for this job's execution ids`);
       }
       if (token !== undefined && workerLog.some((l) => l.includes(token as string))) problems.push("the worker log contains the job token");
       try { problems.push(...(await removeOwned())); } catch (e) { problems.push(`cleanup threw: ${e instanceof Error ? e.message : String(e)}`); }

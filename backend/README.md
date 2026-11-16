@@ -622,6 +622,32 @@ Extra requirements: outbound access to `registry.npmjs.org:443` from the Docker 
 `node:22-alpine` image. Nothing is pulled and nothing is published. A pass would show only what is listed above for
 that one repository and commit on your machine.
 
+#### Public npm repair mode (opt-in)
+
+Same supported-URL and full-SHA variables as above, plus `GRAVEYARD_GITHUB_E2E_NPM_REPAIR=1`:
+
+```powershell
+$env:GRAVEYARD_GITHUB_E2E_SUPPORTED_URL = "https://github.com/<owner>/<repo>"
+$env:GRAVEYARD_GITHUB_E2E_SUPPORTED_COMMIT = "<full 40-character lowercase commit SHA>"
+$env:GRAVEYARD_GITHUB_E2E_NPM_REPAIR = "1"
+pnpm run test:github-e2e
+```
+
+Requirements:
+
+- A public repository pinned at a commit whose npm-scripts build intentionally fails and which fits the npm scripts
+  profile (see "npm scripts mode"), with Node tests (`node --test [FILE]`).
+- An installed, signed-in `kiro-cli` (generation v2). This mode makes real model calls, so it uses Kiro credits.
+- The same real GitHub and npm registry proxies as the supported public fixture mode, with the worker and API
+  isolated in the harness.
+
+The harness checks the exact verified diff and that the original tests pass with it. The original repository is not modified.
+
+Status: Kiro wrote this test mode. Codex compiled it and ran its fail-closed missing-target test. Two other checks passed
+separately: the shared public static `mumbai-tour` test, and an independent real two-package npm registry, cache and
+offline test. The combined public repair has **not** been run: it awaits a compatible public target, and no such
+repository has been published. A live public repair is not claimed to have passed.
+
 ## Local worker (opt-in, separate process; tested with mocked Docker, and verified end to end once on real Docker for one controlled fixture, 2026-11-15)
 
 The API server never starts a worker. Jobs stay `queued` until an operator

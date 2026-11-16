@@ -283,6 +283,21 @@ One bounded request, no shell and no git. Kiro extended `backend/src/test/manual
 
 No production policy changed, no dependency was added and nothing was published. Not compiled and not run: every behavior above is unverified until an operator runs `tsc -p tsconfig.test.json` and `pnpm run test:github-e2e` (with the variables set) and logs the output in `.kiro/PROJECT.md` and `backend/DEVELOPMENT.md`.
 
+#### Public npm repair mode (opt-in)
+
+From `backend/`, with the supported URL and full SHA variables above plus the mode flag:
+
+```
+$env:GRAVEYARD_GITHUB_E2E_SUPPORTED_URL = "https://github.com/<owner>/<repo>"
+$env:GRAVEYARD_GITHUB_E2E_SUPPORTED_COMMIT = "<full 40-character lowercase commit SHA>"
+$env:GRAVEYARD_GITHUB_E2E_NPM_REPAIR = "1"
+pnpm run test:github-e2e
+```
+
+It needs a public, pinned, intentionally failing npm-scripts build with Node tests, and a signed-in Kiro CLI v2 for real model calls (credits are spent). It uses the same real GitHub and npm proxies, with the worker and API isolated, and checks the exact verified diff and that the original tests pass.
+
+Provenance: Kiro wrote this test mode. Codex compiled it and ran the fail-closed missing-target test. The shared public static `mumbai-tour` test and an independent real two-package npm registry, cache and offline test passed. The combined public repair has not been run: it awaits a compatible public target, and no repository has been published for it. No live public repair pass is claimed.
+
 
 
 ## 2026-11-16: Verified local repair slice (source, tests and docs only, no shell)
