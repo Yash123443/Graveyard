@@ -26,3 +26,4 @@ desktop.ini
 # Local tool state
 .vite/
 *.tsbuildinfo
+HANDOFF.local.md
