@@ -5,7 +5,7 @@ import { seq, smoothstep } from '../animations/sequence'
 import { ritualPower } from '../animations/ritualPower'
 import { createFogTexture } from '../utils/proceduralTextures'
 
-const colors = ['#a9efff', '#ffb05b', '#de83ff']
+const colors = ['#46778e', '#a45832', '#754888']
 
 /** Local environmental response, driven by the same clock as the performers. */
 export function RitualAtmosphere() {
@@ -39,7 +39,7 @@ export function RitualAtmosphere() {
     if (light.current) {
       const divisor = Math.max(0.001, total)
       light.current.color.setRGB(red / divisor, green / divisor, blue / divisor)
-      light.current.intensity = Math.min(1.6, total) * 3.4
+      light.current.intensity = Math.min(1.6, total) * 2.1
     }
     const growth = seq.ending.outcome === 'success' ? smoothstep(0.84, 0.96, seq.ending.progress) : 0
     if (shoot.current) {

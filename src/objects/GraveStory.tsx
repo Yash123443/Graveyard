@@ -1,138 +1,16 @@
+import { FinalGravePlot } from './FinalGravePlot'
 import { useGLTF } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { seq, smoothstep } from '../animations/sequence'
-import { createFogTexture, createGlowTexture, createStoneTextures } from '../utils/proceduralTextures'
-import { playMainGraveRumble } from '../audio/audioManager'
+import { createFogTexture, createGlowTexture } from '../utils/proceduralTextures'
 import { RitualAtmosphere } from './RitualAtmosphere'
 import { SoulMagic } from './SoulMagic'
-import { GraveInscription } from './GraveInscription'
 import { AnalystCharacter, FixerCharacter, TesterCharacter } from './SpectreCharacters'
 
+import { groundHeight } from './Ground'
 const GRAVE = new THREE.Vector3(0, 0, -83)
-
-function Candle({ position }: { position: [number, number, number] }) {
-  const flame = useRef<THREE.Mesh>(null)
-  const light = useRef<THREE.PointLight>(null)
-  const glow = useRef<THREE.SpriteMaterial>(null)
-  useFrame(({ clock }) => {
-    const t = clock.elapsedTime
-    const found = seq.exploration.nearMain
-    const ignition = seq.exploration.storyStarted ? smoothstep(0.01 + (position[0] + 2) * 0.008, 0.05 + (position[0] + 2) * 0.008, seq.exploration.storyProgress) : 0
-    const quiet = seq.ending.outcome === 'failure' ? 1 - smoothstep(0.1, 0.55, seq.ending.progress) * 0.8 : 1
-    const strength = (0.35 + ignition * 0.65) * quiet
-    const flicker = 0.82 + Math.sin(t * 19) * 0.09 + Math.sin(t * 31) * 0.045
-    if (flame.current) {
-      flame.current.scale.set(1 + Math.sin(t * 23) * 0.09, flicker * strength, 1 + Math.cos(t * 17) * 0.08)
-      flame.current.rotation.z = Math.sin(t * 13) * 0.08
-    }
-    if (light.current) light.current.intensity = (0.38 + found * 2.45) * flicker * strength
-    if (glow.current) glow.current.opacity = (0.08 + found * 0.36) * flicker * strength
-  })
-  return <group position={position}>
-    <mesh castShadow><cylinderGeometry args={[0.12, 0.15, 0.72, 12]} /><meshStandardMaterial color="#b8a88a" roughness={0.92} /></mesh>
-    <mesh ref={flame} position={[0, 0.48, 0]}><sphereGeometry args={[0.105, 12, 12]} /><meshBasicMaterial color="#ffd18a" toneMapped={false} /></mesh>
-    <sprite position={[0, 0.48, 0]} scale={[2.6, 2.6, 1]}><spriteMaterial ref={glow} map={createGlowTexture(128)} color="#ff9e48" transparent opacity={0.3} depthWrite={false} blending={THREE.AdditiveBlending} /></sprite>
-    <pointLight ref={light} color="#ffad62" intensity={2.4} distance={11} decay={2} />
-  </group>
-}
-
-function MainStone() {
-  const crackMaterial = useMemo(() => new THREE.MeshStandardMaterial({ color: '#101518', emissive: '#83ffba', roughness: 1, emissiveIntensity: 0 }), [])
-  useEffect(() => () => crackMaterial.dispose(), [crackMaterial])
-  const materials = useMemo(() => createStoneTextures(512), [])
-  const material = useMemo(() => new THREE.MeshStandardMaterial({ map: materials.map, bumpMap: materials.bumpMap, bumpScale: 0.65, roughness: 0.95, color: '#b9c2c8' }), [materials])
-  const stoneColor = useMemo(() => new THREE.Color('#b9c2c8'), [])
-  const cracks = useMemo(() => {
-    const paths = [
-      [[-0.2, 3.9, 0.65], [-0.05, 3.35, 0.67], [-0.35, 2.95, 0.68], [-0.1, 2.45, 0.68]],
-      [[0.65, 3.2, 0.67], [0.38, 2.9, 0.69], [0.55, 2.35, 0.69], [0.25, 1.9, 0.68]],
-      [[-0.85, 2.3, 0.66], [-0.5, 2.05, 0.68], [-0.65, 1.65, 0.68]],
-    ]
-    return paths.map((path) => new THREE.TubeGeometry(new THREE.CatmullRomCurve3(path.map((p) => new THREE.Vector3(...p as [number, number, number]))), 22, 0.025, 5, false))
-  }, [])
-  const moss = useMemo(() => Array.from({ length: 16 }, (_, i) => ({
-    x: Math.sin(i * 17.2) * 0.82,
-    y: 0.45 + ((i * 31) % 37) / 10,
-    z: 0.54 + Math.sin(i * 3.1) * 0.07,
-    s: 0.12 + (i % 4) * 0.07,
-  })), [])
-  const reveal = useRef<THREE.Group>(null)
-  const slab = useRef<THREE.Group>(null)
-  const halo = useRef<THREE.SpriteMaterial>(null)
-  const burialLight = useRef<THREE.PointLight>(null)
-  const rumbleArmed = useRef(true)
-  useFrame(({ clock }) => {
-    const found = seq.exploration.nearMain
-    if (found > 0.58 && rumbleArmed.current) {
-      rumbleArmed.current = false
-      playMainGraveRumble()
-    }
-    if (found < 0.16) rumbleArmed.current = true
-    const success = seq.ending.outcome === 'success'
-    crackMaterial.emissiveIntensity = success ? smoothstep(0.45, 0.8, seq.ending.progress) * 2.2 : 0
-    const opening = success ? smoothstep(0.7, 0.86, seq.ending.progress) : 0
-    const verifiedShake = success ? smoothstep(0.44, 0.53, seq.ending.progress) * (1 - smoothstep(0.68, 0.73, seq.ending.progress)) : 0
-    const attemptShake = smoothstep(0.72, 0.91, seq.exploration.storyProgress) * (1 - smoothstep(0.985, 1, seq.exploration.storyProgress)) * 0.28
-    const shake = Math.max(verifiedShake, attemptShake)
-    if (reveal.current) {
-      // A distant silhouette and its cold beacon give the visitor a landmark
-      // before the clearing's fog parts near the grave.
-      reveal.current.visible = true
-      reveal.current.scale.setScalar(1)
-      reveal.current.position.x = Math.sin(clock.elapsedTime * 39) * shake * 0.09
-      reveal.current.rotation.z = Math.sin(clock.elapsedTime * 32) * shake * 0.018
-    }
-    if (slab.current) {
-      slab.current.rotation.x = -opening * 1.15
-      slab.current.position.y = 0.43 + opening * 0.28
-    }
-    material.color.copy(stoneColor).multiplyScalar(0.12 + found * 0.88)
-    material.emissive.setRGB(0.009 + found * 0.028, 0.012 + found * 0.035, 0.014 + found * 0.032)
-    if (halo.current) halo.current.opacity = 0.045 + found * (0.13 + Math.sin(clock.elapsedTime * 2.1) * 0.025)
-    if (burialLight.current) burialLight.current.intensity = 0.12 + found * (0.45 + Math.sin(clock.elapsedTime * 2.4) * 0.08)
-  })
-  return <group ref={reveal} position={[GRAVE.x, 0, GRAVE.z]}>
-    {/* Unearthed burial mound, stone edging and a two-step plinth anchor the tall headstone to a full grave. */}
-    <mesh position={[0, 0.11, 2.05]} scale={[2.05, 0.36, 2.48]} castShadow receiveShadow>
-      <sphereGeometry args={[1, 28, 16]} /><meshStandardMaterial color="#272019" roughness={1} />
-    </mesh>
-    {[-2.05, 2.05].map((x) => <mesh key={`grave-curb-${x}`} position={[x, 0.14, 1.55]} castShadow receiveShadow>
-      <boxGeometry args={[0.2, 0.28, 4.9]} /><meshStandardMaterial color="#353431" roughness={0.98} />
-    </mesh>)}
-    {[-1.9, 4.0].map((z) => <mesh key={`grave-end-${z}`} position={[0, 0.14, z]} castShadow receiveShadow>
-      <boxGeometry args={[4.2, 0.28, 0.22]} /><meshStandardMaterial color="#393733" roughness={0.98} />
-    </mesh>)}
-    <mesh position={[0, 0.16, -0.85]} castShadow receiveShadow><boxGeometry args={[3.55, 0.32, 1.55]} /><meshStandardMaterial color="#35383a" roughness={0.96} /></mesh>
-    <mesh position={[0, 0.37, -0.85]} castShadow receiveShadow><boxGeometry args={[3.18, 0.12, 1.28]} /><meshStandardMaterial color="#5a5a54" roughness={0.95} /></mesh>
-    {/* The slab, cracks, moss and engraving share one hinge and meet the plinth. */}
-    <group ref={slab} position={[0, 0.43, -0.85]}>
-      <mesh castShadow receiveShadow material={material}>
-        <extrudeGeometry args={[(() => { const s = new THREE.Shape(); s.moveTo(-1.28, 0); s.lineTo(-1.42, 2.75); s.lineTo(-1.18, 3.15); s.lineTo(-0.78, 3.62); s.lineTo(-0.42, 3.48); s.lineTo(0.1, 4.2); s.lineTo(0.48, 3.58); s.lineTo(0.94, 3.72); s.lineTo(1.38, 3.15); s.lineTo(1.3, 0); s.closePath(); return s })(), { depth: 0.52, bevelEnabled: true, bevelSegments: 3, steps: 1, bevelSize: 0.09, bevelThickness: 0.1 }]} />
-      </mesh>
-      {cracks.map((geometry, i) => <mesh key={`crack-${i}`} geometry={geometry} material={crackMaterial} />)}
-      {moss.map((m, i) => <mesh key={`moss-${i}`} position={[m.x, m.y, m.z]} scale={[m.s * 1.8, m.s, 0.05]} rotation={[0, 0, Math.sin(i) * 0.35]}><sphereGeometry args={[1, 9, 7]} /><meshStandardMaterial color={i % 3 ? '#344b35' : '#536448'} roughness={1} /></mesh>)}
-      {/* Carved gothic crown: cross, rose window and pointed arch detail. */}
-      <group position={[0, 3.42, 0.64]}>
-        <mesh position={[0, 0.48, 0]}><boxGeometry args={[0.11, 0.96, 0.08]} /><meshStandardMaterial color="#596367" roughness={0.9} /></mesh>
-        <mesh position={[0, 0.62, 0.01]}><boxGeometry args={[0.58, 0.1, 0.08]} /><meshStandardMaterial color="#596367" roughness={0.9} /></mesh>
-        <mesh position={[0, -0.2, 0.015]}><torusGeometry args={[0.31, 0.045, 8, 24]} /><meshStandardMaterial color="#626c6d" roughness={0.92} /></mesh>
-        {[0, Math.PI / 2].map((rotation) => <mesh key={rotation} position={[0, -0.2, 0.04]} rotation={[0, 0, rotation]}><boxGeometry args={[0.45, 0.035, 0.05]} /><meshStandardMaterial color="#596367" roughness={0.92} /></mesh>)}
-      </group>
-      <GraveInscription />
-      <mesh position={[0, 0.46, 0.82]} rotation={[0, 0, Math.PI / 2]}><torusGeometry args={[0.2, 0.045, 7, 16]} /><meshStandardMaterial color="#242a2d" metalness={0.72} roughness={0.82} /></mesh>
-      <mesh position={[0.32, 0.46, 0.82]} rotation={[0, 0, Math.PI / 2]}><torusGeometry args={[0.2, 0.045, 7, 16]} /><meshStandardMaterial color="#242a2d" metalness={0.72} roughness={0.82} /></mesh>
-    </group>
-    {[[-1.65, 0.48, 1.1], [-0.75, 0.48, 1.42], [0.25, 0.48, 1.32], [1.55, 0.48, 1.08], [2.0, 0.48, 0.28]].map((position, index) => <Candle key={index} position={position as [number, number, number]} />)}
-    {/* Chipped fragments make the monument feel older than the surrounding plots. */}
-    {[[-1.65, 0.36, -0.52, 0.34], [1.55, 0.26, -0.34, 0.26], [-1.48, 1.65, -0.52, 0.18], [1.42, 2.76, -0.48, 0.21]].map(([x, y, z, s], index) => <mesh key={`chip-${index}`} position={[x, y, z]} rotation={[index * 0.5, index * 0.7, index * 0.23]} scale={s} castShadow><tetrahedronGeometry args={[1, 1]} /><meshStandardMaterial color="#4c5354" roughness={1} /></mesh>)}
-    <sprite position={[0, 0.32, 1.3]} scale={[13, 4.5, 1]}>
-      <spriteMaterial ref={halo} map={createGlowTexture(192)} color="#b6d0c0" transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} />
-    </sprite>
-    <pointLight ref={burialLight} position={[0, 2.4, 1.2]} color="#a9c5b6" intensity={0} distance={18} decay={2} />
-  </group>
-}
 
 /** A dim vertical beacon is visible from the gate, then is swallowed by local fog until discovery. */
 function FinalGraveBeacon() {
@@ -145,7 +23,7 @@ function FinalGraveBeacon() {
     if (beam.current) beam.current.opacity = (0.34 * distant + 0.045) * pulse
     if (crown.current) crown.current.opacity = (0.52 * distant + 0.08) * pulse
   })
-  return <group position={[GRAVE.x, 0, GRAVE.z]}>
+  return <group position={[GRAVE.x, groundHeight(GRAVE.x, GRAVE.z) - 0.12, GRAVE.z]}>
     <sprite position={[0, 9.4, -0.8]} scale={[7.2, 28, 1]}>
       <spriteMaterial ref={beam} map={createGlowTexture(192)} color="#54bce9" transparent opacity={0} depthWrite={false} fog={false} />
     </sprite>
@@ -497,37 +375,6 @@ function Apparition({ config }: { config: AgentConfig }) {
   </group>
 }
 
-function EnergyAcrossStone() {
-  const purple = useRef<THREE.MeshBasicMaterial>(null)
-  const red = useRef<THREE.MeshBasicMaterial>(null)
-  const green = useMemo(() => new THREE.MeshBasicMaterial({ color: '#64ff9d', transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }), [])
-  const crackGlow = useMemo(() => new THREE.MeshBasicMaterial({ color: '#b9ffd0', transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }), [])
-  useFrame(({ clock }) => {
-    const t = clock.elapsedTime
-    const successful = seq.ending.outcome === 'success'
-    const p = seq.ending.progress
-    const purpleEnding = successful ? smoothstep(0.1, 0.19, p) * (1 - smoothstep(0.34, 0.44, p)) : 0
-    const redEnding = successful ? smoothstep(0.2, 0.29, p) * (1 - smoothstep(0.39, 0.49, p)) : 0
-    const greenEnding = successful ? smoothstep(0.3, 0.39, p) * (1 - smoothstep(0.43, 0.53, p)) : 0
-    const story = seq.exploration.storyProgress
-    if (purple.current) purple.current.opacity = Math.max(0.95 * smoothstep(0.1, 0.14, story) * (1 - smoothstep(0.21, 0.26, story)), purpleEnding)
-    if (red.current) red.current.opacity = Math.max(0.95 * smoothstep(0.32, 0.36, story) * (1 - smoothstep(0.45, 0.5, story)) * (0.85 + Math.sin(t * 8) * 0.15), redEnding)
-    green.opacity = Math.max(0.95 * smoothstep(0.56, 0.6, story) * (1 - smoothstep(0.69, 0.74, story)) * (0.9 + Math.sin(t * 5) * 0.1), greenEnding)
-    crackGlow.opacity = successful ? 0.92 * smoothstep(0.5, 0.62, p) * (1 - smoothstep(0.9, 1, p)) : 0
-  })
-  const line = (points: THREE.Vector3[]) => new THREE.CatmullRomCurve3(points)
-  const paths = useMemo(() => [
-    line([new THREE.Vector3(-0.22, 3.7, 0.74), new THREE.Vector3(-0.05, 3.3, 0.74), new THREE.Vector3(-0.35, 2.9, 0.74), new THREE.Vector3(-0.1, 2.4, 0.74)]),
-    line([new THREE.Vector3(0.65, 3.2, 0.74), new THREE.Vector3(0.38, 2.9, 0.74), new THREE.Vector3(0.55, 2.35, 0.74), new THREE.Vector3(0.25, 1.9, 0.74)]),
-    line([new THREE.Vector3(-0.85, 2.3, 0.74), new THREE.Vector3(-0.5, 2.05, 0.74), new THREE.Vector3(-0.65, 1.65, 0.74)]),
-  ], [])
-  return <group position={GRAVE}>
-    {paths.map((p, i) => <mesh key={i}><tubeGeometry args={[p, 24, 0.05, 6, false]} /><meshBasicMaterial ref={i === 0 ? purple : red} color={i === 0 ? '#b980ff' : '#ff423b'} transparent opacity={0} blending={THREE.AdditiveBlending} depthWrite={false} /></mesh>)}
-    {paths.map((p, i) => <mesh key={`green-${i}`}><tubeGeometry args={[p, 24, 0.072, 6, false]} /><primitive object={green} attach="material" /></mesh>)}
-    {paths.map((p, i) => <mesh key={`crack-glow-${i}`}><tubeGeometry args={[p, 24, 0.09, 6, false]} /><primitive object={crackGlow} attach="material" /></mesh>)}
-  </group>
-}
-
 function ResurrectionLight() {
   const glow = useRef<THREE.SpriteMaterial>(null)
   const lamp = useRef<THREE.PointLight>(null)
@@ -666,8 +513,7 @@ export function GraveStory() {
   return <group>
     <GiantTree />
     <FinalGraveBeacon />
-    <MainStone />
-    <EnergyAcrossStone />
+    <FinalGravePlot />
     <SoulMagic />
     <RitualAtmosphere />
     <RepairAttemptPulse />

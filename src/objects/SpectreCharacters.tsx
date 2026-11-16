@@ -1,3 +1,4 @@
+import { soulSpellOrigins } from '../animations/soulSpellOrigins'
 import { useFrame } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
@@ -47,6 +48,7 @@ function Spectre({ variant, position, rotY, scale, start }: SpectreProps) {
     a.group.position.y = seq.ending.gather * 0.35
     const cue = soulCue(seq.exploration.storyProgress, start)
     a.set(cue.actorTime, clock.elapsedTime, cue.entrance, fade, local)
+    a.spellOrigin.getWorldPosition(soulSpellOrigins[variant === 'analyst' ? 0 : variant === 'fixer' ? 1 : 2])
   })
 
   return <group ref={holder} position={position} />

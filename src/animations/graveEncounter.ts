@@ -1,4 +1,4 @@
-export const GRAVE_READING_SECONDS = 12
+export const GRAVE_READING_SECONDS = 8
 
 /** A readable pause at the landmark, independent of refresh rate. */
 export function advanceGraveReading(elapsed: number, distance: number, facing: number, speed: number, delta: number) {

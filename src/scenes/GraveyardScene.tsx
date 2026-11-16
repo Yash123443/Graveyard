@@ -1,3 +1,5 @@
+import { CemeteryDressing } from '../objects/CemeteryDressing'
+import { CandleLightPool } from '../objects/WaxCandle'
 import { Stars } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
 import { useRef } from 'react'
@@ -71,6 +73,7 @@ export function GraveyardScene() {
   return (
     <>
       <CameraRig />
+      <CandleLightPool />
       <Lights />
       <Sky />
       <Stars radius={260} depth={60} count={800} factor={4} saturation={0} fade speed={0.2} />
@@ -82,6 +85,7 @@ export function GraveyardScene() {
       <CemeteryGroundDetails />
       <CemeteryMemorials />
       <HarvestRelics />
+      <CemeteryDressing />
       <LanternAvenue />
       <ScatteredGraves />
       <DeadTreeCluster />

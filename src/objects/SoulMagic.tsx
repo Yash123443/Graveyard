@@ -1,109 +1,100 @@
+import { soulSpellOrigins } from '../animations/soulSpellOrigins'
 import { useFrame } from '@react-three/fiber'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { seq } from '../animations/sequence'
 import { ritualPower } from '../animations/ritualPower'
-import { createGlowTexture } from '../utils/proceduralTextures'
+import { createFogTexture, createGlowTexture } from '../utils/proceduralTextures'
 
-const colors = ['#a9efff', '#ffb05b', '#de83ff']
-const origins = [[-4.0, 2.29, 3.42], [1.95, 2.22, 3.25], [-1.06, 6.71, -0.72]]
-const vertexShader = `
-  attribute float seed;
-  uniform float time, power, pointScale, pixelRatio;
-  uniform vec3 origin;
-  varying float alpha;
-  void main() {
-    float t = fract(seed * 0.6180339 + time * 0.23);
-    vec3 destination = vec3(0.0, 3.85, -0.2);
-    vec3 p = mix(origin, destination, t);
-    p.y += sin(t * 3.14159) * 0.65;
-    float angle = t * 18.85 - time * 2.8 + seed * 2.39996;
-    float radius = sin(t * 3.14159) * (0.28 + fract(seed * 0.713) * 0.35);
-    p += vec3(cos(angle), sin(angle), sin(angle + 0.8)) * radius;
-    vec4 view = modelViewMatrix * vec4(p, 1.0);
-    gl_Position = projectionMatrix * view;
-    gl_PointSize = min(70.0, pointScale * pixelRatio / max(1.0, -view.z));
-    alpha = power * sin(t * 3.14159) * (0.5 + fract(seed * 0.31) * 0.5);
+const colors=['#46778e','#a45832','#754888']
+const origins=[[-4,2.29,3.42],[1.95,2.22,3.25],[-1.06,6.71,-.72]]
+// Broad turbulent smoke travels from the animated held prop; no hard beams.
+const vertexShader=`
+ attribute float seed;
+ uniform float time,power,pointScale,pixelRatio;
+ uniform vec3 origin;
+ varying float alpha;
+ varying float phase;
+ void main(){
+  float n=fract(seed*.6180339);
+  float delay=fract(seed*.317)*1.3;
+  float age=max(0.0,time-delay);
+  float life=fract(age*(.24+n*.08));
+  float a=seed*2.39996+time*(.45+n*.6);
+  float spread=.35+fract(seed*.713)*1.1;
+  vec3 p;
+  if(n<.25){
+   float r=(.08+life*.28)*spread;
+   p=origin+vec3(cos(a)*r,sin(a*1.37)*r*.7+life*.2,sin(a)*r);
+  }else{
+   float travel=smoothstep(.05,.94,life);
+   vec3 destination=vec3(0.0,.7,1.25);
+   p=mix(origin,destination,travel);
+   // Smoke expands after leaving the hand, curls, then disperses over the soil.
+   float billow=sin(travel*3.14159)*(.45+spread*.65);
+   p+=vec3(cos(a+travel*5.0),sin(a*1.31+travel*4.0)*.65,sin(a+travel*5.0))*billow;
+   p.y+=sin(travel*3.14159)*.55;
   }
+  vec4 view=modelViewMatrix*vec4(p,1.0);
+  gl_Position=projectionMatrix*view;
+  gl_PointSize=min(110.0,pointScale*pixelRatio*(.65+n*.5)/max(1.0,-view.z));
+  alpha=power*smoothstep(delay,delay+.15,time)*smoothstep(0.0,.15,life)*(1.0-smoothstep(.65,1.0,life));
+  phase=seed+time*.3;
+ }
 `
-const fragmentShader = `
-  uniform vec3 color;
-  uniform float softness;
-  varying float alpha;
-  void main() {
-    float r = length(gl_PointCoord - 0.5) * 2.0;
-    float glow = exp(-r * r * softness) * (1.0 - smoothstep(0.65, 1.0, r));
-    gl_FragColor = vec4(color, glow * alpha);
+const fragmentShader=`
+ uniform vec3 color;
+ uniform float mist;
+ uniform sampler2D cloud;
+ varying float alpha;
+ varying float phase;
+ void main(){
+  vec2 uv=gl_PointCoord;
+  float radius=length(uv-.5)*2.0;
+  float edge=1.0-smoothstep(.35,1.0,radius);
+  float haze=texture2D(cloud,uv).a;
+  float ember=exp(-radius*radius*12.0);
+  float opacity=mix(ember,haze*edge,mist)*alpha;
+  gl_FragColor=vec4(color,opacity);
+ }
+`
+function Spell({index}:{index:number}){
+ const root=useRef<THREE.Group>(null)
+ const charge=useRef<THREE.Sprite>(null)
+ const burst=useRef<THREE.Sprite>(null)
+ const time=useRef(0)
+ const resources=useMemo(()=>{
+  const geometry=new THREE.BufferGeometry()
+  geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(180*3),3))
+  geometry.setAttribute('seed',new THREE.Float32BufferAttribute(Array.from({length:180},(_,i)=>i+index*193),1))
+  const cloud=createFogTexture(90+index,64),glow=createGlowTexture(64)
+  const make=(mist:boolean)=>new THREE.ShaderMaterial({
+   uniforms:{time:{value:0},power:{value:0},pointScale:{value:mist?650:26},pixelRatio:{value:1},origin:{value:new THREE.Vector3(...origins[index])},color:{value:new THREE.Color(colors[index])},mist:{value:mist?1:0},cloud:{value:cloud}},
+   vertexShader,fragmentShader,transparent:true,depthWrite:false,blending:mist?THREE.NormalBlending:THREE.AdditiveBlending,toneMapped:false,
+  })
+  return {geometry,cloud,glow,haze:make(true),embers:make(false)}
+ },[index])
+ useEffect(()=>()=>{resources.geometry.dispose();resources.cloud.dispose();resources.glow.dispose();resources.haze.dispose();resources.embers.dispose()},[resources])
+ useFrame(({gl},delta)=>{
+  const power=ritualPower(index,seq.exploration.storyProgress,seq.ending.progress,seq.ending.outcome,seq.ending.started)
+  if(root.current)root.current.visible=power>.002
+  if(power<=.002){time.current=0;return}
+  time.current+=Math.min(delta,.05)
+  for(const material of [resources.haze,resources.embers]){
+   material.uniforms.origin.value.copy(soulSpellOrigins[index]);material.uniforms.origin.value.z+=83
+   material.uniforms.time.value=time.current
+   material.uniforms.power.value=power*(material===resources.haze?.12:.5)
+   material.uniforms.pixelRatio.value=gl.getPixelRatio()
   }
-`
-
-function Spell({ index }: { index: number }) {
-  const root = useRef<THREE.Group>(null)
-  const charge = useRef<THREE.SpriteMaterial>(null)
-  const chargeSprite = useRef<THREE.Sprite>(null)
-  const time = useRef(0)
-  const { geometry, mist, sparks, texture } = useMemo(() => {
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(240 * 3), 3))
-    geometry.setAttribute('seed', new THREE.Float32BufferAttribute(Array.from({ length: 240 }, (_, i) => i), 1))
-    const makeMaterial = (pointScale: number, softness: number) => new THREE.ShaderMaterial({
-      uniforms: { time: { value: 0 }, power: { value: 0 }, origin: { value: new THREE.Vector3(...origins[index]) }, color: { value: new THREE.Color(colors[index]) }, pointScale: { value: pointScale }, softness: { value: softness }, pixelRatio: { value: 1 } },
-      vertexShader, fragmentShader, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
-    })
-    return { geometry, mist: makeMaterial(380, 3.5), sparks: makeMaterial(30, 7), texture: createGlowTexture(64) }
-  }, [index])
-  useEffect(() => () => { geometry.dispose(); mist.dispose(); sparks.dispose(); texture.dispose() }, [geometry, mist, sparks, texture])
-  useFrame(({ gl }, delta) => {
-    const power = ritualPower(index, seq.exploration.storyProgress, seq.ending.progress, seq.ending.outcome, seq.ending.started)
-    if (root.current) root.current.visible = power > 0.002
-    if (power <= 0.002) return
-    time.current += Math.min(delta, 0.05)
-    for (const material of [mist, sparks]) {
-      material.uniforms.time.value = time.current
-      material.uniforms.power.value = power * (material === mist ? 0.028 : 0.9)
-      material.uniforms.pixelRatio.value = gl.getPixelRatio()
-    }
-    if (charge.current) charge.current.opacity = power * 0.75
-    if (chargeSprite.current) chargeSprite.current.scale.setScalar(1.3 + Math.sin(time.current * 3) * 0.16)
-  })
-  return <group ref={root} visible={false}>
-    <points geometry={geometry} material={mist} frustumCulled={false} />
-    <points geometry={geometry} material={sparks} frustumCulled={false} />
-    <sprite ref={chargeSprite} position={origins[index] as [number, number, number]} scale={1.3}>
-      <spriteMaterial ref={charge} map={texture} color={colors[index]} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} />
-    </sprite>
-  </group>
+  if(charge.current){charge.current.position.copy(soulSpellOrigins[index]);charge.current.position.z+=83;charge.current.material.opacity=power*.22;charge.current.material.rotation=time.current*.3;charge.current.scale.setScalar(1.2+Math.sin(time.current*2.7)*.15)}
+  if(burst.current){const pulse=.5+.5*Math.sin(time.current*2.1+index);burst.current.material.opacity=power*(.025+pulse*.035)*Math.min(1,Math.max(0,time.current-1.8));burst.current.scale.set(3+pulse,1.8+pulse*.6,1);burst.current.material.rotation=Math.sin(time.current*.5)*.2}
+ })
+ return <group ref={root} visible={false}>
+  <points geometry={resources.geometry} material={resources.haze} frustumCulled={false}/>
+  <points geometry={resources.geometry} material={resources.embers} frustumCulled={false}/>
+  <sprite ref={charge} position={origins[index] as [number,number,number]}><spriteMaterial map={resources.glow} color={colors[index]} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending}/></sprite>
+  <sprite ref={burst} position={[0,1.1,1.25]}><spriteMaterial map={resources.cloud} color={colors[index]} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending}/></sprite>
+ </group>
 }
-
-/** Six GPU particle batches form curling vapor, sparks, and a converging spell above the stone. */
-export function SoulMagic() {
-  const vortex = useRef<THREE.Group>(null)
-  const halo = useRef<THREE.SpriteMaterial>(null)
-  const ringMaterials = useRef<(THREE.MeshBasicMaterial | null)[]>([])
-  const time = useRef(0)
-  const texture = useMemo(() => createGlowTexture(128), [])
-  useEffect(() => () => texture.dispose(), [texture])
-  useFrame((_, delta) => {
-    time.current += Math.min(delta, 0.05)
-    let power = 0
-    for (let i = 0; i < 3; i++) power = Math.max(power, ritualPower(i, seq.exploration.storyProgress, seq.ending.progress, seq.ending.outcome, seq.ending.started))
-    if (vortex.current) {
-      vortex.current.visible = power > 0.002
-      vortex.current.rotation.y = time.current * 0.65
-      vortex.current.rotation.z = Math.sin(time.current * 0.5) * 0.2
-      vortex.current.scale.setScalar(0.75 + power * 0.25)
-    }
-    ringMaterials.current.forEach(material => { if (material) material.opacity = power * 0.3 })
-    if (halo.current) halo.current.opacity = power * 0.5
-  })
-  return <group position={[0, 0, -83]}>
-    {[0, 1, 2].map(index => <Spell key={index} index={index} />)}
-    <group ref={vortex} position={[0, 3.85, -0.2]} visible={false}>
-      {[0, 1, 2].map(i => <mesh key={i} rotation={[Math.PI * 0.3 + i * 0.8, i * 0.6, i]}>
-        <torusGeometry args={[0.58 + i * 0.12, 0.018, 6, 64, Math.PI * 1.6]} />
-        <meshBasicMaterial ref={material => { ringMaterials.current[i] = material }} color={colors[i]} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} />
-      </mesh>)}
-      <sprite scale={3}><spriteMaterial ref={halo} map={texture} color="#cbdfff" transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} /></sprite>
-    </group>
-  </group>
-}
+/** Six GPU particle batches retain the existing performance and ritual timing. */
+export function SoulMagic(){return <group position={[0,0,-83]}>{[0,1,2].map(index=><Spell key={index} index={index}/>)}</group>}

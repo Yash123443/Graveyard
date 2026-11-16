@@ -1,3 +1,4 @@
+import { dressingObstacles } from './CemeteryDressing'
 import { useFrame } from '@react-three/fiber'
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
@@ -33,51 +34,33 @@ function scatter() {
 }
 
 function graveShape(style: number) {
-  const shape = new THREE.Shape()
-  if (style === 0) {
-    shape.moveTo(-0.52, 0); shape.lineTo(-0.52, 1.02); shape.quadraticCurveTo(-0.52, 1.34, -0.2, 1.39); shape.quadraticCurveTo(0, 1.43, 0.2, 1.39); shape.quadraticCurveTo(0.52, 1.34, 0.52, 1.02); shape.lineTo(0.52, 0); shape.closePath()
-  } else if (style === 1) {
-    shape.moveTo(-0.52, 0); shape.lineTo(-0.52, 1.08); shape.lineTo(-0.34, 1.12); shape.lineTo(-0.04, 1.43); shape.lineTo(0.28, 1.13); shape.lineTo(0.5, 1.07); shape.lineTo(0.46, 0.34); shape.lineTo(0.52, 0); shape.closePath()
-  } else if (style === 2) {
-    shape.moveTo(-0.51, 0); shape.lineTo(-0.51, 0.95); shape.lineTo(-0.27, 0.95); shape.lineTo(-0.27, 1.2); shape.lineTo(-0.12, 1.2); shape.lineTo(-0.12, 1.42); shape.lineTo(0.12, 1.42); shape.lineTo(0.12, 1.2); shape.lineTo(0.27, 1.2); shape.lineTo(0.27, 0.95); shape.lineTo(0.51, 0.95); shape.lineTo(0.51, 0); shape.closePath()
-  } else {
-    shape.moveTo(-0.52, 0); shape.lineTo(-0.52, 1.0); shape.quadraticCurveTo(-0.52, 1.35, -0.14, 1.4); shape.lineTo(0.1, 1.3); shape.lineTo(0.26, 1.4); shape.lineTo(0.48, 1.1); shape.lineTo(0.38, 0.98); shape.lineTo(0.52, 0); shape.closePath()
-  }
-  return new THREE.ExtrudeGeometry(shape, { depth: 0.2, bevelEnabled: true, bevelSegments: 3, bevelSize: 0.045, bevelThickness: 0.055 })
+ const shape=new THREE.Shape()
+ shape.moveTo(-.52,0);shape.lineTo(-.52,1.04)
+ // Four quiet memorial silhouettes: round arch, pediment, shoulders and tablet.
+ if(style===0){shape.bezierCurveTo(-.52,1.52,.52,1.52,.52,1.04)}
+ else if(style===1){shape.lineTo(-.52,1.18);shape.lineTo(0,1.43);shape.lineTo(.52,1.18);shape.lineTo(.52,1.04)}
+ else if(style===2){shape.lineTo(-.36,1.04);shape.quadraticCurveTo(-.36,1.4,0,1.4);shape.quadraticCurveTo(.36,1.4,.36,1.04);shape.lineTo(.52,1.04)}
+ else {shape.lineTo(-.45,1.3);shape.lineTo(.45,1.3);shape.lineTo(.52,1.04)}
+ shape.lineTo(.52,0);shape.closePath()
+ return new THREE.ExtrudeGeometry(shape,{depth:.24,bevelEnabled:true,bevelSegments:2,bevelSize:.035,bevelThickness:.035,curveSegments:16})
 }
 
 function makeEngravingTexture(title: string) {
-  const canvas = document.createElement('canvas')
-  canvas.width = 512
-  canvas.height = 192
-  const ctx = canvas.getContext('2d')!
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-  ctx.textAlign = 'center'
-  ctx.fillStyle = 'rgba(222,216,198,.9)'
-  ctx.shadowColor = '#d5d0bf'
-  ctx.shadowBlur = 2
-  ctx.font = 'bold 32px Georgia, serif'
-  const words = title.split(' ')
-  const lines: string[] = []
-  let line = ''
-  words.forEach((word) => {
-    const next = line ? `${line} ${word}` : word
-    if (ctx.measureText(next).width > 420 && line) { lines.push(line); line = word }
-    else line = next
-  })
-  if (line) lines.push(line)
-  const rowStart = lines.length > 1 ? 66 : 82
-  lines.slice(0, 2).forEach((text, index) => ctx.fillText(text, 256, rowStart + index * 39))
-  ctx.shadowBlur = 0
-  ctx.strokeStyle = 'rgba(198,188,164,.55)'
-  ctx.lineWidth = 2
-  ctx.beginPath(); ctx.moveTo(92, 142); ctx.lineTo(420, 142); ctx.stroke()
-  ctx.fillStyle = 'rgba(196,188,166,.7)'
-  ctx.font = 'italic 24px Georgia, serif'
-  ctx.fillText('REST IN PEACE', 256, 174)
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.colorSpace = THREE.SRGBColorSpace
-  return texture
+ const canvas=document.createElement('canvas');canvas.width=768;canvas.height=512
+ const ctx=canvas.getContext('2d')!
+ // Transparent canvas: only the carved letter shapes receive emission.
+ ctx.clearRect(0,0,768,512)
+ ctx.textAlign='center';ctx.fillStyle='#d6cbb2';ctx.font='28px Georgia'
+ ctx.fillText('IN MEMORY OF',384,65)
+ const words=title.replace(/^THE /,'').split(' ');const rows:string[]=[];let line=''
+ ctx.font='600 48px Georgia'
+ words.forEach(word=>{const next=line?line+' '+word:word;if(ctx.measureText(next).width>650&&line){rows.push(line);line=word}else line=next})
+ if(line)rows.push(line)
+ rows.forEach((row,i)=>ctx.fillText(row,384,175+i*66))
+
+ ctx.font='italic 35px Georgia';ctx.fillText('Rest in peace',384,410)
+ const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace
+ return texture
 }
 
 function makeBeveledBlock() {
@@ -117,21 +100,23 @@ function makePlotFence(specs: GraveSpec[]) {
     )
     const rail = (x: number, z: number, y: number, length: number, alongX: boolean) => {
       localPoint(x, z, y)
-      tangent.set(alongX ? Math.cos(grave.yaw) : -Math.sin(grave.yaw), 0, alongX ? -Math.sin(grave.yaw) : Math.cos(grave.yaw))
+      tangent.set(alongX ? Math.cos(grave.yaw) : Math.sin(grave.yaw), 0, alongX ? -Math.sin(grave.yaw) : Math.cos(grave.yaw))
       quaternion.setFromUnitVectors(up, tangent)
       scale.set(1, length, 1)
       matrix.compose(point, quaternion, scale)
       rails.setMatrixAt(railIndex++, matrix)
     }
-    ;[-1.15, 1.15].forEach((x) => [0.38, 0.74].forEach((y) => rail(x, 0.58, y, 2.42, false)))
-    ;[-0.55, 2.05].forEach((z) => [0.38, 0.74].forEach((y) => rail(0, z, y, 2.3, true)))
-    ;[-0.79, 0.79].forEach((x) => [0.38, 0.74].forEach((y) => rail(x, 2.05, y, 0.72, true)))
+    ;[-1.15, 1.15].forEach((x) => [0.38, 0.74].forEach((y) => rail(x, 0.75, y, 2.6, false)))
+    ;[0.38, 0.74].forEach(y => rail(0, -.55, y, 2.3, true))
+    // Leave a central entrance aligned with the stepping-stone approach.
+    ;[-.85,.85].forEach(x => [0.38,0.74].forEach(y => rail(x,2.05,y,.6,true)))
+
 
     const postPositions: [number, number][] = [
-      [-1.15, -0.62], [1.15, -0.62], [-1.15, 1.78], [1.15, 1.78], [-1.15, 0.58], [1.15, 0.58],
+      [-1.15, -0.55], [1.15, -0.55], [-1.15, 2.05], [1.15, 2.05], [-1.15, 0.58], [1.15, 0.58],
     ]
     postPositions.forEach(([x, z]) => {
-      localPoint(x, z, 0.51)
+      localPoint(x, z, 0.42)
       quaternion.identity()
       scale.set(1, 1, 1)
       matrix.compose(point, quaternion, scale)
@@ -139,8 +124,8 @@ function makePlotFence(specs: GraveSpec[]) {
     })
     ;[-1.15, 1.15].forEach((x) => {
       for (let i = 0; i < 6; i += 1) {
-        const z = -0.42 + i * 0.4
-        localPoint(x, z, 0.48)
+        const z = -0.42 + i * 0.46
+        localPoint(x, z, 0.32)
         quaternion.identity()
         scale.set(1, 1, 1)
         matrix.compose(point, quaternion, scale)
@@ -148,6 +133,7 @@ function makePlotFence(specs: GraveSpec[]) {
       }
     })
   })
+  rails.count = railIndex
   rails.instanceMatrix.needsUpdate = true
   posts.instanceMatrix.needsUpdate = true
   pickets.instanceMatrix.needsUpdate = true
@@ -161,9 +147,9 @@ export function ScatteredGraves() {
     const specs = scatter()
     const textures = createStoneTextures(256)
     const materials = [0, 1, 2, 3].map((i) => new THREE.MeshStandardMaterial({
-      map: textures.map, bumpMap: textures.bumpMap, bumpScale: 0.26,
+      map: textures.map, roughnessMap: textures.bumpMap, bumpMap: textures.bumpMap, bumpScale: 0.035,
       // Lift the weathered stone albedo so the aged fronts remain legible in moonlight.
-      color: ['#c0b5a2', '#aaa08f', '#bbb09d', '#9d9587'][i], roughness: 0.97,
+      color: ['#b0ac9f', '#929fa2', '#aa9f8d', '#8f9691'][i], roughness: 0.97,
     }))
     const bones = [0, 1, 2, 3].map(graveShape)
     const groups = [0, 1, 2, 3].map((style) => specs.map((g, index) => ({ ...g, index })).filter((g) => g.style === style))
@@ -203,9 +189,9 @@ export function ScatteredGraves() {
       [[0.26, 0.92, 0.268], [0.1, 0.77, 0.268], [0.22, 0.62, 0.268]],
       [[-0.08, 0.55, 0.268], [-0.32, 0.42, 0.268], [-0.38, 0.24, 0.268]],
     ]
-    return paths.slice(0, index % 3 + 1).map((points, crackIndex) => {
+    return paths.slice(0, 1).map((points, crackIndex) => {
       const shifted = points.map(([x, y, z]) => [x + Math.sin(index * 7 + crackIndex) * 0.08, y - (index % 2) * 0.08, z] as [number, number, number])
-      return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(shifted.map((point) => new THREE.Vector3(...point))), 16, 0.012, 4, false)
+      return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(shifted.map((point) => new THREE.Vector3(...point))), 16, 0.005, 4, false)
     })
   }), [specs])
 
@@ -213,7 +199,10 @@ export function ScatteredGraves() {
     seq.exploration.obstacles = [
       ...specs.map((grave) => ({ x: grave.x, z: grave.z, radius: 1.45 * grave.scale })),
       ...deadTreeCollision,
-      { x: 0, z: -83, radius: 2.3 },
+      ...dressingObstacles,
+      { x: 0, z: -83, radius: 1.6 },
+      { x: 0, z: -80.7, radius: 1.6 },
+      { x: 0, z: -78.7, radius: 1.6 },
       { x: 5.5, z: -94, radius: 3.3 },
     ]
     return () => { seq.exploration.obstacles = [] }
@@ -223,7 +212,7 @@ export function ScatteredGraves() {
     groups.forEach((group, style) => group.forEach((grave, localIndex) => {
       euler.set(grave.lean, grave.yaw, 0)
       rotation.setFromEuler(euler)
-      position.set(grave.x, groundHeight(grave.x, grave.z) + 0.38, grave.z)
+      position.set(grave.x, groundHeight(grave.x, grave.z) + 0.12, grave.z)
       scale.set(grave.scale, grave.height * grave.scale, grave.scale)
       matrix.compose(position, rotation, scale)
       refs.current[style]?.setMatrixAt(localIndex, matrix)
@@ -238,19 +227,19 @@ export function ScatteredGraves() {
     specs.forEach((grave, index) => {
       euler.set(0, grave.yaw, 0)
       rotation.setFromEuler(euler)
-      position.set(grave.x, groundHeight(grave.x, grave.z) + 0.14, grave.z + 0.03)
-      scale.set(1.26 * grave.scale, 0.28, 0.68 * grave.scale)
+      position.set(grave.x, groundHeight(grave.x, grave.z) - 0.16, grave.z + 0.03)
+      scale.set(1.36 * grave.scale, 0.6, 0.68 * grave.scale)
       matrix.compose(position, rotation, scale)
       bases.current?.setMatrixAt(index, matrix)
 
-      position.set(grave.x, groundHeight(grave.x, grave.z) + 0.31, grave.z + 0.03)
+      position.set(grave.x, groundHeight(grave.x, grave.z) + 0.09, grave.z + 0.03)
       scale.set(1.02 * grave.scale, 0.18, 0.53 * grave.scale)
       matrix.compose(position, rotation, scale)
       caps.current?.setMatrixAt(index, matrix)
 
       // Low earthen burial mound, with the headstone rising at its back edge.
-      position.set(grave.x, groundHeight(grave.x, grave.z) + 0.12, grave.z + 0.42)
-      scale.set(1.42 * grave.scale, 0.29 * grave.scale, 0.86 * grave.scale)
+      position.set(grave.x, groundHeight(grave.x, grave.z) - 0.07, grave.z + 0.65)
+      scale.set(0.88 * grave.scale, 0.24 * grave.scale, 1.12 * grave.scale)
       matrix.compose(position, rotation, scale)
       mounds.current?.setMatrixAt(index, matrix)
     })
@@ -340,8 +329,8 @@ export function ScatteredGraves() {
       if (!material) return
       const selected = index === nearIndex ? seq.exploration.graveFocus : 0
       material.color.setRGB(0.75 + selected * 0.2, 0.71 + selected * 0.23, 0.62 + selected * 0.31)
-      material.emissive.setRGB(0.04 * selected, 0.09 * selected, 0.13 * selected)
-      material.emissiveIntensity = selected * 0.8
+      material.emissive.setRGB(0.78, 0.72, 0.55)
+      material.emissiveIntensity = 0.45 + selected * 0.65
       material.opacity = 0.68 + selected * 0.32
     })
   })
@@ -351,13 +340,13 @@ export function ScatteredGraves() {
     <primitive object={plotFence.rails} />
     <primitive object={plotFence.posts} />
     <primitive object={plotFence.pickets} />
-    {specs.map((grave, index) => <group key={`fracture-${index}`} position={[grave.x, groundHeight(grave.x, grave.z) + 0.38, grave.z]} rotation={[grave.lean, grave.yaw, 0]} scale={[grave.scale, grave.height * grave.scale, grave.scale]}>
+    {specs.map((grave, index) => <group key={`fracture-${index}`} position={[grave.x, groundHeight(grave.x, grave.z) + 0.12, grave.z]} rotation={[grave.lean, grave.yaw, 0]} scale={[grave.scale, grave.height * grave.scale, grave.scale]}>
       {crackSets[index].map((geometry, crack) => <mesh key={crack} geometry={geometry}>
         <meshStandardMaterial color="#242522" roughness={1} polygonOffset polygonOffsetFactor={-1} />
       </mesh>)}
-      <mesh position={[0, 0.79, 0.275]}>
-        <planeGeometry args={[0.82, 0.31]} />
-        <meshStandardMaterial ref={(material) => { engravingMaterials.current[index] = material }} map={engravings[index]} transparent roughness={1} metalness={0} depthWrite={false} color="#c0b59f" />
+      <mesh position={[0, 0.72, 0.29]}>
+        <planeGeometry args={[0.82, 0.57]} />
+        <meshStandardMaterial ref={(material) => { engravingMaterials.current[index] = material }} map={engravings[index]} emissiveMap={engravings[index]} toneMapped={false} transparent roughness={1} metalness={0} depthWrite={false} color="#c0b59f" />
       </mesh>
       {[[-0.3, 0.24, 0.275], [0.28, 0.34, 0.275], [0.02, 0.12, 0.28]].map(([x, y, z], patch) => <mesh key={`moss-${patch}`} position={[x, y, z]} scale={[0.19 + patch * 0.04, 0.07 + patch * 0.02, 0.025]}>
         <sphereGeometry args={[1, 10, 7]} />

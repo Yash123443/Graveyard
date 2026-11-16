@@ -325,5 +325,5 @@ export function createWitchSoul(parent: THREE.Group, options: SoulOptions = {}) 
     root.visible=appear>.003
     return appear
   }
-  return {group:root,set,update(dt:number){return set(timeline+dt,elapsed+dt)},setPixelRatio(_ratio:number){},dispose(){const geometries=new Set<THREE.BufferGeometry>();root.traverse(node=>{const g=(node as THREE.Mesh).geometry;if(g)geometries.add(g)});geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());textures.forEach(t=>t.dispose());parent.remove(root)}}
+  return {group:root,spellOrigin:lantern,set,update(dt:number){return set(timeline+dt,elapsed+dt)},setPixelRatio(_ratio:number){},dispose(){const geometries=new Set<THREE.BufferGeometry>();root.traverse(node=>{const g=(node as THREE.Mesh).geometry;if(g)geometries.add(g)});geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());textures.forEach(t=>t.dispose());parent.remove(root)}}
 }

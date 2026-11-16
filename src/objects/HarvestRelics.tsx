@@ -1,3 +1,4 @@
+import { WaxCandle } from './WaxCandle'
 import { useEffect, useMemo } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
@@ -50,9 +51,9 @@ export function HarvestRelics() {
         const sprig=add(new THREE.OctahedronGeometry(.075,0),leaf,[x,y,.46]);sprig.scale.set(.4,1.5,.25);sprig.rotation.z=-a
       }
       for(let i=0;i<5;i++) {
-        const x=.52+(i%3)*.16,z=.35+Math.floor(i/3)*.22,h=.19+(i%3)*.14
-        add(new THREE.CylinderGeometry(.045,.055,h,10),wax,[x,h/2,z])
-        const fire=add(new THREE.SphereGeometry(.025,8,6),flame,[x,h+.04,z]);fire.scale.y=1.9
+        const x=.52+(i%3)*.16,z=.35+Math.floor(i/3)*.22
+
+
         add(new THREE.CylinderGeometry(.075,.08,.014,10),wax,[x,.012,z])
       }
       // A low twisted branch and scattered fallen leaves anchor the display.
@@ -60,6 +61,18 @@ export function HarvestRelics() {
       for(let i=0;i<14;i++) {
         const piece=add(new THREE.OctahedronGeometry(.09,0),leaf,[Math.sin(i*2.4)*1.1,.025,.6+Math.cos(i*2.4)*.5])
         piece.scale.set(1.2,.12,.5);piece.rotation.y=i*1.7
+      }
+      // Weathered witch bottles beside the funeral offerings.
+      for (let i=0;i<3;i++) {
+        const x=-.85+i*.19, z=.85, h=.17+i*.04
+        add(new THREE.CylinderGeometry(.055,.07,h,8),iron,[x,h/2,z])
+        add(new THREE.CylinderGeometry(.025,.03,.09,8),iron,[x,h+.025,z])
+        add(new THREE.CylinderGeometry(.028,.028,.025,7),wood,[x,h+.08,z])
+      }
+      tube([[.65,.08,.85],[1,.09,1.15],[1.45,.07,1.6]],.022,wood)
+      for(let i=0;i<12;i++) {
+        const spread=(i-5.5)*.027
+        tube([[1.35,.07,1.5],[1.55+spread,.055,1.77],[1.73+spread*2,.035,1.98]],.008,leaf)
       }
       batchStaticMeshes(root)
       return root
@@ -74,5 +87,5 @@ export function HarvestRelics() {
     groups.forEach(group=>group.traverse(node=>{if((node as THREE.Mesh).geometry)geometry.add((node as THREE.Mesh).geometry)}))
     geometry.forEach(g=>g.dispose());materials.forEach(m=>m.dispose())
   },[groups,materials])
-  return <group>{groups.map((group,index)=><primitive key={index} object={group}/>)}</group>
+  return <group>{groups.map((group,index)=><group key={index}><primitive object={group}/><group position={[sites[index].x,groundHeight(sites[index].x,sites[index].z),sites[index].z]} rotation={[0,sites[index].yaw,0]}>{Array.from({length:5},(_,i)=>{const h=.19+(i%3)*.14;return <WaxCandle key={i} position={[.52+(i%3)*.16,h/2,.35+Math.floor(i/3)*.22]} scale={h/.72}/>})}</group></group>)}</group>
 }
