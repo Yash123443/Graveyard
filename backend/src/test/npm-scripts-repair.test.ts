@@ -312,6 +312,10 @@ interface AgentScript {
   fixer?: "ok" | "other-file" | "unknown";
   /** Aborts this controller while the Fixer runs. */
   abortInFixer?: AbortController;
+  /** Per-call Fixer replies (takes precedence over `fixer`); the last entry repeats. */
+  fixerReplies?: Array<"ok" | "mismatch" | "unsafe-path" | "timed-out" | "unknown">;
+  /** Aborts this controller after the first Fixer call returns its reply. */
+  abortAfterFirstFixer?: AbortController;
 }
 
 class FakeAgents implements AgentsLike {
@@ -342,7 +346,16 @@ class FakeAgents implements AgentsLike {
     if (this.script.fixer === "unknown") return Promise.resolve({ status: "no-result", role: "fixer", code: "no-patch", detail: "no safe patch" });
     const files = new Map<string, FileEvidence>();
     for (const e of req.evidence) if (e.kind === "file" && e.path !== undefined) files.set(e.path, { complete: e.complete === true, text: e.text });
-    const diff = this.script.fixer === "other-file" ? DIFF.replaceAll("build.js", "package.json") : DIFF;
+    let diff = this.script.fixer === "other-file" ? DIFF.replaceAll("build.js", "package.json") : DIFF;
+    const replies = this.script.fixerReplies;
+    if (replies !== undefined && replies.length > 0) {
+      const reply = replies[Math.min(this.fixerCalls.length - 1, replies.length - 1)];
+      if (this.fixerCalls.length === 1) this.script.abortAfterFirstFixer?.abort();
+      if (reply === "unknown") return Promise.resolve({ status: "no-result", role: "fixer", code: "no-patch", detail: "no safe patch" });
+      if (reply === "timed-out") return Promise.resolve({ status: "timed-out", role: "fixer", code: "timed-out", detail: "no result" });
+      if (reply === "mismatch") diff = DIFF.replace(" const x = 1;", " const y = 2;");
+      if (reply === "unsafe-path") diff = DIFF.replaceAll("build.js", ".git/config");
+    }
     const v = validatePatchProposal({ schemaVersion: 1, role: "fixer", verdict: "patch", summary: "Remove the stray throw.", diff }, files);
     if (v.ok) return Promise.resolve({ status: "ok", role: "fixer", value: v.value });
     return Promise.resolve({ status: "rejected", role: "fixer", code: v.code, detail: v.detail });
@@ -730,6 +743,66 @@ describe("npm scripts verified repair in the GitHub runner", () => {
     assert.equal(rig.results.length, 0);
     assert.equal(rig.pipelineRequests.length, 1);
     assert.deepEqual(readdirSync(rig.runsRoot), []);
+  });
+
+  it("asks the Fixer with the trusted single-build-entry flag and no retry flag on the first call", async () => {
+    const rig = makeRig();
+    await rig.runner.run(rig.ctx);
+    assert.equal(rig.agents?.fixerCalls.length, 1);
+    assert.equal(rig.agents?.fixerCalls[0]?.singleBuildEntry, true);
+    assert.equal(rig.agents?.fixerCalls[0]?.contextRetry, undefined);
+  });
+
+  it("retries the Fixer exactly once after a context-mismatch and verifies the retried proposal", async () => {
+    const rig = makeRig({ agents: new FakeAgents({ fixerReplies: ["mismatch", "ok"] }) });
+    const out = await rig.runner.run(rig.ctx);
+    assert.deepEqual(out, { kind: "completed" });
+    const calls = rig.agents?.fixerCalls ?? [];
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]?.contextRetry, undefined);
+    assert.equal(calls[1]?.contextRetry, true);
+    assert.equal(calls[1]?.singleBuildEntry, true);
+    assert.deepEqual(calls[1]?.evidence, calls[0]?.evidence, "the retry sends the same evidence");
+    assert.equal(JSON.stringify(calls[1]).includes("const y = 2"), false, "no model text is fed back");
+    const result = rig.results[0] as Record<string, unknown>;
+    assert.equal(verificationOf(result)["status"], "verified");
+    assert.equal(view(result).outcome, "repair-verified");
+    assert.equal(view(result).verifiedDiff, DIFF);
+  });
+
+  it("does not retry more than once: a second context-mismatch is recorded as rejected", async () => {
+    const rig = makeRig({ agents: new FakeAgents({ fixerReplies: ["mismatch"] }) });
+    const out = await rig.runner.run(rig.ctx);
+    assert.deepEqual(out, { kind: "completed" });
+    assert.equal(rig.agents?.fixerCalls.length, 2);
+    assert.equal(rig.pipelineRequests.length, 1);
+    const result = rig.results[0] as Record<string, unknown>;
+    assert.equal(result["verification"], undefined);
+    assert.equal((result["fixer"] as Record<string, unknown>)["status"], "rejected");
+    assert.equal(view(result).repair.verified, false);
+  });
+
+  it("does not retry on no-result, timeout or an unsafe path", async () => {
+    for (const reply of ["unknown", "timed-out", "unsafe-path"] as const) {
+      const rig = makeRig({ agents: new FakeAgents({ fixerReplies: [reply, "ok"] }) });
+      const out = await rig.runner.run(rig.ctx);
+      assert.deepEqual(out, { kind: "completed" }, reply);
+      assert.equal(rig.agents?.fixerCalls.length, 1, reply);
+      assert.equal(rig.pipelineRequests.length, 1, reply);
+      const result = rig.results[0] as Record<string, unknown>;
+      assert.equal(result["verification"], undefined, reply);
+      assert.equal(view(result).repair.verified, false, reply);
+    }
+  });
+
+  it("does not retry after a context-mismatch when the job was aborted meanwhile", async () => {
+    const controller = new AbortController();
+    const rig = makeRig({ controller, agents: new FakeAgents({ fixerReplies: ["mismatch", "ok"], abortAfterFirstFixer: controller }) });
+    const out = await rig.runner.run(rig.ctx);
+    assert.deepEqual(out, { kind: "aborted" });
+    assert.equal(rig.agents?.fixerCalls.length, 1);
+    assert.equal(rig.results.length, 0);
+    assert.equal(rig.pipelineRequests.length, 1);
   });
 
   it("does not repair a baseline that was not cleaned up", async () => {

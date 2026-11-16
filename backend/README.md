@@ -643,10 +643,8 @@ Requirements:
 
 The harness checks the exact verified diff and that the original tests pass with it. The original repository is not modified.
 
-Status: Kiro wrote this test mode. Codex compiled it and ran its fail-closed missing-target test. Two other checks passed
-separately: the shared public static `mumbai-tour` test, and an independent real two-package npm registry, cache and
-offline test. The combined public repair has **not** been run: it awaits a compatible public target, and no such
-repository has been published. A live public repair is not claimed to have passed.
+Status (updated 2026-11-17, supersedes the earlier "awaits a public target, not run" note): see "Public npm E2E result
+(2026-11-17)" below. One public fixture passed once; nothing is claimed for other repositories.
 
 ## Local worker (opt-in, separate process; tested with mocked Docker, and verified end to end once on real Docker for one controlled fixture, 2026-11-15)
 
@@ -843,5 +841,23 @@ version, with TAP count and protected-test hardening, passed on real Docker with
 passed, no leftover resources). Final attempts with real Kiro did not reproduce that verification: two returned a diagnosis
 only and one returned a valid-shaped proposal that stayed unverified.
 
-Not shown: the broad suite was stopped after a process-launch suite failure, so a full-suite pass is not claimed. No public
-npm repository has been run, and live Kiro repair is not shown to be reliable. See `DEVELOPMENT.md`.
+Not shown: the broad suite was stopped after a process-launch suite failure, so a full-suite pass is not claimed. Live Kiro
+repair is not shown to be reliable. See `DEVELOPMENT.md`. (The earlier "no public npm repository has been run" is superseded
+by the next section.)
+
+## Public npm E2E result (2026-11-17)
+
+Fixture: `https://github.com/Yash123443/graveyard-npm-repair-fixture`, pinned at `f3fe0aadbc7b62b28d583e21879ad8bb47f90751`.
+Codex published its four controlled fixture files with the owner's authorization.
+
+1. First real integrated attempt: the baseline build exited 1, the Analyst returned ok, the Fixer proposal was rejected as
+   `context-mismatch`, and cleanup was confirmed.
+2. Kiro then wrote npm-only exact-line guidance, an optional bounded numbered reference, and one retry only after a
+   `context-mismatch`, with the validator unchanged.
+3. Codex ran backend production and test compiles. 231 focused tests passed and one preexisting real child-process suite
+   was skipped.
+4. Public rerun passed in 64 s: real GitHub and registry, live Kiro v2, offline Docker, one original test passed, outcome
+   `repair-verified`, exact diff checked, cleanup confirmed.
+
+Limits: only the focused tests exercised the retry. Whether the live run used it was not measured, so it is not claimed.
+This is one run of one fixture; no claim is made for other repositories.

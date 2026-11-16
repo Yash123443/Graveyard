@@ -26,6 +26,13 @@
  * original is never shown as complete and is never used to apply a patch: the original is re-read from
  * the host snapshot and must equal the text the agents were shown.
  *
+ * Fixer guidance and retry. The Fixer is called with the trusted flag `singleBuildEntry`, so the
+ * adapter adds fixed copy-exactly and hunk-position rules and, when it fits the evidence cap, a
+ * line-numbered reference of the same redacted file (kiro-agent.ts). If and only if the proposal is
+ * rejected with `context-mismatch` and the job is not aborted, the Fixer is called ONCE more with the
+ * fixed `contextRetry` flag. No-result, timeout, unsafe-path or any other outcome is not retried. The
+ * retried proposal goes through exactly the same validation and verification.
+ *
  * Verification (`verifyNpmScriptsRepair`), in order, every step failing closed:
  *   1. baseline gate (above) and a verification execution id that differs from the baseline's;
  *   2. the proposal names exactly the build entry, was context-verified, and the evidence was complete;
@@ -69,7 +76,7 @@ import { redactSecrets, sanitizeText, type Diagnosis, type EvidenceItem, type Pa
 import { NPM_SCRIPTS_PATCH_CLASS, isBuildEntryName, parseBuildEntryScript, parseRepairTestScript, testCountsAcceptable } from "./build-entry.js";
 import type { ControlledPipelineResult, PipelineRequest } from "./controlled-pipeline.js";
 import { createRunDir, removeRunDir } from "./fixture-workspace.js";
-import type { AgentOutcome } from "./kiro-agent.js";
+import type { AgentOutcome, FixerRequest } from "./kiro-agent.js";
 import { parseTapCounts, type TestCounts } from "./node-fixture-runner.js";
 import { SCRIPTS_DRIVER_NAME, SCRIPTS_INSTALL_MANIFEST_NAME } from "./npm-scripts-driver.js";
 import { NPM_SCRIPTS_RUN_MODE, type ScriptsPlanOk } from "./npm-scripts-policy.js";
@@ -650,8 +657,22 @@ async function stepInner(a: RepairStepArgs): Promise<RepairStep> {
 
   const diagnosis = analyst.value;
   if (!a.report.stage("repairing", "the Fixer proposes a patch; it is not applied to the original")) return { kind: "aborted" };
-  const fixer = await callAgent("fixer", () => a.agents.propose({ diagnosis, evidence, signal: a.signal }));
+  // Trusted fixed flags only: npm build-entry guidance, and at most ONE retry, only after an exact
+  // `context-mismatch` rejection and only while not aborted. No model text is fed back; validation of
+  // the retried proposal is identical (exact comparison with the complete original).
+  const fixerRequest = (contextRetry: boolean): FixerRequest => ({
+    diagnosis,
+    evidence,
+    signal: a.signal,
+    singleBuildEntry: true,
+    ...(contextRetry ? { contextRetry: true } : {}),
+  });
+  let fixer = await callAgent("fixer", () => a.agents.propose(fixerRequest(false)));
   if (a.signal.aborted) return { kind: "aborted" };
+  if (fixer.status === "rejected" && fixer.code === "context-mismatch") {
+    fixer = await callAgent("fixer", () => a.agents.propose(fixerRequest(true)));
+    if (a.signal.aborted) return { kind: "aborted" };
+  }
   if (fixer.status !== "ok") {
     return { kind: "done", target, sourceSent: true, analyst, fixer, fixerSkipped: "no-diagnosis", verification: null };
   }

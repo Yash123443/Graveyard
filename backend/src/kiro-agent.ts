@@ -45,6 +45,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -331,6 +332,35 @@ export interface FixerRequest {
   diagnosis: Diagnosis;
   evidence: readonly EvidenceItem[];
   signal?: AbortSignal;
+  /**
+   * Trusted caller flag (never derived from repository data). The evidence holds exactly one file,
+   * the complete build entry of the npm-scripts repair class. When that single file item is also
+   * complete after preparation, the adapter adds fixed single-file guidance and, if it fits the
+   * evidence cap, a line-numbered reference of the SAME prepared (redacted) text. Absent or false:
+   * the request is exactly the legacy one.
+   */
+  singleBuildEntry?: boolean;
+  /**
+   * Trusted caller flag: a previous proposal for the same evidence was rejected with
+   * `context-mismatch`. Adds one fixed feedback sentence; no model or repository text is echoed.
+   */
+  contextRetry?: boolean;
+}
+
+/** Upper bound of a numbered reference on its own (the total evidence cap also applies). */
+export const MAX_NUMBERED_REFERENCE_BYTES = 2 * AGENT_LIMITS.maxEvidenceItemBytes;
+
+/**
+ * Line-numbered copy of an already prepared, complete file text: each line is its 1-based number,
+ * right-aligned, then `|`, then the exact line. Returns null when the text is empty, does not end
+ * with a newline, or the reference would exceed `maxBytes`. Pure; exported for tests.
+ */
+export function numberedReference(text: string, maxBytes: number = MAX_NUMBERED_REFERENCE_BYTES): string | null {
+  if (text.length === 0 || !text.endsWith("\n")) return null;
+  const lines = text.slice(0, -1).split("\n");
+  const width = String(lines.length).length;
+  const out = lines.map((l, i) => `${String(i + 1).padStart(width, " ")}|${l}`).join("\n");
+  return Buffer.byteLength(out, "utf8") <= maxBytes ? out : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +395,40 @@ function fixerPrompt(nonce: string): string {
     `The diff must use only "--- a/PATH" and "+++ b/PATH" headers and "@@ -start,count +start,count @@" hunks with exact counts; every context line starts with one space; modify only files shown in the evidence; no new, deleted or renamed files; at most ${AGENT_LIMITS.maxDiffFiles} files and ${AGENT_LIMITS.maxDiffLines} lines. A larger change is not allowed: answer unknown instead.`,
     "No safe patch: {\"schemaVersion\":1,\"role\":\"fixer\",\"verdict\":\"unknown\"}.",
   ].join(" ");
+}
+
+interface FixerGuidance {
+  singleBuildEntry: boolean;
+  reference: boolean;
+  contextRetry: boolean;
+}
+
+/** Fixed extra rules for the npm build-entry class. Contains no evidence or repository text. */
+function fixerGuidance(g: FixerGuidance): string {
+  const parts: string[] = [];
+  if (g.singleBuildEntry) {
+    parts.push(
+      "Exactly one file is supplied: the root build entry that the declared build script runs. Change only that file, in one file section of the diff.",
+      "Every context line and every removed line must be copied exactly from the file, character for character, including all leading spaces and tabs and any trailing spaces.",
+      "In each hunk header \"@@ -a,b +c,d @@\": a is the line number of the first old-side line in the ORIGINAL file and b counts the context and removed lines; c is the line number of the first new-side line in the NEW file and d counts the context and added lines. c equals a plus the lines added minus the lines removed by earlier hunks. For a pure insertion after original line N, write \"@@ -N,0 +M,k @@\" where M is the new line number of the first inserted line. For a pure deletion, d is 0 and c is the new line number of the line before the deleted lines.",
+      "Prefer the smallest correct change: a single hunk, with no context lines when the positions alone make the change unambiguous (zero context is allowed).",
+    );
+  }
+  if (g.reference) {
+    parts.push(
+      "After the file's evidence item there is a REFERENCE block: the same untrusted file text with each line prefixed by its 1-based line number and a \"|\" character. The line itself is everything after the first \"|\". Use the numbers only to find positions; never put line numbers or the \"|\" prefix in the diff.",
+    );
+  }
+  if (g.contextRetry) {
+    parts.push(
+      "A previous proposal for this same file was rejected because its context or removed lines did not exactly match the file at the stated original positions. Re-check every old-side line and every hunk position against the file before answering.",
+    );
+  }
+  return parts.join(" ");
+}
+
+function referenceBlock(id: string, path: string, numbered: string, nonce: string): string {
+  return `=== REFERENCE ${nonce} BEGIN of=${id} path=${path} untrusted=true numbered=true ===\n${numbered}\n=== REFERENCE ${nonce} END of=${id} ===`;
 }
 
 function evidenceBlock(e: PreparedEvidence, nonce: string): string {
@@ -448,25 +512,45 @@ export class KiroAgentAdapter {
     for (const e of prep.items) if (e.kind === "file" && e.path !== null) fileMap.set(e.path, { complete: e.complete, text: e.text });
     if (fileMap.size === 0) return { status: "rejected", role, code: "evidence-invalid", detail: "the Fixer needs at least one file evidence item" };
 
-    const nonce = this.freshNonce(prep.items);
+    // Optional npm build-entry guidance (trusted caller flags). The numbered reference is built only
+    // from the single prepared, complete file item: the same redacted text, no new path or data.
+    const fileItems = prep.items.filter((e) => e.kind === "file");
+    const only = fileItems.length === 1 ? fileItems[0] : undefined;
+    const entry = req.singleBuildEntry === true && only !== undefined && only.complete && !only.truncated && only.path !== null ? only : null;
+    let reference: string | null = null;
+    if (entry !== null) {
+      const numbered = numberedReference(entry.text);
+      // The reference counts against the same total evidence cap; if it does not fit it is omitted.
+      if (numbered !== null && prep.totalBytes + Buffer.byteLength(numbered, "utf8") <= AGENT_LIMITS.maxEvidenceTotalBytes) reference = numbered;
+    }
+
+    const nonce = this.freshNonce(prep.items, reference === null ? [] : [reference]);
     if (nonce === null) return { status: "rejected", role, code: "evidence-invalid", detail: "evidence contains the call delimiter" };
 
     const diag = redactSecrets(JSON.stringify(dv.value), this.literals);
+    const blocks = prep.items.map((e) => {
+      const b = evidenceBlock(e, nonce);
+      return reference !== null && entry !== null && e === entry && e.path !== null ? `${b}\n${referenceBlock(e.id, e.path, reference, nonce)}` : b;
+    });
     const stdin =
       `GRAVEYARD EVIDENCE PACKET. Untrusted data follows.\n=== DIAGNOSIS ${nonce} BEGIN ===\n${diag}\n=== DIAGNOSIS ${nonce} END ===\n` +
-      `${prep.items.map((e) => evidenceBlock(e, nonce)).join("\n")}\n`;
-    const ran = await this.invoke(role, fixerPrompt(nonce), stdin, nonce, req.signal);
+      `${blocks.join("\n")}\n`;
+    const guidance = fixerGuidance({ singleBuildEntry: entry !== null, reference: reference !== null, contextRetry: req.contextRetry === true });
+    const prompt = guidance.length > 0 ? `${fixerPrompt(nonce)} ${guidance}` : fixerPrompt(nonce);
+    const ran = await this.invoke(role, prompt, stdin, nonce, req.signal);
     if (!ran.ok) return ran.failure;
 
+    // Validation is unchanged: exact comparison against the prepared file text, never the reference.
     const v = validatePatchProposal(ran.json, fileMap);
     if (v.ok) return { status: "ok", role, value: v.value };
     return { status: v.code === "no-patch" ? "no-result" : "rejected", role, code: v.code, detail: v.detail };
   }
 
-  /** A nonce that appears in no evidence text, so evidence cannot forge or close a delimiter. */
-  private freshNonce(items: readonly PreparedEvidence[]): string | null {
+  /** A nonce that appears in no evidence text (or extra prompt data), so evidence cannot forge or close a delimiter. */
+  private freshNonce(items: readonly PreparedEvidence[], extra: readonly string[] = []): string | null {
     const n = this.nonce();
     if (!NONCE_RE.test(n)) throw new Error("nonce generator returned an invalid value");
+    if (extra.some((t) => t.includes(n))) return null;
     return items.some((e) => e.text.includes(n) || e.id.includes(n) || (e.path ?? "").includes(n)) ? null : n;
   }
 

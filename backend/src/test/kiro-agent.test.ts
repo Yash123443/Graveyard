@@ -13,8 +13,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   KiroAgentAdapter,
+  MAX_NUMBERED_REFERENCE_BYTES,
   buildAgentEnv,
   buildKiroArgs,
+  numberedReference,
   spawnAgentProcess,
   systemWorkDirs,
   type AgentProcessExecutor,
@@ -255,6 +257,120 @@ describe("Fixer", () => {
         assert.equal(dirs.removed.length, 1);
       });
     }
+  });
+});
+
+describe("Fixer npm build-entry guidance and numbered reference", () => {
+  const INSTR_END = "GRAVEYARD EVIDENCE PACKET.";
+  const instructionsOf = (stdin: string): string => stdin.slice(0, stdin.indexOf(INSTR_END));
+  const packetOf = (stdin: string): string => stdin.slice(stdin.indexOf(INSTR_END));
+  const REF = `=== REFERENCE ${NONCE} BEGIN of=f1 path=src/a.js untrusted=true numbered=true ===\n1|line1\n2|line2\n=== REFERENCE ${NONCE} END of=f1 ===`;
+
+  it("numbers lines exactly, pads the number, and refuses unterminated or oversize text", () => {
+    assert.equal(numberedReference("a\n  b\n\tc\n"), "1|a\n2|  b\n3|\tc");
+    const ten = Array.from({ length: 10 }, (_, i) => `l${String(i + 1)}`).join("\n") + "\n";
+    assert.equal(numberedReference(ten)?.split("\n")[0], " 1|l1");
+    assert.equal(numberedReference(ten)?.split("\n")[9], "10|l10");
+    assert.equal(numberedReference("no newline"), null);
+    assert.equal(numberedReference(""), null);
+    assert.equal(numberedReference("x".repeat(100) + "\n", 50), null);
+    assert.ok(MAX_NUMBERED_REFERENCE_BYTES > 0);
+  });
+
+  it("keeps the legacy request unchanged without the flag", async () => {
+    const ex = okExec(patchJson(GOOD_DIFF));
+    await adapter(ex.fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence: EVIDENCE });
+    const stdin = ex.calls[0]?.options.stdin ?? "";
+    assert.equal(stdin.includes("REFERENCE"), false);
+    assert.equal(stdin.includes("Exactly one file is supplied"), false);
+    assert.equal(stdin.includes("previous proposal"), false);
+  });
+
+  it("adds fixed guidance and a numbered reference of the same file, marked untrusted, after its evidence", async () => {
+    const ex = okExec(patchJson(GOOD_DIFF));
+    const out = await adapter(ex.fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence: EVIDENCE, singleBuildEntry: true });
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") assert.equal(out.value.contextVerified, true);
+    const stdin = ex.calls[0]?.options.stdin ?? "";
+    const instr = instructionsOf(stdin);
+    assert.match(instr, /Exactly one file is supplied/);
+    assert.match(instr, /including all leading spaces and tabs/);
+    assert.match(instr, /never put line numbers or the "\|" prefix in the diff/);
+    assert.match(instr, /zero context is allowed/);
+    assert.equal(instr.includes("line1") || instr.includes("line2"), false, "no repository text in instructions");
+    assert.equal(instr.includes("src/a.js"), false, "no repository path in instructions");
+    const packet = packetOf(stdin);
+    assert.ok(packet.includes(`=== EVIDENCE ${NONCE} END id=f1 ===\n${REF}`), "reference follows the file evidence");
+    assert.equal(packet.split("REFERENCE").length - 1, 2, "exactly one reference block");
+    assert.equal(stdin.includes("previous proposal"), false);
+    // Argv still carries no evidence and trusts no tools.
+    assert.deepEqual(ex.calls[0]?.args, buildKiroArgs({}));
+  });
+
+  it("still compares the diff exactly with the file: a numbered diff is a context mismatch", async () => {
+    const numberedDiff = "--- a/src/a.js\n+++ b/src/a.js\n@@ -1,2 +1,2 @@\n 1|line1\n-2|line2\n+line3\n";
+    const out = await adapter(okExec(patchJson(numberedDiff)).fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence: EVIDENCE, singleBuildEntry: true });
+    assert.equal(out.status, "rejected");
+    assert.equal(out.code, "context-mismatch");
+  });
+
+  it("accepts a legal zero-context hunk", async () => {
+    const zero = "--- a/src/a.js\n+++ b/src/a.js\n@@ -2,1 +2,1 @@\n-line2\n+line3\n";
+    const out = await adapter(okExec(patchJson(zero)).fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence: EVIDENCE, singleBuildEntry: true });
+    assert.equal(out.status, "ok");
+  });
+
+  it("adds only fixed retry feedback with the context-retry flag", async () => {
+    const ex = okExec(patchJson(GOOD_DIFF));
+    await adapter(ex.fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence: EVIDENCE, singleBuildEntry: true, contextRetry: true });
+    const instr = instructionsOf(ex.calls[0]?.options.stdin ?? "");
+    assert.match(instr, /previous proposal for this same file was rejected/);
+    assert.equal(instr.includes("line2"), false, "no repository text is fed back");
+  });
+
+  it("omits the reference and guidance when the file is not the single complete item", async () => {
+    const cases: Array<[string, EvidenceItem[], Diagnosis]> = [
+      ["incomplete file", [EVIDENCE[0] as EvidenceItem, { id: "f1", kind: "file", path: "src/a.js", text: FILE_TEXT }], DIAGNOSIS],
+      [
+        "redaction changed the file",
+        [EVIDENCE[0] as EvidenceItem, { id: "f1", kind: "file", path: "src/a.js", complete: true, text: "API_KEY=abcdefghijklmnop\nline2\n" }],
+        DIAGNOSIS,
+      ],
+      [
+        "two files",
+        [...EVIDENCE, { id: "f2", kind: "file", path: "src/b.js", complete: true, text: "b\n" }],
+        DIAGNOSIS,
+      ],
+    ];
+    for (const [label, evidence, diagnosis] of cases) {
+      const ex = okExec(JSON.stringify({ schemaVersion: 1, role: "fixer", verdict: "unknown" }));
+      await adapter(ex.fn, fakeDirs()).propose({ diagnosis, evidence, singleBuildEntry: true });
+      const stdin = ex.calls[0]?.options.stdin ?? "";
+      assert.equal(ex.calls.length, 1, label);
+      assert.equal(stdin.includes("REFERENCE"), false, label);
+      assert.equal(stdin.includes("Exactly one file is supplied"), false, label);
+    }
+  });
+
+  it("omits only the numbering when it would exceed the total evidence cap", async () => {
+    const fileText = "x\n".repeat(1000);
+    const logs: EvidenceItem[] = Array.from({ length: 7 }, (_, i) => ({ id: `log${String(i + 1)}`, kind: "log" as const, text: "y".repeat(4096) }));
+    const evidence: EvidenceItem[] = [...logs, { id: "f1", kind: "file", path: "src/a.js", complete: true, text: fileText }];
+    const ex = okExec(JSON.stringify({ schemaVersion: 1, role: "fixer", verdict: "unknown" }));
+    const out = await adapter(ex.fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence, singleBuildEntry: true });
+    assert.equal(out.status, "no-result");
+    const stdin = ex.calls[0]?.options.stdin ?? "";
+    assert.equal(stdin.includes("REFERENCE"), false);
+    assert.match(instructionsOf(stdin), /Exactly one file is supplied/);
+    assert.equal(instructionsOf(stdin).includes("REFERENCE block"), false);
+  });
+
+  it("still rejects file evidence that contains the call nonce before calling the executor", async () => {
+    const ex = okExec(patchJson(GOOD_DIFF));
+    const evidence: EvidenceItem[] = [EVIDENCE[0] as EvidenceItem, { id: "f1", kind: "file", path: "src/a.js", complete: true, text: `line1 ${NONCE}\nline2\n` }];
+    const out = await adapter(ex.fn, fakeDirs()).propose({ diagnosis: DIAGNOSIS, evidence, singleBuildEntry: true });
+    assert.equal(out.status, "rejected");
+    assert.equal(ex.calls.length, 0);
   });
 });
 
