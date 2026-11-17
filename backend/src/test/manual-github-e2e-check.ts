@@ -120,12 +120,36 @@
  * verification are printed (no token, no source, no diff, no model text).
  * Caveats: it shows nothing about other repositories, the original snapshot is checked only through the
  * stored record (its run directory is removed with the job), and Kiro's output is not deterministic.
+ *
+ * BROWSER DEMO MODE (added later by Kiro; written without being compiled or run, UNVERIFIED).
+ * Opt-in on top of the npm scripts repair mode: set GRAVEYARD_BROWSER_DEMO=1 together with everything the
+ * repair mode needs (NPM_REPAIR=1 and the supported URL and commit). Normally started by scripts/start-demo.ps1,
+ * which runs this compiled module directly with `node` (no test-runner child process). Any other non-empty
+ * value, or demo without the repair mode, fails closed before anything is created. Optional:
+ *   GRAVEYARD_DEMO_PORT   browser port, integer 1024-65535, default 3010 (strict: if taken, it fails).
+ * Same topology, API and worker as the repair mode (LIVE Kiro: the bounded, redacted build-entry source of the
+ * pinned public repository is sent to Kiro when a job runs). Differences:
+ *   - after the worker is up, the Vite dev server is started programmatically from the repository root with
+ *     the site's own vite.config.ts, overridden only for: host 127.0.0.1, the given port with strictPort, and
+ *     the /api proxy target (the API's ephemeral 127.0.0.1 port; /api/health still rewritten to /health);
+ *   - the workspace URL and the fixture link are printed immediately (no token is ever printed);
+ *   - NO job is submitted, nothing is polled and the test has no timeout. The stack stays up until
+ *     Ctrl+C (SIGINT; Vite registers its own SIGTERM exit, so SIGTERM is not supported), then Vite is closed first and the normal cleanup runs
+ *     (worker.stop with cleanup proof, API close, label-checked leftover query, proxies, networks, directories);
+ *   - the API itself has no repository allow-list option, and production code is not edited. Scoped to this
+ *     topology, a Vite middleware answers `POST /api/jobs` itself: the body must be JSON whose repoUrl is
+ *     the pinned URL (canonical form), else 400 with a message naming the printed fixture URL (the workspace
+ *     shows a 400 message as sent; a 403 would render as a bad saved credential). An accepted body is forwarded
+ *     unchanged to the API; each 202 job id is remembered in memory only (no token) so shutdown queries that
+ *     job's containers too. The worker's pin catalog also holds exactly that one URL. The browser holds the
+ *     job token (sessionStorage).
+ * A clean stop is the existing cleanup's report; this mode makes no claim that a browser-submitted repair works.
  */
 
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
-import { request } from "node:http";
+import { request, type IncomingMessage, type ServerResponse } from "node:http";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -176,6 +200,13 @@ const STATIC_COMMIT = "6d193fab40659cb5c568855f8294abf324adc4ea";
 const REPAIR_VAR = "GRAVEYARD_GITHUB_E2E_NPM_REPAIR";
 /** npm scripts repair mode: needs the supported URL/commit, excludes static. Any other non-empty value fails closed. */
 const REPAIR_REQUESTED = process.env[REPAIR_VAR] === "1";
+const DEMO_VAR = "GRAVEYARD_BROWSER_DEMO";
+const DEMO_PORT_VAR = "GRAVEYARD_DEMO_PORT";
+/** Browser demo mode: needs the npm repair mode. Any other non-empty value fails closed. */
+const DEMO = process.env[DEMO_VAR] === "1";
+const DEFAULT_DEMO_PORT = 3010;
+const DEMO_BODY_LIMIT = 8192;
+const VITE_CLOSE_MS = 15_000;
 const MAX_PRINTED_FINDINGS = 25;
 const MAX_PRINTED_DETAIL = 240;
 const SETUP_MS = SUPPORTED_REQUESTED ? 240_000 : 120_000;
@@ -185,6 +216,16 @@ const REGISTRY_HOST = "registry.npmjs.org";
 const GITHUB_HOST = "github.com";
 
 class FailClosed extends Error {}
+/** Thrown after a demo stop signal to leave the try block; never reported as a failure. */
+class DemoStop extends Error {}
+
+interface DemoVite {
+  createServer(config: object): Promise<{
+    listen(): Promise<unknown>;
+    close(): Promise<void>;
+    httpServer: { address(): unknown } | null;
+  }>;
+}
 
 interface Run { ok: boolean; code: number | null; stdout: string; stderr: string }
 
@@ -274,7 +315,7 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 test(
   "manual GitHub worker end-to-end harness (opt-in: GRAVEYARD_MANUAL_GITHUB_E2E=1; real Docker, real API, real worker, real github.com)",
-  { skip: OPT_IN ? false : "set GRAVEYARD_MANUAL_GITHUB_E2E=1 (use `pnpm run test:github-e2e`) to run against real Docker and github.com", timeout: SUPPORTED_REQUESTED ? 1_200_000 : 600_000 },
+  { skip: OPT_IN ? false : "set GRAVEYARD_MANUAL_GITHUB_E2E=1 (use `pnpm run test:github-e2e`) to run against real Docker and github.com", timeout: DEMO ? Infinity : SUPPORTED_REQUESTED ? 1_200_000 : 600_000 },
   async () => {
     const runId = randomBytes(6).toString("hex");
     const names = {
@@ -305,7 +346,22 @@ test(
     let jobId: string | undefined;
     let token: string | undefined;
     let failure: unknown;
-
+    let viteServer: Awaited<ReturnType<DemoVite["createServer"]>> | undefined;
+    let demoPort = DEFAULT_DEMO_PORT;
+    let demoStopRequested = false;
+    let demoWake: (() => void) | undefined;
+    /** Ids (never tokens) of jobs the API accepted with 202 through the demo middleware, for shutdown cleanup checks. */
+    const demoJobIds = new Set<string>();
+    if (DEMO) {
+      // Installed before anything is created, so a stop during setup still runs the full cleanup afterwards.
+      const onSignal = (sig: string): void => {
+        if (demoStopRequested) { console.log(`DEMO  ${sig} ignored: shutdown already in progress`); return; }
+        demoStopRequested = true;
+        console.log(`DEMO  ${sig} received, shutting down${demoWake === undefined ? " (setup is finishing first)" : ""}`);
+        demoWake?.();
+      };
+      process.on("SIGINT", () => onSignal("SIGINT"));
+    }
     const must = async (what: string, args: readonly string[], ms = 20_000): Promise<Run> => {
       const left = deadline - Date.now();
       if (left <= 0) throw new FailClosed("setup timeout reached");
@@ -451,6 +507,16 @@ test(
       if (repairVar !== undefined && repairVar !== "" && repairVar !== "1") throw new FailClosed(`${REPAIR_VAR} must be exactly 1 when set`);
       if (REPAIR_REQUESTED && STATIC_REQUESTED) throw new FailClosed(`${REPAIR_VAR}=1 cannot be combined with ${STATIC_VAR}=1`);
       if (REPAIR_REQUESTED && !SUPPORTED_REQUESTED) throw new FailClosed(`${REPAIR_VAR}=1 requires ${SUPPORTED_URL_VAR} and ${SUPPORTED_COMMIT_VAR}`);
+      const demoVar = process.env[DEMO_VAR];
+      if (demoVar !== undefined && demoVar !== "" && demoVar !== "1") throw new FailClosed(`${DEMO_VAR} must be exactly 1 when set`);
+      if (DEMO && !REPAIR_REQUESTED) throw new FailClosed(`${DEMO_VAR}=1 requires ${REPAIR_VAR}=1`);
+      if (DEMO) {
+        const dp = process.env[DEMO_PORT_VAR];
+        if (dp !== undefined && dp !== "") {
+          if (!/^[0-9]{4,5}$/.test(dp) || Number(dp) < 1024 || Number(dp) > 65535) throw new FailClosed(`${DEMO_PORT_VAR} must be an integer from 1024 to 65535`);
+          demoPort = Number(dp);
+        }
+      }
       if (STATIC_REQUESTED) {
         const sv = validateGithubUrl(STATIC_URL);
         if (!sv.ok || sv.url !== STATIC_URL) throw new FailClosed("the static site pin URL is not in canonical form");
@@ -623,6 +689,111 @@ test(
       if (pinKeys.length !== 1 || gh.pins[targetUrl] !== targetCommit) throw new FailClosed("the worker's pin catalog is not exactly the one expected pin");
       log.push(`worker started (real GithubJobRunner and OperatorEgressGuard, real Docker executor, agents ${REPAIR_REQUESTED ? "kiro-v2 (live Kiro), npm scripts on" : "off"}, ${supported ? "registry egress configured" : "no registry egress"})`);
 
+      // ---- Browser demo: serve the real UI against this stack and wait. No job is submitted. ----
+      if (DEMO) {
+        if (demoStopRequested) throw new DemoStop("demo stopped during setup");
+        const siteRoot = resolve(root, "..");
+        try {
+          if ((JSON.parse(readFileSync(join(siteRoot, "package.json"), "utf8")) as { name?: unknown }).name !== "graveyard" || !existsSync(join(siteRoot, "vite.config.ts"))) {
+            throw new Error("not the site");
+          }
+        } catch {
+          throw new FailClosed(`${siteRoot} is not the graveyard frontend root (package.json name graveyard and vite.config.ts expected)`);
+        }
+        const apiPort = port;
+        const sendJson = (res: ServerResponse, status: number, message: string): void => {
+          res.statusCode = status;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.setHeader("cache-control", "no-store");
+          res.end(JSON.stringify({ statusCode: status, error: status === 403 ? "Forbidden" : "Client Error", message }));
+        };
+        // Scoped to this demo only: job creation is answered here so only the pinned repository reaches the API.
+        const pinGuard = {
+          name: "graveyard-demo-pin-guard",
+          enforce: "pre" as const,
+          configureServer(server: { middlewares: { use(fn: (req: IncomingMessage, res: ServerResponse, next: () => void) => void): void } }): void {
+            server.middlewares.use((req, res, next) => {
+              const rawPath = (req.url ?? "").split("?")[0] ?? "";
+              if (req.method !== "POST" || !rawPath.toLowerCase().startsWith("/api")) { next(); return; }
+              let path: string;
+              try { path = decodeURIComponent(rawPath).toLowerCase().replace(/\/+$/, ""); } catch { sendJson(res, 400, "Invalid request"); return; }
+              if (path !== "/api/jobs") { next(); return; }
+              const chunks: Buffer[] = [];
+              let size = 0;
+              let over = false;
+              req.on("data", (c: Buffer) => {
+                size += c.length;
+                if (size > DEMO_BODY_LIMIT) over = true; else chunks.push(c);
+              });
+              req.on("error", () => { if (!res.writableEnded) sendJson(res, 400, "Invalid request"); });
+              req.on("end", () => {
+                if (over) { sendJson(res, 413, "Request body too large"); return; }
+                const body = Buffer.concat(chunks).toString("utf8");
+                let repoUrl: unknown;
+                try { repoUrl = (JSON.parse(body) as { repoUrl?: unknown } | null)?.repoUrl; } catch { repoUrl = undefined; }
+                const v = typeof repoUrl === "string" ? validateGithubUrl(repoUrl) : undefined;
+                if (v === undefined || !v.ok || v.url !== targetUrl) {
+                  sendJson(res, 400, "This demo accepts only the fixture URL printed by the launcher.");
+                  return;
+                }
+                httpCall(apiPort, "POST", "/api/jobs", {}, body).then(
+                  (r) => {
+                    if (r.status === 202) {
+                      try {
+                        const id = (JSON.parse(r.body) as { jobId?: unknown } | null)?.jobId;
+                        if (typeof id === "string") demoJobIds.add(id);
+                      } catch { /* unreadable body: nothing to remember */ }
+                    }
+                    res.statusCode = r.status;
+                    for (const h of ["content-type", "cache-control"]) {
+                      const val = r.headers[h];
+                      if (typeof val === "string") res.setHeader(h, val);
+                    }
+                    res.end(r.body);
+                  },
+                  () => sendJson(res, 502, "The demo API did not answer"),
+                );
+              });
+            });
+          },
+        };
+        const viteSpec = "vite";
+        const vite = (await import(viteSpec)) as DemoVite;
+        viteServer = await vite.createServer({
+          root: siteRoot,
+          configFile: join(siteRoot, "vite.config.ts"),
+          clearScreen: false,
+          plugins: [pinGuard],
+          server: {
+            host: "127.0.0.1",
+            port: demoPort,
+            strictPort: true,
+            open: false,
+            proxy: {
+              "/api": {
+                target: `http://127.0.0.1:${String(apiPort)}`,
+                changeOrigin: false,
+                rewrite: (p: string) => p.replace(/^\/api\/health(?=$|\?)/, "/health"),
+              },
+            },
+          },
+        });
+        await viteServer.listen();
+        const va = viteServer.httpServer?.address();
+        if (va === null || va === undefined || typeof va === "string" || (va as AddressInfo).address !== "127.0.0.1" || (va as AddressInfo).port !== demoPort) {
+          throw new FailClosed(`Vite did not bind 127.0.0.1:${String(demoPort)}`);
+        }
+        console.log(`DEMO  Workspace: http://127.0.0.1:${String(demoPort)}/#/workspace`);
+        console.log(`DEMO  Fixture:   ${targetUrl}`);
+        console.log(`DEMO  Pinned commit ${targetCommit}. Paste the fixture URL in the workspace and give consent; no job is submitted for you.`);
+        console.log("DEMO  Ctrl+C (SIGINT) stops everything: Vite first, then worker, API, Docker proxies, networks and temporary directories.");
+        await new Promise<void>((done) => {
+          demoWake = done;
+          if (demoStopRequested) done();
+        });
+        throw new DemoStop("demo stopped by signal");
+      }
+
       // ---- Authorized job creation. ----
       const created = await httpCall(port, "POST", "/api/jobs", {}, JSON.stringify({ repoUrl: targetUrl, consent: true }));
       if (created.status !== 202) throw new FailClosed(`job creation returned ${String(created.status)}`);
@@ -786,17 +957,29 @@ test(
     } catch (e) {
       failure = e;
     } finally {
-      // ---- Cleanup, in order: worker (needs cleanup proof), API, containers, network, directories. ----
+      // ---- Cleanup, in order: Vite (demo only), worker (needs cleanup proof), API, containers, network, directories. ----
+      if (viteServer !== undefined) {
+        try {
+          let timer: NodeJS.Timeout | undefined;
+          const timedOut = new Promise<"timeout">((r) => { timer = setTimeout(() => r("timeout"), VITE_CLOSE_MS); });
+          const outcome = await Promise.race([viteServer.close().then(() => "closed" as const), timedOut]);
+          if (timer !== undefined) clearTimeout(timer);
+          if (outcome === "timeout") problems.push(`Vite did not close within ${String(VITE_CLOSE_MS / 1000)} s`);
+          else log.push("Vite stopped");
+        } catch (e) { problems.push(`Vite close failed: ${e instanceof Error ? e.message : String(e)}`); }
+      }
       if (worker !== undefined) {
         try { await worker.stop(); log.push("worker stopped"); } catch (e) { problems.push(`worker stop failed: ${e instanceof Error ? e.message : String(e)}`); }
       }
       if (app !== undefined) {
         try { await app.close(); } catch (e) { problems.push(`API close failed: ${e instanceof Error ? e.message : String(e)}`); }
       }
-      if (jobId !== undefined) {
+      const jobIds = new Set<string>(demoJobIds);
+      if (jobId !== undefined) jobIds.add(jobId);
+      if (jobIds.size > 0) {
         // A job runs at most max_attempts (2) times; query both execution ids by label and by name.
-        for (const attempt of [1, 2]) {
-          const id = executionIdFor(jobId, attempt);
+        for (const jid of jobIds) for (const attempt of [1, 2]) {
+          const id = executionIdFor(jid, attempt);
           const queries: Array<[string, readonly string[]]> = [
             ["acquisition label", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${ACQ_LABEL_ID}=${id}`]],
             ["acquisition name", ["ps", "--all", "--quiet", "--no-trunc", "--filter", `name=${acquisitionContainerName(id)}`]],
@@ -839,7 +1022,7 @@ test(
             }
           }
         }
-        log.push(`independent docker ps: queried leftover acquisition${supported ? ", registry acquisition" : ""}${REPAIR_REQUESTED ? ", repair (derived fix id)" : ""} and sandbox containers for this job's execution ids`);
+        log.push(`independent docker ps: queried leftover acquisition${supported ? ", registry acquisition" : ""}${REPAIR_REQUESTED ? ", repair (derived fix id)" : ""} and sandbox containers for the execution ids of ${String(jobIds.size)} job(s)`);
       }
       if (token !== undefined && workerLog.some((l) => l.includes(token as string))) problems.push("the worker log contains the job token");
       try { problems.push(...(await removeOwned())); } catch (e) { problems.push(`cleanup threw: ${e instanceof Error ? e.message : String(e)}`); }
@@ -862,7 +1045,7 @@ test(
         console.log(`FAIL-CLOSED: ${failure.message}\nNo claim is made about the worker, the proxy, Docker or GitHub.`);
       }
     }
-    if (failure !== undefined) throw failure;
+    if (failure !== undefined && !(failure instanceof DemoStop)) throw failure;
     if (problems.length > 0) throw new Error(`GitHub e2e harness found ${String(problems.length)} problem(s)`);
   },
 );

@@ -367,3 +367,18 @@ Docs only; Kiro ran no commands and no git. Public fixture `https://github.com/Y
 - Codex's public rerun passed in 64 s: real GitHub and registry, live Kiro v2, offline Docker, one original test passed, `repair-verified`, exact diff checked, cleanup confirmed.
 
 Not claimed: only the focused tests exercised the retry; whether the live run used it was not measured. One fixture, one run; nothing is claimed for other repositories.
+
+### Browser demo launcher: measured results (2026-11-17)
+
+Docs only; Kiro ran no commands and no git. Kiro wrote the launcher, harness mode and workspace code. Codex tested and ran them. This supersedes any earlier in-progress status for the demo, which is left as history.
+
+Run from the repository root with `.\scripts\start-demo.ps1` (default port 3010; see `scripts/README.md`). Reported by Codex on 2026-11-17:
+
+- The one-command Windows launcher worked on the default port 3010 and on the override port 3011, once Docker was started.
+- The browser showed Backend online and the live event feed with job stages.
+- Live Kiro verified the public fixture repair, and the browser downloaded a `.diff` that changed only the inverted guard.
+- A wrong repository URL showed a clear error in the workspace, and no job was created.
+- Ctrl+C stopped the worker and Vite and removed the temporary run directories.
+- The workspace parser and result checks and the TypeScript compile passed.
+
+Scope: a local demo of one pinned fixture repository only. It is not a public deployment, and nothing is claimed for other repositories.
