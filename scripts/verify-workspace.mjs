@@ -137,6 +137,31 @@ try {
   assert.match(diffFileName('a/b\\..'), /^graveyard-ab-build\.mjs\.diff$/)
   assert.match(diffFileName('!!'), /^graveyard-job-build\.mjs\.diff$/)
 
+  // Unpinned source inspection: resolved commit and npm-scripts profile shown, never a repair or a diff.
+  const SHA = 'c'.repeat(40)
+  const inspected = (analysis, source = { repoUrl: 'https://github.com/x/y', commit: SHA, resolvedFrom: 'HEAD', pinned: false }) => view({
+    outcome: 'source-inspected',
+    repair: { verified: false, patchApplied: false, patchProposed: false, diagnosed: false },
+    verifiedDiff: null,
+    result: { verdict: 'source-inspected', sourceKind: 'github-unpinned-head', executed: false, source, analysis, notes: ['n1'] },
+  })
+  m = buildResultModel(inspected({ pinnedFlowCompatible: true, findings: [], profile: 'npm-scripts', rootChecks: { passed: true, preliminary: true } }))
+  assert.deepEqual(m.inspection, { commit: SHA, profile: 'npm-scripts', rootChecksPassed: true })
+  assert.equal(m.verified, false)
+  assert.equal(m.verifiedDiff, null)
+  m = buildResultModel(inspected({ pinnedFlowCompatible: false, findings: [{ code: 'lifecycle-hook-script', detail: 'scripts.prebuild exists.' }], profile: 'npm-scripts', rootChecks: { passed: false, preliminary: true } }))
+  assert.deepEqual(m.inspection, { commit: SHA, profile: 'npm-scripts', rootChecksPassed: false })
+  assert.deepEqual(m.findings, ['lifecycle-hook-script: scripts.prebuild exists.'])
+  // Default root build.mjs check: no profile, no root-check claim. A non-preliminary pass is ignored.
+  m = buildResultModel(inspected({ pinnedFlowCompatible: false, findings: [{ code: 'no-build-script', detail: 'd' }] }))
+  assert.deepEqual(m.inspection, { commit: SHA, profile: null, rootChecksPassed: null })
+  m = buildResultModel(inspected({ findings: [], profile: 'npm-scripts', rootChecks: { passed: true } }))
+  assert.equal(m.inspection.rootChecksPassed, null)
+  // Malformed commit is not shown; other outcomes carry no inspection.
+  m = buildResultModel(inspected({ findings: [] }, { commit: 'main' }))
+  assert.equal(m.inspection.commit, null)
+  assert.equal(buildResultModel(view()).inspection, null)
+
   console.log('Workspace SSE parser, error classification and result presentation checks passed.')
 } finally {
   await rm(temporary, { recursive: true, force: true })

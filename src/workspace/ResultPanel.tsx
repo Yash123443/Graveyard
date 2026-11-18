@@ -85,6 +85,21 @@ export default function ResultPanel({ model, jobId }: { model: ResultModel; jobI
           )}
         </div>
       )}
+      {model.inspection && (
+        <div className="ws-substage">
+          <h3>Source inspection <small>read-only, nothing run</small></h3>
+          <dl className="ws-facts">
+            <div><dt>Resolved commit</dt><dd>{model.inspection.commit ?? 'not recorded'}</dd></div>
+            <div><dt>Profile checked</dt><dd>{model.inspection.profile === 'npm-scripts' ? 'npm scripts (package.json scripts.build and scripts.test)' : 'root build.mjs'}</dd></div>
+            {model.inspection.rootChecksPassed !== null && (
+              <div>
+                <dt>Root file checks</dt>
+                <dd>{model.inspection.rootChecksPassed ? 'passed (preliminary, not a build or test result)' : 'did not pass (see findings)'}</dd>
+              </div>
+            )}
+          </dl>
+        </div>
+      )}
       {model.findings.length > 0 && (
         <ul className="ws-findings" aria-label="Findings">
           {model.findings.map((f) => <li key={f}>{f}</li>)}

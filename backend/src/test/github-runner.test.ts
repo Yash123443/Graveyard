@@ -31,12 +31,13 @@ import { OPERATOR_FIXTURE_ID, type RegistryAcquisitionRequest, type RegistryAcqu
 import { MAX_ROOT_FILE_BYTES, analyzeRootFiles, type RootFiles } from "../github-analysis.js";
 import { readRootFiles } from "../github-source.js";
 import { EGRESS_PROXY_LABEL, OperatorEgressGuard } from "../egress-guard.js";
-import { GithubJobRunner, deriveRegistryExecutionId, type GitLike, type RegistryLike } from "../github-runner.js";
+import { GithubJobRunner, deriveRegistryExecutionId, type GitLike, type NpmScriptsOptions, type RegistryLike } from "../github-runner.js";
 import { PipelineJobRunner, REPOSITORY_UNSUPPORTED_REASON, type AgentsLike, type PipelineLike, type SourceFile } from "../pipeline-runner.js";
 import { WorkerConfigError, loadWorkerConfig, parsePins } from "../worker-config.js";
 import { composeWorker } from "../worker-compose.js";
 import { operatorDoc, textsOf } from "./operator-fixture-helpers.js";
 import { auditStaticSite, parseSiteTree, type StaticSiteRead } from "../static-site-audit.js";
+import type { SnapshotOutcome } from "../npm-scripts-snapshot.js";
 
 const REPO = "https://github.com/o/r";
 const FIXTURE_REPO = "https://github.com/f/fixture";
@@ -205,6 +206,8 @@ function makeRig(opts: {
   readStaticSite?: (info: HandoffInfo) => Promise<StaticSiteRead>;
   /** Replaces the execution-id cleanup check used by the runner (and its fixture fallback). */
   cleanupExecution?: (id: string) => Promise<CleanupProof>;
+  /** Enables npm-scripts mode on the runner. */
+  npmScripts?: NpmScriptsOptions;
 } = {}): Rig {
   const runsRoot = join(tmp, "runs");
   mkdirSync(runsRoot, { recursive: true });
@@ -256,6 +259,7 @@ function makeRig(opts: {
     fixtureUrls: new Set([FIXTURE_REPO]),
     pins: opts.pins ?? new Map([[REPO, COMMIT], [FIXTURE_REPO, COMMIT]]),
     ...(opts.allowUnpinned === undefined ? {} : { allowUnpinned: opts.allowUnpinned }),
+    ...(opts.npmScripts === undefined ? {} : { npmScripts: opts.npmScripts }),
     runsRoot,
     gitImage: "alpine/git:2.47.2",
     makeGit: gitLike,
@@ -1348,5 +1352,153 @@ describe("GithubJobRunner: unpinned intake", () => {
     assert.equal(view({ ...base, source: { ...base.source, pinned: true } }), "completed-without-result");
     assert.equal(view({ ...base, source: { ...base.source, commit: "main" } }), "completed-without-result");
     assert.equal(view({ ...base, source: { ...base.source, commit: COMMIT.toUpperCase() } }), "completed-without-result");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unpinned intake with npm-scripts mode configured (preliminary profile check only)
+// ---------------------------------------------------------------------------
+
+describe("GithubJobRunner: unpinned intake of npm-scripts manifests", () => {
+  const OTHER = "https://github.com/x/y";
+  const unpinnedAcquired = (): AcquisitionResult => ({ ...acquired(), resolvedFromHead: true });
+
+  function scriptsFiles(scripts: Record<string, unknown> = {}): RootFiles {
+    const d = operatorDoc();
+    d.pkg["scripts"] = { build: "node build.mjs", test: "node --test", ...scripts };
+    const t = textsOf(d);
+    return { packageJson: t.packageJson, packageLock: t.packageLock, buildMjs: BUILD_MJS, testMjs: null, unusable: [] };
+  }
+
+  /** npm-scripts options that record every use; unpinned intake must never call them. */
+  function scriptsSeam(snapshot: SnapshotOutcome = { kind: "refused", reason: "the tree has more than 100 files" }): {
+    opts: NpmScriptsOptions;
+    exports: number;
+    pipelines: number;
+  } {
+    const s = { exports: 0, pipelines: 0 } as { opts: NpmScriptsOptions; exports: number; pipelines: number };
+    s.opts = {
+      exportSnapshot: () => {
+        s.exports += 1;
+        return Promise.resolve(snapshot);
+      },
+      makePipeline: () => {
+        s.pipelines += 1;
+        return new FakePipeline(successResult);
+      },
+    };
+    return s;
+  }
+
+  const analysisOf = (r: Record<string, unknown>): Record<string, unknown> => r["analysis"] as Record<string, unknown>;
+
+  it("reports a manifest that fits the profile as a preliminary root check with the resolved SHA, and runs or sends nothing", async () => {
+    const agents = new FakeAgents();
+    const seam = scriptsSeam();
+    const rig = makeRig({ allowUnpinned: true, agents, files: scriptsFiles(), npmScripts: seam.opts });
+    rig.git.script = unpinnedAcquired;
+    const id = newJob(OTHER);
+    assert.deepEqual(await rig.worker.runOnce(), { kind: "finished", jobId: id, outcome: "completed" });
+
+    assert.equal((rig.git.requests[0] as AcquisitionRequest).resolveHead, true);
+    assert.equal(seam.exports, 0, "no snapshot is exported for unpinned intake");
+    assert.equal(seam.pipelines, 0);
+    assert.equal(rig.registry?.requests.length, 0, "no dependency fetch");
+    assert.equal(rig.pipeline.requests.length, 0, "no sandbox run");
+    assert.equal(agents.analyses.length, 0, "no model call");
+    assert.deepEqual(stageNames(id), ["cloning", "analyzing"]);
+    assert.deepEqual(readdirSync(rig.runsRoot), []);
+
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "source-inspected");
+    assert.equal(result["executed"], false);
+    assert.deepEqual(result["source"], { repoUrl: OTHER, commit: COMMIT, resolvedFrom: "HEAD", pinned: false });
+    assert.deepEqual(result["operatorPin"], { repoUrl: OTHER, commit: COMMIT });
+    const a = analysisOf(result);
+    assert.equal(a["profile"], "npm-scripts");
+    assert.equal(a["pinnedFlowCompatible"], true);
+    assert.deepEqual(a["findings"], []);
+    assert.deepEqual(a["rootChecks"], {
+      passed: true,
+      preliminary: true,
+      buildScript: "node build.mjs",
+      testScript: "node --test",
+      expectedPackages: 3,
+      repairBuildEntry: "build.mjs",
+      repairTestScript: true,
+    });
+    const notes = result["notes"] as string[];
+    assert.ok(notes.some((n) => /preliminary/.test(n) && /not a build or test result/.test(n)));
+
+    const view = presentResult({ jobId: id, stage: "done", status: "completed", attemptCount: 1, maxAttempts: 2, infraError: null, result });
+    assert.equal(view.outcome, "source-inspected");
+    assert.equal(view.repair.verified, false);
+    assert.equal(view.repair.patchProposed, false);
+    assert.equal(view.verifiedDiff, null);
+  });
+
+  it("reports the exact profile findings for a manifest outside the profile", async () => {
+    const rig = makeRig({ allowUnpinned: true, files: scriptsFiles({ prebuild: "node gen.mjs" }), npmScripts: scriptsSeam().opts });
+    rig.git.script = unpinnedAcquired;
+    const id = newJob(OTHER);
+    await rig.worker.runOnce();
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["verdict"], "source-inspected");
+    assert.deepEqual(findingCodes(result), ["lifecycle-hook-script"]);
+    const a = analysisOf(result);
+    assert.equal(a["pinnedFlowCompatible"], false);
+    assert.deepEqual(a["rootChecks"], { passed: false, preliminary: true });
+    assert.equal((result["source"] as Record<string, unknown>)["commit"], COMMIT);
+
+    const rig2 = makeRig({ allowUnpinned: true, files: scriptsFiles({ test: 'echo "Error: no test specified" && exit 1' }), npmScripts: scriptsSeam().opts });
+    rig2.git.script = unpinnedAcquired;
+    const id2 = newJob(OTHER);
+    await rig2.worker.runOnce();
+    assert.deepEqual(findingCodes(resultOf(id2) as Record<string, unknown>), ["placeholder-test-script"]);
+  });
+
+  it("says dependency acquisition is not configured when there is no registry egress", async () => {
+    const rig = makeRig({ allowUnpinned: true, registry: false, files: scriptsFiles(), npmScripts: scriptsSeam().opts });
+    rig.git.script = unpinnedAcquired;
+    const id = newJob(OTHER);
+    await rig.worker.runOnce();
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.deepEqual(findingCodes(result), ["dependency-acquisition-not-configured"]);
+    assert.equal(analysisOf(result)["pinnedFlowCompatible"], false);
+  });
+
+  it("keeps the root build.mjs analysis when npm-scripts mode is off or the manifest has no scripts", async () => {
+    const off = makeRig({ allowUnpinned: true, files: scriptsFiles() });
+    off.git.script = unpinnedAcquired;
+    const id = newJob(OTHER);
+    await off.worker.runOnce();
+    const r = resultOf(id) as Record<string, unknown>;
+    assert.ok(findingCodes(r).length > 0 && findingCodes(r).every((c) => c === "dependency-policy-rejected"));
+    assert.equal(analysisOf(r)["profile"], undefined);
+    assert.equal(analysisOf(r)["rootChecks"], undefined);
+    assert.equal((r["notes"] as string[]).length, 3);
+
+    const noScripts = makeRig({ allowUnpinned: true, npmScripts: scriptsSeam().opts });
+    noScripts.git.script = unpinnedAcquired;
+    const id2 = newJob(OTHER);
+    await noScripts.worker.runOnce();
+    const r2 = resultOf(id2) as Record<string, unknown>;
+    assert.equal(analysisOf(r2)["pinnedFlowCompatible"], true);
+    assert.equal(analysisOf(r2)["profile"], undefined);
+  });
+
+  it("an exact pin still takes the npm-scripts run path (snapshot export) while unpinned intake is on", async () => {
+    const seam = scriptsSeam();
+    const rig = makeRig({ allowUnpinned: true, files: scriptsFiles(), npmScripts: seam.opts });
+    const id = newJob(REPO);
+    await rig.worker.runOnce();
+    const q = rig.git.requests[0] as AcquisitionRequest;
+    assert.equal(q.commit, COMMIT);
+    assert.equal(q.resolveHead, undefined);
+    assert.equal(seam.exports, 1, "the pinned path exports the snapshot it would run");
+    const result = resultOf(id) as Record<string, unknown>;
+    assert.equal(result["sourceKind"], "github-pinned");
+    assert.equal(result["verdict"], "unsupported-repository");
+    assert.deepEqual(findingCodes(result), ["source-snapshot-refused"]);
   });
 });

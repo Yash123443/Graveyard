@@ -58,6 +58,20 @@ export type PolicyResult =
   | { ok: true; packageCount: number; rootDependencyCount: number }
   | { ok: false; violations: string[] };
 
+/**
+ * The ONE shared dev-dependency policy option. It is read by this module, by checkOperatorFixture, by
+ * planNpmScripts, by the registry acquisition request and by the npm-scripts pipeline. Absent or false
+ * (the default everywhere) keeps the legacy production-only behaviour byte for byte.
+ */
+export interface NpmDependencyPolicy {
+  /**
+   * Accept flat, unscoped `devDependencies` (see npm-operator-fixture.ts). Here it additionally rejects
+   * `optionalDependencies`, `peerDependencies` and the lock flags optional, peer and devOptional, which
+   * would make the installed package set unknowable.
+   */
+  allowDevDependencies?: boolean;
+}
+
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const has = (o: Record<string, unknown>, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
 const clip = (s: string, n = 120): string => (s.length > n ? `${s.slice(0, n)}…` : s);
@@ -111,9 +125,14 @@ function checkDepMap(map: unknown, where: string, c: Collector): number {
   return names.length;
 }
 
-function checkPackageJson(pkg: Record<string, unknown>, c: Collector): number {
+function checkPackageJson(pkg: Record<string, unknown>, c: Collector, dev: boolean): number {
   for (const f of FORBIDDEN_ROOT_FIELDS) {
     if (has(pkg, f)) c.add(`package.json: field ${f} is not allowed`);
+  }
+  if (dev) {
+    for (const f of ["optionalDependencies", "peerDependencies"]) {
+      if (has(pkg, f)) c.add(`package.json: ${f} is not allowed when dev dependencies are enabled`);
+    }
   }
   const scripts = pkg["scripts"];
   if (scripts !== undefined) {
@@ -136,7 +155,7 @@ function checkIntegrity(integrity: unknown): boolean {
   return typeof integrity === "string" && INTEGRITY_RE.test(integrity);
 }
 
-function checkEntry(key: string, e: unknown, c: Collector): void {
+function checkEntry(key: string, e: unknown, c: Collector, dev: boolean): void {
   const k = safe(key);
   if (!isObj(e)) {
     c.add(`lock ${k}: entry is not an object`);
@@ -144,6 +163,11 @@ function checkEntry(key: string, e: unknown, c: Collector): void {
   }
   for (const f of FORBIDDEN_ENTRY_FIELDS) {
     if (has(e, f)) c.add(`lock ${k}: field ${f} is not allowed`);
+  }
+  if (dev) {
+    for (const f of ["optional", "peer", "devOptional"]) {
+      if (has(e, f)) c.add(`lock ${k}: ${f} is not allowed when dev dependencies are enabled`);
+    }
   }
   const version = e["version"];
   if (typeof version !== "string" || !VERSION_RE.test(version)) {
@@ -206,12 +230,13 @@ function checkLegacyTree(tree: unknown, c: Collector): void {
  * Validates the exact text of both files. `packageCount` is the number of non-root lock entries,
  * which is what `npm ci` is expected to report as added when the policy holds.
  */
-export function checkNpmFixture(packageJsonText: unknown, lockText: unknown): PolicyResult {
+export function checkNpmFixture(packageJsonText: unknown, lockText: unknown, options: NpmDependencyPolicy = {}): PolicyResult {
+  const dev = options.allowDevDependencies === true;
   const c = new Collector();
   const pkg = parseJson(packageJsonText, MAX_PACKAGE_JSON_BYTES, "package.json", c);
   const lock = parseJson(lockText, MAX_LOCKFILE_BYTES, "package-lock.json", c);
   let rootDeps = 0;
-  if (pkg !== null) rootDeps = checkPackageJson(pkg, c);
+  if (pkg !== null) rootDeps = checkPackageJson(pkg, c, dev);
 
   let packageCount = 0;
   if (lock !== null) {
@@ -238,7 +263,7 @@ export function checkNpmFixture(packageJsonText: unknown, lockText: unknown): Po
           c.add(`lock: key ${safe(key)} is not a plain node_modules path (workspace, link and traversal paths are rejected)`);
           continue;
         }
-        checkEntry(key, packages[key], c);
+        checkEntry(key, packages[key], c, dev);
       }
     }
     if (has(lock, "dependencies")) {

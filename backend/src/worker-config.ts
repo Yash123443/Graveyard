@@ -51,6 +51,11 @@
  *                                declares scripts and fits the npm-scripts profile (npm-scripts-policy.ts) has a bounded source
  *                                snapshot run offline with `npm run build` and `npm run test` in the sandbox. Requires
  *                                GRAVEYARD_GITHUB_CATALOG and the GRAVEYARD_REGISTRY_EGRESS_* variables. No agent, no patch.
+ *   GRAVEYARD_GITHUB_NPM_DEV_DEPENDENCIES
+ *                                optional, exactly "1" (on) or "0" (off, default); "1" requires GRAVEYARD_GITHUB_NPM_SCRIPTS=1.
+ *                                On: the npm-scripts profile also accepts flat, unscoped devDependencies (the whole lock stays
+ *                                within the existing 8-package, 64 KiB bounds), acquired and installed with
+ *                                `--include=dev --ignore-scripts`. Off: any devDependencies make the project unsupported.
  *   The proxy URLs must be http://<private IPv4>:<port>. Nothing here changes the default: without these
  *   variables the worker runs only operator fixtures and no network guard ever attests.
  *
@@ -82,9 +87,11 @@ export const GITHUB_ENV_VARS: readonly string[] = Object.freeze([
   "GRAVEYARD_REGISTRY_EGRESS_PROXY_URL",
   "GRAVEYARD_GITHUB_ALLOW_UNPINNED",
   "GRAVEYARD_GITHUB_NPM_SCRIPTS",
+  "GRAVEYARD_GITHUB_NPM_DEV_DEPENDENCIES",
 ]);
 export const ALLOW_UNPINNED_VAR = "GRAVEYARD_GITHUB_ALLOW_UNPINNED";
 export const NPM_SCRIPTS_VAR = "GRAVEYARD_GITHUB_NPM_SCRIPTS";
+export const NPM_DEV_DEPENDENCIES_VAR = "GRAVEYARD_GITHUB_NPM_DEV_DEPENDENCIES";
 export const DEFAULT_GIT_IMAGE = "alpine/git:2.47.2";
 const IMAGE_RE =
   /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$/;
@@ -122,6 +129,13 @@ export interface GithubConfig {
    * in the sandbox. Requires the registry egress variables. Present only when true; absent: off.
    */
   npmScripts?: boolean;
+  /**
+   * Opt-in (GRAVEYARD_GITHUB_NPM_DEV_DEPENDENCIES=1, requires npmScripts): the shared dev-dependency
+   * policy option. Flat unscoped `devDependencies` (for example `typescript`) are then accepted by the
+   * npm-scripts profile, acquired with `--include=dev` and installed the same way offline. Present only
+   * when true; absent: the production-only profile.
+   */
+  npmDevDependencies?: boolean;
   /** Existing worker-owned directory; one run directory per job is created inside it. */
   runsRoot: string;
   gitImage: string;
@@ -338,6 +352,13 @@ function loadGithubConfig(
   if (scriptsRaw === "1") npmScripts = true;
   else if (scriptsRaw !== undefined && scriptsRaw !== "0") problems.push(`${NPM_SCRIPTS_VAR} must be exactly 1 or 0`);
 
+  // The dev-dependency option is opt-in, exactly "1", and only meaningful with npm-scripts mode.
+  const devRaw = env[NPM_DEV_DEPENDENCIES_VAR];
+  let npmDevDependencies = false;
+  if (devRaw === "1") npmDevDependencies = true;
+  else if (devRaw !== undefined && devRaw !== "0") problems.push(`${NPM_DEV_DEPENDENCIES_VAR} must be exactly 1 or 0`);
+  if (npmDevDependencies && !npmScripts) problems.push(`${NPM_DEV_DEPENDENCIES_VAR}=1 requires ${NPM_SCRIPTS_VAR}=1`);
+
   // The pin catalog is optional ONLY when unpinned intake is enabled. All other settings stay required.
   const catalogGiven = env["GRAVEYARD_GITHUB_CATALOG"] !== undefined;
   if (!catalogGiven && !allowUnpinned) {
@@ -398,7 +419,7 @@ function loadGithubConfig(
   }
 
   if (problems.length > before || gitEgress === null) return null;
-  return { catalogPath, pins: Object.freeze(pins), runsRoot, gitImage, gitEgress, registryEgress, allowUnpinned, ...(npmScripts ? { npmScripts: true } : {}) };
+  return { catalogPath, pins: Object.freeze(pins), runsRoot, gitImage, gitEgress, registryEgress, allowUnpinned, ...(npmScripts ? { npmScripts: true } : {}), ...(npmScripts && npmDevDependencies ? { npmDevDependencies: true } : {}) };
 }
 
 /**

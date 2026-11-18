@@ -2,6 +2,14 @@
 
 Project owner: Yash. Branch: backend.
 
+## 2026-11-19: opt-in TypeScript build and test
+
+Kiro CLI implemented the shared opt-in dependency policy, worker wiring, and regression tests. Codex added a bounded 8 MiB cache handoff for lockfiles with dev-only packages, direct Node invocation for simple `tsc` scripts on the existing `noexec` work volume, and the browser demo harness wiring. See the README for the enabled profile and its limits.
+
+- Both TypeScript builds and 354 focused tests passed.
+- The live registry harness fetched and integrity-checked `typescript@5.9.3` from npm. The handoff contained 4,378,149 bytes and the local sample passed network-disabled install, `tsc -p tsconfig.json`, and `node --test test.mjs`.
+- The existing pinned public repair fixture returned `repair-verified` with live Kiro through the local Workspace API while the dev-dependency option was enabled. The TypeScript sample was local, so this run does not demonstrate public TypeScript repair.
+
 ## 2026-11-16: opt-in verified Kiro repair for the pinned npm-scripts profile (written, NOT compiled or run)
 
 Written without a shell, git or any command; nothing here has been compiled or tested, so every statement below describes intended behaviour only. Record external results here once an operator has run `tsc -p tsconfig.json`, `tsc -p tsconfig.test.json` and the suite.

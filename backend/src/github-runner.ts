@@ -49,7 +49,11 @@
  * "github-unpinned-head"), the resolved SHA and the manifest findings. No run directory, no
  * dependency acquisition, no sandbox, no repository script and no agent is used, so no source goes
  * to Kiro. The operator must pin the reported SHA before anything executes. Precedence is fixture,
- * then pin, then unpinned; pinned behaviour is unchanged.
+ * then pin, then unpinned; pinned behaviour is unchanged. When npm-scripts mode is also configured
+ * and the root package.json declares `scripts`, the same pure planNpmScripts policy a pinned run uses
+ * decides the findings (result `analysis.profile: "npm-scripts"` and `analysis.rootChecks`). A pass is
+ * preliminary (two root files only; snapshot limits, install, build and tests unchecked), never a
+ * build result. Still no snapshot, registry, sandbox or agent.
  *
  * npm-scripts mode (opt-in, `npmScripts`; written without a shell, NOT compiled or run). Only for a
  * PINNED repository whose package.json declares `scripts`, and only when configured. If it fits the
@@ -89,7 +93,8 @@ import {
 import { runRegistryThenOffline } from "./registry-pipeline.js";
 import type { CleanupProof, CleanupRequest, JobProgress, JobRunner, RunContext, RunOutcome } from "./runner.js";
 import { judgeScriptsRun, scriptsUnsupportedPayload } from "./npm-scripts-flow.js";
-import { declaresScripts, planNpmScripts, type ScriptsFinding } from "./npm-scripts-policy.js";
+import { declaresScripts, planNpmScripts, NPM_SCRIPTS_RUN_MODE, type ScriptsFinding, type ScriptsPlan } from "./npm-scripts-policy.js";
+import { parseBuildEntryScript, parseRepairTestScript } from "./build-entry.js";
 import { applyRepairStep, deriveRepairExecutionId, runNpmScriptsRepairStep } from "./npm-scripts-repair.js";
 import type { SnapshotOutcome } from "./npm-scripts-snapshot.js";
 import { staticSiteResultPayload, type StaticSiteAudit, type StaticSiteRead } from "./static-site-audit.js";
@@ -117,7 +122,17 @@ export interface NpmScriptsOptions {
     cacheDir: string;
     installManifest: string;
     expectedPackages: number;
+    /** Present (true) only for a plan made with the shared dev-dependency option; absent: legacy. */
+    allowDevDependencies?: true;
   }) => PipelineLike;
+  /**
+   * The ONE shared dev-dependency policy option for this mode (npm-lock-policy.ts NpmDependencyPolicy).
+   * Absent or false (the default): production-only profile, unchanged. True: ordinary single-package
+   * projects with flat unscoped devDependencies (for example `typescript`) are planned, acquired with
+   * `npm ci --include=dev --ignore-scripts`, and installed offline the same way. The runner passes it
+   * to planNpmScripts, then the plan's value to the acquisition request and to makePipeline.
+   */
+  allowDevDependencies?: boolean;
 }
 
 /** GitAcquisition satisfies this. */
@@ -219,6 +234,44 @@ function describeAcquisition(a: AcquisitionResult): string {
   }
 }
 
+/** The analysis shape an unpinned inspection stores (root build.mjs class or npm-scripts profile findings). */
+interface InspectedAnalysis {
+  supported: boolean;
+  findings: ReadonlyArray<{ code: string; detail: string }>;
+  facts: Analysis["facts"];
+}
+
+/**
+ * Preliminary npm-scripts profile result of an unpinned inspection, from the two root files only.
+ * `passed` never means the repository builds or passes its tests: nothing was installed or run, and
+ * the snapshot limits (file count and size) are checked only when a pinned run exports the tree.
+ */
+export interface NpmScriptsRootChecks {
+  passed: boolean;
+  preliminary: true;
+  /** Present when passed: the validated printable one-line scripts and the locked package count. */
+  buildScript?: string;
+  testScript?: string;
+  expectedPackages?: number;
+  /** Root build entry named by a `node FILE` build script, or null (the verified repair needs one). */
+  repairBuildEntry?: string | null;
+  /** True when scripts.test is exactly `node --test` or `node --test FILE` (the verified repair needs it). */
+  repairTestScript?: boolean;
+}
+
+export function npmScriptsRootChecks(plan: ScriptsPlan): NpmScriptsRootChecks {
+  if (!plan.ok) return { passed: false, preliminary: true };
+  return {
+    passed: true,
+    preliminary: true,
+    buildScript: plan.buildScript,
+    testScript: plan.testScript,
+    expectedPackages: plan.expectedPackages,
+    repairBuildEntry: parseBuildEntryScript(plan.buildScript),
+    repairTestScript: parseRepairTestScript(plan.testScript) !== null,
+  };
+}
+
 export class GithubJobRunner implements JobRunner {
   private readonly o: GithubRunnerOptions;
 
@@ -306,7 +359,7 @@ export class GithubJobRunner implements JobRunner {
       // Opt-in npm-scripts mode: export the bounded snapshot only when the two root files already
       // pass the profile policy, so an unsupported repository never has any tree copied to the host.
       if (scripts !== undefined && this.o.registry !== null && declaresScripts(read.packageJson)) {
-        const plan = planNpmScripts(read, { dependencyAcquisition: true });
+        const plan = planNpmScripts(read, { dependencyAcquisition: true, allowDevDependencies: scripts.allowDevDependencies === true });
         if (plan.ok && read.packageJson !== null && read.packageLock !== null) {
           box.snapshot = await scripts.exportSnapshot(info, runDir, { packageJson: read.packageJson, packageLock: read.packageLock });
         }
@@ -453,7 +506,10 @@ export class GithubJobRunner implements JobRunner {
     snapshot: SnapshotOutcome | null,
     scripts: NpmScriptsOptions,
   ): Promise<RunOutcome> {
-    const plan = planNpmScripts(files, { dependencyAcquisition: this.o.registry !== null });
+    const plan = planNpmScripts(files, {
+      dependencyAcquisition: this.o.registry !== null,
+      allowDevDependencies: scripts.allowDevDependencies === true,
+    });
     if (!plan.ok) return this.finishScriptsUnsupported(report, ctx.repoUrl, commit, plan.findings);
     const registry = this.o.registry;
     const packageLock = files.packageLock;
@@ -482,6 +538,7 @@ export class GithubJobRunner implements JobRunner {
             cacheDir,
             installManifest: plan.sanitizedPackageJson,
             expectedPackages: plan.expectedPackages,
+            ...(plan.allowDevDependencies === true ? { allowDevDependencies: true as const } : {}),
           });
         },
       },
@@ -491,6 +548,8 @@ export class GithubJobRunner implements JobRunner {
           fixture: OPERATOR_FIXTURE_ID,
           // The sanitized manifest only: the original scripts never reach dependency acquisition.
           operatorFixture: { packageJson: plan.sanitizedPackageJson, packageLock },
+          ...(plan.lockRootEngines === true ? { allowLockRootEngines: true } : {}),
+          ...(plan.allowDevDependencies === true ? { allowDevDependencies: true } : {}),
           image: NODE_FIXTURE_IMAGE,
           runDir,
           signal: ctx.signal,
@@ -543,6 +602,7 @@ export class GithubJobRunner implements JobRunner {
                 cacheDir: a.cacheDir,
                 installManifest: plan.sanitizedPackageJson,
                 expectedPackages: plan.expectedPackages,
+                ...(plan.allowDevDependencies === true ? { allowDevDependencies: true as const } : {}),
               }),
       });
       if (step.kind === "aborted" || ctx.signal.aborted) return ABORTED;
@@ -628,7 +688,24 @@ export class GithubJobRunner implements JobRunner {
     if (files === null) return infra("The root files were not read from the acquired commit.");
 
     if (!report.stage("analyzing", "reading the repository root files as data; nothing is built or run")) return ABORTED;
-    const analysis = analyzeRootFiles(files, { dependencyAcquisition: this.o.registry !== null });
+    const dependencyAcquisition = this.o.registry !== null;
+    const analysis = analyzeRootFiles(files, { dependencyAcquisition });
+    // With npm-scripts mode configured, a manifest that declares `scripts` is judged by the same
+    // pure profile policy a pinned run would use. Still data only: no snapshot, install or run.
+    if (this.o.npmScripts !== undefined && declaresScripts(files.packageJson)) {
+      const plan = planNpmScripts(files, {
+        dependencyAcquisition,
+        allowDevDependencies: this.o.npmScripts.allowDevDependencies === true,
+      });
+      return this.finishInspected(
+        report,
+        ctx.repoUrl,
+        acq.commit,
+        acq.manifest,
+        { supported: plan.ok, findings: plan.ok ? [] : plan.findings, facts: analysis.facts },
+        npmScriptsRootChecks(plan),
+      );
+    }
     return this.finishInspected(report, ctx.repoUrl, acq.commit, acq.manifest, analysis);
   }
 
@@ -637,7 +714,8 @@ export class GithubJobRunner implements JobRunner {
     repoUrl: string,
     commit: string | null,
     manifest: TreeManifest | null,
-    analysis: Analysis,
+    analysis: InspectedAnalysis,
+    scriptsProfile?: NpmScriptsRootChecks,
   ): RunOutcome {
     const payload: Record<string, unknown> = {
       verdict: "source-inspected",
@@ -651,6 +729,7 @@ export class GithubJobRunner implements JobRunner {
         pinnedFlowCompatible: analysis.supported,
         findings: analysis.findings.map((f) => ({ code: f.code, detail: f.detail })),
         facts: analysis.facts,
+        ...(scriptsProfile === undefined ? {} : { profile: NPM_SCRIPTS_RUN_MODE, rootChecks: scriptsProfile }),
       },
       executed: false,
       requiresOperatorPin: manifest !== null,
@@ -666,6 +745,13 @@ export class GithubJobRunner implements JobRunner {
         manifest === null
           ? "This repository HEAD cannot be built, tested or repaired by this worker while source policy rejects it, and pinning it would not change that."
           : "To build, test or repair this repository, the operator must pin this exact commit in the GitHub catalog. HEAD may move, so the commit above is the only revision that was inspected.",
+        ...(scriptsProfile === undefined
+          ? []
+          : [
+              scriptsProfile.passed
+                ? "package.json declares npm scripts, and the root package.json and package-lock.json passed the npm-scripts profile checks. This is a preliminary check of two root files only: the snapshot size limits, dependency download, install, build and tests were not checked, so it is not a build or test result."
+                : "package.json declares npm scripts, so the root files were checked against the npm-scripts profile. The findings above say why this commit does not fit it. Nothing was built, installed or run.",
+            ]),
       ],
     };
     return report.result(payload) ? { kind: "completed" } : ABORTED;

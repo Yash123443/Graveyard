@@ -367,7 +367,8 @@ URL that is in **neither** the fixture catalog nor the pin catalog is no longer 
 
 ### npm scripts mode (opt-in, pinned repositories only)
 
-The backend and test sources type-check. Runtime verification of this mode is pending.
+The backend and test sources type-check. Runtime verification of this mode is pending. The dev dependency option below was
+added afterwards without running the compiler or any test (the shell was not used); treat it as unverified.
 
 **Enablement.** Set `GRAVEYARD_GITHUB_NPM_SCRIPTS=1` (exactly `1`; `0` or unset is off; any other value is refused at
 startup) in addition to the complete GitHub flow configuration. It also requires `GRAVEYARD_GITHUB_CATALOG` (pins only;
@@ -384,12 +385,51 @@ declares `scripts`, so the two profiles cannot overlap.
   because the mode runs the named scripts with hooks disabled and would otherwise not run the project as its author intended.
 - The unchanged lock policy applies to both manifests: `checkNpmFixture` on the original (no `preinstall`, `install`,
   `postinstall`, `prepare`, workspaces, overrides or git/url/file/alias specs) and `checkOperatorFixture` on the sanitized
-  manifest (lockfile v3, 1 to 8 flat unscoped registry packages with sha512 integrity, production dependencies only,
-  `package.json` limited to `name`, `version`, `private: true`, `description`, `license` and `dependencies`). In practice
-  this excludes projects with `devDependencies`, `type`, `main`, `bin` or `engines`, so most real projects are unsupported
-  in this slice. That is a limit of this increment, not a statement about a repository.
+  manifest (lockfile v3, 1 to 8 flat unscoped registry packages with sha512 integrity, production dependencies only).
+  The sanitized manifest is a **minimized install manifest**: exactly `name`, `version`, `private: true`, `description`,
+  `license` and `dependencies`. `scripts` and ordinary inert metadata (`type` `module`/`commonjs`, `main`, `engines`
+  with only `node`/`npm` ranges, `author`, `repository`, `keywords`, `homepage`, `bugs`) are validated (bounded
+  printable strings, no `..` in `main`) and then dropped. An omitted or `false` `private` is accepted and written as
+  `true` in the install manifest only. The original `package.json` stays byte-identical and is what the two named
+  scripts run against (so `type: "module"` applies). A lock root `engines` (npm writes it) is accepted only when it
+  equals the original `engines`; the lockfile itself is never changed. Any other field (`bin`, `exports`, `files`,
+  `devDependencies`, `optionalDependencies`, `peerDependencies`, `workspaces`, ...) and any other lock root key,
+  `dev`/`optional` flag, nested or scoped package still makes the project unsupported by default (`devDependencies`
+  and the `dev` flag are accepted only with the dev dependency option below). Metadata violations are reported
+  as `package-metadata-rejected`. A real lockfile whose root also lists `bin` is out of profile.
 - A source snapshot of at most 100 files, 1 MiB, 160 entries and 5 directory levels, with no submodules, no symlinks, no
   `node_modules`, no root `.npmrc` or `npm-shrinkwrap.json`, and no `.gitattributes` export rules that change the archive.
+
+**Dev dependencies (opt-in, default off).** Set `GRAVEYARD_GITHUB_NPM_DEV_DEPENDENCIES=1` (exactly `1`; `0` or unset is off;
+it requires `GRAVEYARD_GITHUB_NPM_SCRIPTS=1`, otherwise startup is refused) to also accept an ordinary single-package npm
+project that pins `typescript` (or another flat, unscoped tool) in `devDependencies`. One option,
+`allowDevDependencies`, is carried through every check, and when it is off or absent every layer behaves exactly as
+described above:
+
+- `checkNpmFixture` on the original manifest additionally rejects `optionalDependencies`, `peerDependencies` and the lock
+  flags `optional`, `peer` and `devOptional`.
+- `checkOperatorFixture` on the sanitized manifest (which then keeps `devDependencies`) requires: the lock root lists the
+  same `dependencies` and `devDependencies` (names and specs) as `package.json`; a name is in at most one of the two maps;
+  every entry is reachable from either map; `dev: true` is set on exactly the entries reachable only through
+  `devDependencies` and is never set on one reachable from `dependencies`. Dev packages count towards the unchanged bounds
+  (lockfile v3, at most 8 flat unscoped packages in total, 64 KiB lockfile, one sha512 integrity per entry; scoped, nested,
+  `link`, platform-filtered (`os`, `cpu`, `libc`) and install-script entries are rejected).
+- The acquisition request carries the plan's option and the registry acquisition revalidates the files with it before
+  contacting anything. `npm ci` then runs with `--ignore-scripts` plus `--include=dev` (the container sets
+  `NODE_ENV=production`, which would otherwise omit dev packages), through the same attested registry-only proxy. Every
+  package, dev ones included, is still bound to its lock integrity by the host cache verification.
+- `NpmScriptsPipeline` refuses to run (`unconfigured`) an install manifest that has a `devDependencies` key unless it was
+  given the same option. The offline install runs `npm ci --offline --ignore-scripts --include=dev`; `--include=dev` is
+  added only when the staged manifest lists devDependencies.
+- Lockfiles with dev-only packages can export up to 8 MiB of verified cache data across at most 64 files. Jobs without
+  dev-only packages keep the 64 KiB per-file and 128 KiB total limits.
+- Simple TypeScript builds (`tsc`, `tsc -b`, `tsc --build`, or `tsc -p tsconfig.json` and its long form) invoke the installed
+  compiler through Node so the work directory can keep its `noexec` setting. Other build scripts and test scripts use npm
+  with lifecycle hooks disabled.
+
+A local sample with the public `typescript@5.9.3` package passed real registry acquisition and the offline Docker install,
+compile and Node test stages, using `tsc -p tsconfig.json`. Vite and projects requiring platform packages or install hooks
+are outside the supported profile. The existing repair class still requires a root JavaScript build entry.
 
 **Flow.** `cloning` (pinned commit through the github.com-only proxy, as before), `analyzing` (profile check; only a repository
 that passes it has anything exported), `building` (snapshot to host, registry acquisition, offline pipeline), `testing`
@@ -399,13 +439,13 @@ that passes it has anything exported), `building` (snapshot to host, registry ac
    `tar-extract.ts` and `archive-handoff.ts` (no links, safe paths, bounded, commit, file count and byte total equal to
    the git container's own manifest), extracts it into a new `run-<hex>/src-<hex>` directory, and requires the extracted
    `package.json` and `package-lock.json` to be byte-identical to the blobs that were analysed. No host execution.
-2. Dependency acquisition receives only the **sanitized manifest**: the original `package.json` with exactly the `scripts`
-   key removed, plus the unchanged lockfile. The existing registry-only proxy, lock integrity validation and cache
+2. Dependency acquisition receives only the **minimized install manifest** (the original reduced as described above:
+   no `scripts`, no inert metadata, `private: true`), plus the unchanged lockfile. The existing registry-only proxy, lock integrity validation and cache
    verification apply unchanged.
 3. The offline container (network `none`, uid 65532, all capabilities dropped, read-only root, no-new-privileges, `--pull never`,
    512 MB, 1 CPU, 128 pids, 120 s) mounts the snapshot and the verified cache read-only. The in-container driver
    (`npm-scripts-driver.ts`) copies the snapshot to a bounded tmpfs, installs with `npm ci --offline --ignore-scripts` using
-   the sanitized manifest, restores the original `package.json`, and runs exactly `npm run build --ignore-scripts` and
+   the sanitized manifest, restores the original `package.json`, and runs the build (normally `npm run build --ignore-scripts`) and
    `npm run test --ignore-scripts` (fixed argv, no shell on the driver side). `--ignore-scripts` still runs the named
    script but not pre/post hooks and never any dependency lifecycle script. Stage limits: install 40 s, build 30 s, test 30 s.
    Before the test stage the driver verifies that `package.json`, `package-lock.json` and every test-like file (`test/`,

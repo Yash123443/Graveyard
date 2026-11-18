@@ -64,6 +64,13 @@ export interface NpmScriptsPipelineOptions {
   installManifest: string;
   /** Packages `npm ci` must report as added (the lock's own count). */
   expectedPackages: number;
+  /**
+   * The shared dev-dependency policy option (npm-lock-policy.ts NpmDependencyPolicy). Default (absent or
+   * false): an install manifest that has any `devDependencies` key makes the pipeline refuse to run
+   * (`unconfigured`), so a dev install can never happen by accident. True: the in-container driver
+   * installs with `--include=dev` when the manifest lists them. The caller passes the plan's value.
+   */
+  allowDevDependencies?: boolean;
   image?: string;
   /** Absolute path of the compiled driver. Default: npm-scripts-driver.js next to this module. */
   driverPath?: string;
@@ -84,6 +91,16 @@ function readCappedFile(path: string, max: number): Buffer | null {
     return readFileSync(path);
   } catch {
     return null;
+  }
+}
+
+/** True when the manifest text parses to an object with an own `devDependencies` key. Unparsable text is false (the driver refuses it). */
+function manifestHasDevDependenciesKey(text: string): boolean {
+  try {
+    const doc: unknown = JSON.parse(text);
+    return typeof doc === "object" && doc !== null && !Array.isArray(doc) && Object.prototype.hasOwnProperty.call(doc, "devDependencies");
+  } catch {
+    return false;
   }
 }
 
@@ -128,6 +145,9 @@ export class NpmScriptsPipeline {
         throw new Error("the install manifest is missing or too large");
       }
       if (!Number.isInteger(this.expectedPackages) || this.expectedPackages < 1) throw new Error("expectedPackages must be a positive integer");
+      if (opts.allowDevDependencies !== true && manifestHasDevDependenciesKey(this.installManifest)) {
+        throw new Error("the install manifest has devDependencies but the dev dependency policy option is not enabled");
+      }
       const root = realpath(resolve(opts.runDir));
       snapshotDir = realpath(resolve(root, this.snapshot));
       const rel = relative(root, snapshotDir);

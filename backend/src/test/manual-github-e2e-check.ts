@@ -144,6 +144,17 @@
  *     job's containers too. The worker's pin catalog also holds exactly that one URL. The browser holds the
  *     job token (sessionStorage).
  * A clean stop is the existing cleanup's report; this mode makes no claim that a browser-submitted repair works.
+ *
+ * PUBLIC INSPECTION (browser demo only). See scripts/README.md for the live API verification record.
+ * Set GRAVEYARD_DEMO_INSPECT_PUBLIC=1 together with GRAVEYARD_BROWSER_DEMO=1 (scripts/start-demo.ps1 -InspectPublic).
+ * Without the demo, or with any other non-empty value, it fails closed. Only two things change:
+ *   - the worker environment adds the existing GRAVEYARD_GITHUB_ALLOW_UNPINNED=1, so a URL that is not the pin is
+ *     handled by GithubJobRunner's read-only unpinned intake (HEAD resolved to a SHA in the guarded git container,
+ *     four root files read as data, verdict source-inspected; no snapshot, registry, sandbox or model call). The
+ *     exact pin keeps precedence and still takes the npm scripts repair path with live Kiro;
+ *   - the same Vite middleware forwards any body whose repoUrl passes validateGithubUrl, except the placeholder
+ *     catalog URL (400). Invalid URLs still get 400. Forwarded bodies and remembered job ids are handled as above.
+ * Whether a repository is public is learned only from the fetch; a private or missing one fails as infrastructure.
  */
 
 import { createHash, randomBytes, randomInt } from "node:crypto";
@@ -204,6 +215,15 @@ const DEMO_VAR = "GRAVEYARD_BROWSER_DEMO";
 const DEMO_PORT_VAR = "GRAVEYARD_DEMO_PORT";
 /** Browser demo mode: needs the npm repair mode. Any other non-empty value fails closed. */
 const DEMO = process.env[DEMO_VAR] === "1";
+const INSPECT_VAR = "GRAVEYARD_DEMO_INSPECT_PUBLIC";
+/**
+ * Browser demo only: also accept any canonical public GitHub URL and enable the worker's existing
+ * read-only unpinned intake (GRAVEYARD_GITHUB_ALLOW_UNPINNED=1). Any other non-empty value, or this
+ * flag without the browser demo, fails closed.
+ */
+const INSPECT_PUBLIC = process.env[INSPECT_VAR] === "1";
+const DEV_DEPS_VAR = "GRAVEYARD_GITHUB_NPM_DEV_DEPENDENCIES";
+const USE_DEV_DEPS = process.env[DEV_DEPS_VAR] === "1";
 const DEFAULT_DEMO_PORT = 3010;
 const DEMO_BODY_LIMIT = 8192;
 const VITE_CLOSE_MS = 15_000;
@@ -510,6 +530,14 @@ test(
       const demoVar = process.env[DEMO_VAR];
       if (demoVar !== undefined && demoVar !== "" && demoVar !== "1") throw new FailClosed(`${DEMO_VAR} must be exactly 1 when set`);
       if (DEMO && !REPAIR_REQUESTED) throw new FailClosed(`${DEMO_VAR}=1 requires ${REPAIR_VAR}=1`);
+      const inspectVar = process.env[INSPECT_VAR];
+      if (inspectVar !== undefined && inspectVar !== "" && inspectVar !== "1") throw new FailClosed(`${INSPECT_VAR} must be exactly 1 when set`);
+      if (INSPECT_PUBLIC && !DEMO) throw new FailClosed(`${INSPECT_VAR}=1 is a browser demo option and requires ${DEMO_VAR}=1`);
+      const devDepsVar = process.env[DEV_DEPS_VAR];
+      if (devDepsVar !== undefined && devDepsVar !== "0" && !USE_DEV_DEPS) {
+        throw new FailClosed(`${DEV_DEPS_VAR} must be exactly 1 or 0`);
+      }
+      if (USE_DEV_DEPS && !REPAIR_REQUESTED) throw new FailClosed(`${DEV_DEPS_VAR}=1 requires ${REPAIR_VAR}=1`);
       if (DEMO) {
         const dp = process.env[DEMO_PORT_VAR];
         if (dp !== undefined && dp !== "") {
@@ -668,6 +696,8 @@ test(
           GRAVEYARD_WORKER_POLL_MS: "250",
           GRAVEYARD_WORKER_AGENTS: REPAIR_REQUESTED ? "kiro-v2" : "off",
           ...(REPAIR_REQUESTED ? { GRAVEYARD_GITHUB_NPM_SCRIPTS: "1" } : {}),
+          ...(USE_DEV_DEPS ? { [DEV_DEPS_VAR]: "1" } : {}),
+          ...(INSPECT_PUBLIC ? { GRAVEYARD_GITHUB_ALLOW_UNPINNED: "1" } : {}),
         },
         { log: (level, message, fields) => workerLog.push(`${level} ${message}${fields === undefined ? "" : ` ${JSON.stringify(fields)}`}`) },
       );
@@ -677,6 +707,8 @@ test(
       if (worker.composed.config.agents !== (REPAIR_REQUESTED ? "kiro-v2" : "off")) throw new FailClosed(`agents must be ${REPAIR_REQUESTED ? "kiro-v2" : "off"} in this mode`);
       if (gh === null || gh === undefined) throw new FailClosed("worker started without the GitHub flow");
       if ((gh.npmScripts === true) !== REPAIR_REQUESTED) throw new FailClosed("npm scripts mode must be on exactly in npm repair mode");
+      if ((gh.npmDevDependencies === true) !== USE_DEV_DEPS) throw new FailClosed("npm dev dependencies differ from the configured mode");
+      if ((gh.allowUnpinned === true) !== INSPECT_PUBLIC) throw new FailClosed(`unpinned intake must be on exactly when ${INSPECT_VAR}=1`);
       if (supported) {
         const re = gh.registryEgress;
         if (re === null || re === undefined || re.network !== names.regNet || re.proxyContainer !== names.regProxy || re.proxyUrl !== `http://${regProxyIp}:${PROXY_PORT}`) {
@@ -732,8 +764,16 @@ test(
                 let repoUrl: unknown;
                 try { repoUrl = (JSON.parse(body) as { repoUrl?: unknown } | null)?.repoUrl; } catch { repoUrl = undefined; }
                 const v = typeof repoUrl === "string" ? validateGithubUrl(repoUrl) : undefined;
-                if (v === undefined || !v.ok || v.url !== targetUrl) {
-                  sendJson(res, 400, "This demo accepts only the fixture URL printed by the launcher.");
+                if (v === undefined || !v.ok) {
+                  sendJson(res, 400, INSPECT_PUBLIC
+                    ? "This demo accepts only public GitHub repository URLs of the form https://github.com/<owner>/<repo>."
+                    : "This demo accepts only the fixture URL printed by the launcher.");
+                  return;
+                }
+                if (v.url !== targetUrl && (!INSPECT_PUBLIC || v.url === PLACEHOLDER_URL)) {
+                  sendJson(res, 400, INSPECT_PUBLIC
+                    ? "This URL is reserved by the demo harness and cannot be submitted."
+                    : "This demo accepts only the fixture URL printed by the launcher.");
                   return;
                 }
                 httpCall(apiPort, "POST", "/api/jobs", {}, body).then(
@@ -786,6 +826,9 @@ test(
         console.log(`DEMO  Workspace: http://127.0.0.1:${String(demoPort)}/#/workspace`);
         console.log(`DEMO  Fixture:   ${targetUrl}`);
         console.log(`DEMO  Pinned commit ${targetCommit}. Paste the fixture URL in the workspace and give consent; no job is submitted for you.`);
+        if (INSPECT_PUBLIC) {
+          console.log("DEMO  Public inspection is on: any other public https://github.com/<owner>/<repo> URL is inspected read-only at its current HEAD (resolved commit and root-file findings; nothing installed, built or run, no model call).");
+        }
         console.log("DEMO  Ctrl+C (SIGINT) stops everything: Vite first, then worker, API, Docker proxies, networks and temporary directories.");
         await new Promise<void>((done) => {
           demoWake = done;

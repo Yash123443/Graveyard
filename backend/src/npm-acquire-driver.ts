@@ -57,6 +57,20 @@ export const MAX_EXPORT_TOTAL_BYTES = 128 * 1024;
 const MAX_EXPORT_DEPTH = 6;
 /** Stays below the host's 256 KiB container output cap, with room for the JSON envelope. */
 export const MAX_PROTOCOL_LINE_CHARS = 240 * 1024;
+export const DEFAULT_EXPORT_BOUNDS = Object.freeze({
+  maxFiles: MAX_EXPORT_FILES,
+  maxFileBytes: MAX_EXPORT_FILE_BYTES,
+  maxTotalBytes: MAX_EXPORT_TOTAL_BYTES,
+  maxProtocolChars: MAX_PROTOCOL_LINE_CHARS,
+});
+export const DEV_CACHE_ARG = "--dev-cache";
+// The compiler tarball fits this profile. Count, tmpfs, container memory and deadlines are unchanged.
+export const DEV_EXPORT_BOUNDS: typeof DEFAULT_EXPORT_BOUNDS = Object.freeze({
+  maxFiles: MAX_EXPORT_FILES,
+  maxFileBytes: 8 * 1024 * 1024,
+  maxTotalBytes: 8 * 1024 * 1024,
+  maxProtocolChars: 12 * 1024 * 1024,
+});
 
 export const ACQUIRE_LIMITS = Object.freeze({
   installTimeoutMs: 100_000,
@@ -113,8 +127,12 @@ export function parsePrivateProxyUrl(url: unknown): { host: string; port: number
   return isPrivate ? { host: o.join("."), port } : null;
 }
 
-/** The fixed `npm ci` argument list. Every value is a constant or a validated path/URL. */
-export function npmAcquireArgs(proxyUrl: string, cacheDir: string, userConfig: string, globalConfig: string): string[] {
+/**
+ * The fixed `npm ci` argument list. Every value is a constant or a validated path/URL. `includeDev` appends
+ * only `--include=dev` (the container runs with NODE_ENV=production, which would otherwise omit dev packages);
+ * `--ignore-scripts`, the pinned registry and the proxy are always present.
+ */
+export function npmAcquireArgs(proxyUrl: string, cacheDir: string, userConfig: string, globalConfig: string, includeDev = false): string[] {
   return [
     "ci",
     "--ignore-scripts",
@@ -132,7 +150,25 @@ export function npmAcquireArgs(proxyUrl: string, cacheDir: string, userConfig: s
     "--userconfig", userConfig,
     "--globalconfig", globalConfig,
     "--cache", cacheDir,
+    ...(includeDev ? ["--include=dev"] : []),
   ];
+}
+
+/**
+ * True when the staged package.json has a non-empty own `devDependencies` object. The host only stages such
+ * a manifest after checkOperatorFixture accepted it WITH the shared `allowDevDependencies` option (without
+ * it the manifest is rejected before anything is staged), so this is a reading of validated input, not a
+ * decision. Unparsable text is false. Never throws.
+ */
+export function manifestListsDevDependencies(packageJson: Buffer): boolean {
+  try {
+    const doc: unknown = JSON.parse(packageJson.toString("utf8"));
+    if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return false;
+    const dev = (doc as Record<string, unknown>)["devDependencies"];
+    return typeof dev === "object" && dev !== null && !Array.isArray(dev) && Object.keys(dev).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -294,7 +330,7 @@ export type ExportOutcome =
  * Collects the cacache content and index trees. Anything other than plain directories and regular
  * files, any bound exceeded, or a missing tree is a refusal (never a partial export).
  */
-export function exportCache(cacheRoot: string): ExportOutcome {
+export function exportCache(cacheRoot: string, bounds = DEFAULT_EXPORT_BOUNDS): ExportOutcome {
   const files: ExportedFile[] = [];
   let total = 0;
   const fail = (detail: string): ExportOutcome => ({ ok: false, reason: "refused", detail });
@@ -323,16 +359,16 @@ export function exportCache(cacheRoot: string): ExportOutcome {
         continue;
       }
       if (!st.isFile()) return fail("cache contains a special file");
-      if (files.length >= MAX_EXPORT_FILES) return fail("cache has more files than allowed");
+      if (files.length >= bounds.maxFiles) return fail("cache has more files than allowed");
       let data: Buffer;
       try {
-        data = readRegularFile(p, MAX_EXPORT_FILE_BYTES);
+        data = readRegularFile(p, bounds.maxFileBytes);
       } catch (e) {
         if (e instanceof RefusedError) return fail(`a cache file ${e.message}`);
         return { ok: false, reason: "io-error", detail: `cache file could not be read: ${errCode(e)}` };
       }
       total += data.length;
-      if (total > MAX_EXPORT_TOTAL_BYTES) return fail("cache is larger than allowed");
+      if (total > bounds.maxTotalBytes) return fail("cache is larger than allowed");
       files.push({ path: r.slice(1), size: data.length, data: data.toString("base64") });
     }
     return null;
@@ -359,6 +395,7 @@ export function exportCache(cacheRoot: string): ExportOutcome {
 // ---------------------------------------------------------------------------------------------
 
 export interface AcquireOptions {
+  allowDevCache?: boolean;
   sourceDir?: string;
   workDir?: string;
   /** Default: process.env[GRAVEYARD_NPM_PROXY]. */
@@ -413,6 +450,7 @@ export async function runAcquisition(options: AcquireOptions = {}): Promise<Acqu
   } catch (e) {
     return refused("prepare", "io-error", `directory check failed: ${errCode(e)}`);
   }
+  let includeDev = false;
   for (const name of ACQUIRE_INPUT_FILES) {
     let data: Buffer;
     try {
@@ -424,6 +462,7 @@ export async function runAcquisition(options: AcquireOptions = {}): Promise<Acqu
       if (code === "ELOOP" || code === "EMLINK") return refused("prepare", "refused", `${name} is a symlink`);
       return refused("prepare", "io-error", `${name} could not be read: ${code}`);
     }
+    if (name === "package.json") includeDev = manifestListsDevDependencies(data);
     try {
       writeFileSync(join(workDir, name), data, { flag: "wx", mode: 0o644 });
     } catch (e) {
@@ -450,7 +489,7 @@ export async function runAcquisition(options: AcquireOptions = {}): Promise<Acqu
   });
   const o = await runner({
     command: "npm",
-    args: npmAcquireArgs(proxy, cacheDir, userConfig, globalConfig),
+    args: npmAcquireArgs(proxy, cacheDir, userConfig, globalConfig, includeDev),
     cwd: workDir,
     env,
     timeoutMs: installTimeoutMs,
@@ -469,7 +508,10 @@ export async function runAcquisition(options: AcquireOptions = {}): Promise<Acqu
   }
 
   // 3. export
-  const exported = exportCache(join(cacheDir, "_cacache"));
+  const exported = exportCache(
+    join(cacheDir, "_cacache"),
+    options.allowDevCache === true ? DEV_EXPORT_BOUNDS : DEFAULT_EXPORT_BOUNDS,
+  );
   if (!exported.ok) return result("failed", "export", { ...base, reason: exported.reason, detail: exported.detail });
   return result("passed", "done", { ...base, files: exported.files });
 }
@@ -479,7 +521,7 @@ export async function runAcquisition(options: AcquireOptions = {}): Promise<Acqu
 // ---------------------------------------------------------------------------------------------
 
 /** Serialises a result as the single protocol line. Only known fields are written. */
-export function encodeAcquireLine(r: AcquireResult): string {
+export function encodeAcquireLine(r: AcquireResult, bounds = DEFAULT_EXPORT_BOUNDS): string {
   const line = (x: AcquireResult): string => {
     const o: Record<string, unknown> = { protocol: ACQUIRE_PROTOCOL_ID, status: x.status, phase: x.phase };
     if (x.reason !== undefined) o["reason"] = x.reason;
@@ -492,7 +534,7 @@ export function encodeAcquireLine(r: AcquireResult): string {
     return `${JSON.stringify(o)}\n`;
   };
   const full = line(r);
-  if (full.length <= MAX_PROTOCOL_LINE_CHARS) return full;
+  if (full.length <= bounds.maxProtocolChars) return full;
   return line({
     ...r, status: "failed", phase: "export", reason: "output-limit", detail: "export is larger than the protocol allows", files: [],
   });
@@ -503,8 +545,9 @@ export async function driverMain(): Promise<number> {
   const controller = new AbortController();
   process.once("SIGTERM", () => controller.abort());
   try {
-    const result = await runAcquisition({ signal: controller.signal });
-    const line = encodeAcquireLine(result);
+    const allowDevCache = process.argv.length === 3 && process.argv[2] === DEV_CACHE_ARG;
+    const result = await runAcquisition({ signal: controller.signal, allowDevCache });
+    const line = encodeAcquireLine(result, allowDevCache ? DEV_EXPORT_BOUNDS : DEFAULT_EXPORT_BOUNDS);
     await new Promise<void>((done, fail) => {
       process.stdout.write(line, (e) => (e ? fail(e) : done()));
     });

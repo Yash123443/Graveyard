@@ -11,7 +11,9 @@
  *    an HTTP request) passes the two file texts in `operatorFixture`. They must pass
  *    checkOperatorFixture (npm-operator-fixture.ts): the unchanged lock policy first, then at most 8
  *    flat, unscoped, production-only registry packages from a lockfileVersion 3 lock of at most
- *    64 KiB. A rejected fixture returns `rejected` before the attestation or Docker is contacted.
+ *    64 KiB (flat unscoped devDependencies too, only when the request sets `allowDevDependencies`;
+ *    the driver then installs them with `npm ci --include=dev`, still with --ignore-scripts and still
+ *    through the same attested proxy, and every tarball is still bound to its lock integrity). A rejected fixture returns `rejected` before the attestation or Docker is contacted.
  *    Everything after that point (egress gates, container isolation, `--ignore-scripts`, cleanup
  *    proof, host-verified cache handoff bound to every lockfile integrity) is the same code path.
  * The default egress guard still never attests, so by default neither mode creates anything.
@@ -65,7 +67,7 @@ import { sanitize, validateEgressAttestation, type EgressGuard } from "./acquisi
 import { removeStagedPipeline } from "./controlled-pipeline.js";
 import type { ProcessExecutor, ProcessResult } from "./docker-sandbox.js";
 import { NODE_FIXTURE_IMAGE } from "./node-fixture-runner.js";
-import { ACQUIRE_PROXY_ENV, EXIT_FAILED, EXIT_PASSED, parsePrivateProxyUrl } from "./npm-acquire-driver.js";
+import { ACQUIRE_PROXY_ENV, DEV_CACHE_ARG, DEV_EXPORT_BOUNDS, EXIT_FAILED, EXIT_PASSED, parsePrivateProxyUrl } from "./npm-acquire-driver.js";
 import { parseNpmAdded } from "./npm-install-runner.js";
 import { MAX_LOCKFILE_BYTES, MAX_PACKAGE_JSON_BYTES, checkNpmFixture } from "./npm-lock-policy.js";
 import { checkOperatorFixture } from "./npm-operator-fixture.js";
@@ -221,6 +223,20 @@ export interface RegistryAcquisitionRequest {
   fixture: string;
   /** Only with OPERATOR_FIXTURE_ID. Supplied by operator code, never by an HTTP request. */
   operatorFixture?: OperatorFixtureInput;
+  /**
+   * Trusted internal capability, never from an HTTP request. Only the npm-scripts runner sets it, and
+   * only after planNpmScripts accepted a lock root `engines` equal to the original package.json engines.
+   * Honoured only with OPERATOR_FIXTURE_ID; ignored for the fixed fixture. The lockfile is not changed.
+   */
+  allowLockRootEngines?: boolean;
+  /**
+   * The shared dev-dependency policy option (npm-lock-policy.ts NpmDependencyPolicy). Trusted internal
+   * capability, never from an HTTP request; set only by the npm-scripts runner from a plan that carries it.
+   * Honoured only with OPERATOR_FIXTURE_ID. Absent or false (the default): the operator fixture must be
+   * production-only exactly as before. When true the files are revalidated with the same option here, and
+   * the in-container driver adds `--include=dev` because the staged package.json lists devDependencies.
+   */
+  allowDevDependencies?: boolean;
   /** Exact image reference from the allowlist. */
   image: string;
   /** Existing real directory. The verified cache is written to `<runDir>/cache`. */
@@ -285,6 +301,7 @@ interface AcqFixture {
   lock: string;
   expected: ExpectedTarball[];
   packageCount: number;
+  allowDevCache?: boolean;
   /** False for the fixed fixture, which is additionally compared byte for byte with the constants. */
   operator: boolean;
 }
@@ -308,6 +325,11 @@ export interface RunCtx {
   egress: Egress;
   stagedDir: string;
   timeoutMs: number;
+  allowDevCache?: boolean;
+}
+
+function acquisitionArgv(ctx: RunCtx): readonly string[] {
+  return ctx.allowDevCache === true ? [...NPM_ACQ_ARGV, DEV_CACHE_ARG] : NPM_ACQ_ARGV;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +428,7 @@ export function buildCreateArgs(ctx: RunCtx): string[] {
     "--env", `${ACQUIRE_PROXY_ENV}=${egress.proxyUrl}`,
     "--mount", `type=bind,source=${ctx.stagedDir},target=${FIXTURE_MOUNT},readonly`,
     plan.image,
-    ...NPM_ACQ_ARGV,
+    ...acquisitionArgv(ctx),
   ];
 }
 
@@ -420,7 +442,7 @@ export function verifyAcquisitionIsolation(info: Record<string, unknown>, ctx: R
 
   if (cfg["User"] !== ACQ_UID_GID) v.push("user is not the fixed non-root uid:gid");
   if (cfg["Image"] !== plan.image) v.push("image differs");
-  if (!sameArray(cfg["Cmd"], NPM_ACQ_ARGV)) v.push("command differs");
+  if (!sameArray(cfg["Cmd"], acquisitionArgv(ctx))) v.push("command differs");
   const ep = cfg["Entrypoint"];
   if (!(ep === null || ep === undefined || (Array.isArray(ep) && ep.every((e) => e === "")))) v.push("entrypoint was not cleared");
   if (labels[NPM_ACQ_LABEL_MANAGED] !== "true" || labels[NPM_ACQ_LABEL_ID] !== plan.executionId) v.push("identifying labels missing");
@@ -655,7 +677,8 @@ export class NpmRegistryAcquisition {
     }
 
     // 6. One fixed command in one disposable container.
-    const ctx: RunCtx = { plan, egress, stagedDir, timeoutMs: this.limits.timeoutMs };
+    const allowDevCache = fx.allowDevCache === true;
+    const ctx: RunCtx = { plan, egress, stagedDir, timeoutMs: this.limits.timeoutMs, allowDevCache };
     let run: RunOutcome;
     try {
       run = await this.createVerifyStart(ctx);
@@ -668,7 +691,7 @@ export class NpmRegistryAcquisition {
     const removal = removeStagedPipeline(stagedDir, STAGED_NAMES);
     const common = { cleanup, stagingRemoved: removal.removed, driverSha256 };
 
-    const classified = this.classify(run);
+    const classified = this.classify(run, allowDevCache);
     if ("outcome" in classified) return finish(classified.outcome, common);
     if (!cleanup.confirmed) {
       return finish({ kind: "cleanup-unconfirmed", reason: `container cleanup was not confirmed (${cleanup.reason}); the output is not trusted` }, common);
@@ -683,7 +706,7 @@ export class NpmRegistryAcquisition {
     if (added !== fx.packageCount) {
       return finish({ kind: "summary-mismatch", reason: `npm reported ${added === null ? "no package summary" : `${added} package(s)`}, the lockfile lists ${fx.packageCount}` }, common);
     }
-    const handoff = this.handoff(report.files, fx.expected, plan.runDir, NPM_ACQ_CACHE_DIR_NAME);
+    const handoff = this.handoff(report.files, fx.expected, plan.runDir, NPM_ACQ_CACHE_DIR_NAME, allowDevCache ? DEV_EXPORT_BOUNDS : undefined);
     if (!handoff.ok) return finish({ kind: "handoff-rejected", reason: sanitize(handoff.reason), dir: handoff.dir }, common);
     return finish(
       { kind: "acquired", cacheDir: handoff.cacheDir, summary: handoff.summary, packagesAdded: added, durationMs: report.durationMs },
@@ -743,9 +766,22 @@ export class NpmRegistryAcquisition {
     if (Object.keys(shape).sort().join(",") !== "packageJson,packageLock") {
       return { ok: false, reason: "operatorFixture must be exactly { packageJson, packageLock }" };
     }
-    const r = checkOperatorFixture(shape["packageJson"], shape["packageLock"]);
+    const r = checkOperatorFixture(shape["packageJson"], shape["packageLock"], {
+      ...(req.allowLockRootEngines === true ? { allowLockRootEngines: true } : {}),
+      ...(req.allowDevDependencies === true ? { allowDevDependencies: true } : {}),
+    });
     if (!r.ok) return { ok: false, reason: sanitize(`operator fixture violates the policy: ${r.violations[0] ?? "unknown"}`) };
-    return { ok: true, value: { packageJson: r.packageJson, lock: r.lock, expected: r.packages, packageCount: r.packageCount, operator: true } };
+    return {
+      ok: true,
+      value: {
+        packageJson: r.packageJson,
+        lock: r.lock,
+        expected: r.packages,
+        packageCount: r.packageCount,
+        operator: true,
+        allowDevCache: (r.devPackageCount ?? 0) > 0,
+      },
+    };
   }
 
   private plan(req: RegistryAcquisitionRequest): Plan | { reason: string } {
@@ -768,7 +804,7 @@ export class NpmRegistryAcquisition {
   }
 
   /** Maps the container outcome. `passed` still needs cleanup confirmation and the verified handoff. */
-  private classify(run: RunOutcome): { outcome: RegistryAcquisitionOutcome } | { passed: AcquireReport } {
+  private classify(run: RunOutcome, allowDevCache: boolean): { outcome: RegistryAcquisitionOutcome } | { passed: AcquireReport } {
     switch (run.kind) {
       case "timed-out":
         return { outcome: { kind: "timed-out" } };
@@ -785,7 +821,7 @@ export class NpmRegistryAcquisition {
     if (run.truncated) return perr("container output was truncated; the report cannot be trusted");
     if (run.exitCode !== EXIT_PASSED && run.exitCode !== EXIT_FAILED) return perr(`the driver exited with code ${run.exitCode} and no usable report`);
     if (run.stderr !== "") return perr("the driver wrote to stderr, which the protocol forbids");
-    const parsed = parseAcquireOutput(run.stdout);
+    const parsed = parseAcquireOutput(run.stdout, allowDevCache);
     if (!parsed.ok) return perr(`invalid driver output: ${parsed.reason}`);
     const r = parsed.value;
     if ((run.exitCode === EXIT_PASSED) !== (r.status === "passed")) return perr("exit code contradicts the reported status");
@@ -817,7 +853,7 @@ export class NpmRegistryAcquisition {
 
     const run = await this.exec(this.docker, ["start", "--attach", plan.name], {
       timeoutMs: ctx.timeoutMs,
-      maxOutputBytes: CONTAINER_OUTPUT_BYTES,
+      maxOutputBytes: ctx.allowDevCache === true ? DEV_EXPORT_BOUNDS.maxProtocolChars : CONTAINER_OUTPUT_BYTES,
       ...(plan.signal === undefined ? {} : { signal: plan.signal }),
     });
     if (run.timedOut) return { kind: "timed-out" };

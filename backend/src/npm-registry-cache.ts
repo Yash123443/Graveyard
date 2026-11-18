@@ -46,6 +46,7 @@ import {
   MAX_EXPORT_FILES,
   MAX_EXPORT_FILE_BYTES,
   MAX_EXPORT_TOTAL_BYTES,
+  DEV_EXPORT_BOUNDS,
   type AcquireFailure,
   type AcquirePhase,
   type AcquireStatus,
@@ -142,10 +143,13 @@ const TOP_KEYS: readonly string[] = [
 const REQUIRED_TOP: readonly string[] = ["protocol", "status", "phase", "durationMs", "stdoutTail", "stderrTail", "files"];
 
 /** Parses the single-line report. Never throws. A passed report must carry files, any other none. */
-export function parseAcquireOutput(stdout: string): Validated<AcquireReport> {
+export function parseAcquireOutput(stdout: string, allowDevCache = false): Validated<AcquireReport> {
   const bad = (reason: string): Validated<AcquireReport> => ({ ok: false, reason });
+  const bounds = allowDevCache ? DEV_EXPORT_BOUNDS : DEFAULT_CACHE_LIMITS;
   if (typeof stdout !== "string" || stdout.length === 0) return bad("no output");
-  if (stdout.length > MAX_PROTOCOL_CHARS) return bad("output is larger than the protocol allows");
+  if (stdout.length > (allowDevCache ? DEV_EXPORT_BOUNDS.maxProtocolChars : MAX_PROTOCOL_CHARS)) {
+    return bad("output is larger than the protocol allows");
+  }
   const nl = stdout.indexOf("\n");
   if (nl !== stdout.length - 1) return bad("output is not exactly one newline-terminated line");
   if (stdout.includes("\r")) return bad("output contains a carriage return");
@@ -187,7 +191,7 @@ export function parseAcquireOutput(stdout: string): Validated<AcquireReport> {
   if (typeof err !== "string" || err.length > MAX_TAIL_CHARS) return bad("invalid stderrTail");
 
   const rawFiles = doc["files"];
-  if (!Array.isArray(rawFiles) || rawFiles.length > MAX_EXPORT_FILES) return bad("files is not a bounded array");
+  if (!Array.isArray(rawFiles) || rawFiles.length > bounds.maxFiles) return bad("files is not a bounded array");
   const files: ExportedFile[] = [];
   for (const f of rawFiles as unknown[]) {
     if (!isObj(f)) return bad("file entry is not an object");
@@ -195,7 +199,7 @@ export function parseAcquireOutput(stdout: string): Validated<AcquireReport> {
     if (keys !== "data,path,size") return bad("file entry has unexpected keys");
     const { path, size, data } = f;
     if (typeof path !== "string" || path.length > 200) return bad("invalid file path");
-    if (typeof size !== "number" || !Number.isInteger(size) || size < 0 || size > MAX_EXPORT_FILE_BYTES) return bad("invalid file size");
+    if (typeof size !== "number" || !Number.isInteger(size) || size < 0 || size > bounds.maxFileBytes) return bad("invalid file size");
     if (typeof data !== "string") return bad("invalid file data");
     files.push({ path, size, data });
   }

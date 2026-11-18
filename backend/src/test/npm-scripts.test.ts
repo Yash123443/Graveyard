@@ -31,7 +31,9 @@ import {
   runScriptsPipeline,
 } from "../npm-scripts-driver.js";
 import { NpmScriptsPipeline } from "../npm-scripts-pipeline.js";
-import { declaresScripts, planNpmScripts } from "../npm-scripts-policy.js";
+import { declaresScripts, planNpmScripts, sanitizeManifest } from "../npm-scripts-policy.js";
+import { checkOperatorFixture } from "../npm-operator-fixture.js";
+import { createHash } from "node:crypto";
 import {
   SNAPSHOT_LIMITS,
   exportSnapshot,
@@ -118,7 +120,10 @@ describe("npm scripts policy", () => {
     }
     const withType = scriptsDoc();
     withType.pkg["type"] = "module";
-    assert.ok(codesOf(planNpmScripts(textsOf(withType), { dependencyAcquisition: true })).includes("dependency-policy-rejected"));
+    assert.deepEqual(codesOf(planNpmScripts(textsOf(withType), { dependencyAcquisition: true })), []);
+    const withBin = scriptsDoc();
+    withBin.pkg["bin"] = "cli.js";
+    assert.ok(codesOf(planNpmScripts(textsOf(withBin), { dependencyAcquisition: true })).includes("dependency-policy-rejected"));
     const withDev = scriptsDoc();
     withDev.pkg["devDependencies"] = { typescript: "^5.0.0" };
     assert.ok(codesOf(planNpmScripts(textsOf(withDev), { dependencyAcquisition: true })).includes("dependency-policy-rejected"));
@@ -143,6 +148,153 @@ describe("npm scripts policy", () => {
 // ---------------------------------------------------------------------------
 // Snapshot export
 // ---------------------------------------------------------------------------
+
+describe("npm scripts profile: ordinary package.json metadata", () => {
+  const sha = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
+  const realStyle = (): OperatorDoc => {
+    const d = scriptsDoc();
+    delete d.pkg["private"];
+    d.pkg["description"] = "A small tool";
+    d.pkg["license"] = "MIT";
+    d.pkg["type"] = "module";
+    d.pkg["main"] = "./src/index.js";
+    d.pkg["engines"] = { node: ">=18", npm: ">=9" };
+    d.pkg["author"] = { name: "Ada", email: "ada@example.org", url: "https://example.org" };
+    d.pkg["repository"] = { type: "git", url: "git+https://github.com/o/r.git" };
+    d.pkg["keywords"] = ["small", "tool"];
+    d.pkg["homepage"] = "https://github.com/o/r#readme";
+    d.pkg["bugs"] = { url: "https://github.com/o/r/issues" };
+    d.lock["packages"][""]["engines"] = { node: ">=18", npm: ">=9" };
+    d.lock["packages"][""]["license"] = "MIT";
+    return d;
+  };
+  const plan = (d: OperatorDoc): ReturnType<typeof planNpmScripts> => planNpmScripts(textsOf(d), { dependencyAcquisition: true });
+
+  it("accepts real-style metadata including type module and builds a minimized install manifest", () => {
+    const d = realStyle();
+    const t = textsOf(d);
+    const p = planNpmScripts(t, { dependencyAcquisition: true });
+    if (!p.ok) return assert.fail(`expected acceptance: ${JSON.stringify(p.findings)}`);
+    const m = JSON.parse(p.sanitizedPackageJson) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(m).sort(), ["dependencies", "description", "license", "name", "private", "version"]);
+    assert.equal(m["private"], true);
+    assert.equal(m["name"], d.pkg["name"]);
+    assert.equal(m["version"], d.pkg["version"]);
+    assert.deepEqual(m["dependencies"], d.pkg["dependencies"]);
+    // The original is only hashed, never rewritten; the lock is the exact input.
+    assert.equal(p.originalPackageJsonSha256, sha(t.packageJson));
+    assert.equal(p.packageLockSha256, sha(t.packageLock));
+    assert.equal(p.sanitizedPackageJsonSha256, sha(p.sanitizedPackageJson));
+    assert.equal(p.expectedPackages, 3);
+  });
+
+  it("forces private true for an omitted or false private and keeps true as it was", () => {
+    for (const priv of [undefined, false, true]) {
+      const d = realStyle();
+      if (priv !== undefined) d.pkg["private"] = priv;
+      const p = plan(d);
+      if (!p.ok) return assert.fail(`private=${String(priv)}: ${JSON.stringify(p.findings)}`);
+      assert.equal((JSON.parse(p.sanitizedPackageJson) as Record<string, unknown>)["private"], true);
+    }
+  });
+
+  it("leaves the sanitizer output for a legacy manifest identical to the original without scripts", () => {
+    const t = textsOf(scriptsDoc());
+    const expected = JSON.parse(t.packageJson) as Record<string, unknown>;
+    delete expected["scripts"];
+    assert.equal(sanitizeManifest(t.packageJson), `${JSON.stringify(expected, null, 2)}\n`);
+  });
+
+  it("keeps the original text byte-identical through the driver, including type module", async () => {
+    const d = realStyle();
+    const t = textsOf(d);
+    const p = planNpmScripts(t, { dependencyAcquisition: true });
+    if (!p.ok) return assert.fail("expected acceptance");
+    const source = join(tmp, "fixture");
+    const work = join(tmp, "work");
+    mkdirSync(source, { recursive: true });
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(source, "package.json"), t.packageJson);
+    writeFileSync(join(source, "package-lock.json"), t.packageLock);
+    writeFileSync(join(source, SCRIPTS_INSTALL_MANIFEST_NAME), p.sanitizedPackageJson);
+    const seen: string[] = [];
+    const runner: ProcessRunner = (spec) => {
+      seen.push(readFileSync(join(spec.cwd, "package.json"), "utf8"));
+      return Promise.resolve({ exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, aborted: false, truncated: false });
+    };
+    const result = await runScriptsPipeline({ sourceDir: source, workDir: work, cacheDir: join(tmp, "cache"), runner });
+    assert.equal(result.status, "passed");
+    assert.equal(seen[0], p.sanitizedPackageJson);
+    assert.equal(seen[1], t.packageJson);
+    assert.equal(seen[2], t.packageJson);
+    assert.equal(JSON.parse(seen[1] as string).type, "module");
+  });
+
+  it("accepts a lock root engines only when it equals package.json engines", () => {
+    const same = realStyle();
+    assert.equal(plan(same).ok, true);
+    const differs = realStyle();
+    differs.lock["packages"][""]["engines"] = { node: ">=20" };
+    assert.deepEqual(codesOf(plan(differs)), ["package-metadata-rejected"]);
+    const orphan = realStyle();
+    delete orphan.pkg["engines"];
+    assert.deepEqual(codesOf(plan(orphan)), ["package-metadata-rejected"]);
+  });
+
+  it("refuses invalid or execution-affecting metadata values", () => {
+    const bad: Record<string, unknown> = {
+      type: "esm",
+      main: "../outside.js",
+      "main-abs": "/etc/passwd",
+      engines: { node: ">=18", evil: "1" },
+      keywords: "not-an-array",
+      author: { name: "Ada", extra: "x" },
+      homepage: "https://example.org\nx",
+      private: "yes",
+    };
+    for (const [label, value] of Object.entries(bad)) {
+      const d = realStyle();
+      const key = label === "main-abs" ? "main" : label;
+      d.pkg[key] = value;
+      if (key === "engines") d.lock["packages"][""]["engines"] = value;
+      assert.deepEqual(codesOf(plan(d)), ["package-metadata-rejected"], label);
+    }
+  });
+
+  it("does not weaken the dev, optional, workspaces, hook, file-spec or lock-root restrictions", () => {
+    const mutations: Array<[string, (d: OperatorDoc) => void]> = [
+      ["devDependencies", (d) => void (d.pkg["devDependencies"] = { typescript: "^5.0.0" })],
+      ["optionalDependencies", (d) => void (d.pkg["optionalDependencies"] = { fsevents: "^2.0.0" })],
+      ["workspaces", (d) => void (d.pkg["workspaces"] = ["packages/*"])],
+      ["prepare hook", (d) => void ((d.pkg["scripts"] as Record<string, string>)["prepare"] = "node x.js")],
+      ["prebuild hook", (d) => void ((d.pkg["scripts"] as Record<string, string>)["prebuild"] = "node x.js")],
+      ["file dependency", (d) => void (d.pkg["dependencies"]["alpha"] = "file:../alpha")],
+      ["bin", (d) => void (d.pkg["bin"] = "cli.js")],
+      ["exports", (d) => void (d.pkg["exports"] = "./index.js")],
+      ["lock root devDependencies", (d) => void (d.lock["packages"][""]["devDependencies"] = { typescript: "^5.0.0" })],
+      ["lock root bin", (d) => void (d.lock["packages"][""]["bin"] = { x: "cli.js" })],
+      ["lock dev flag", (d) => void (d.lock["packages"]["node_modules/gamma"]["dev"] = true)],
+      ["lock optional flag", (d) => void (d.lock["packages"]["node_modules/gamma"]["optional"] = true)],
+    ];
+    for (const [label, mutate] of mutations) {
+      const d = realStyle();
+      mutate(d);
+      const p = plan(d);
+      assert.equal(p.ok, false, label);
+      assert.ok(codesOf(p).length > 0, label);
+    }
+  });
+
+  it("keeps the strict operator gate unchanged for callers that do not opt in", () => {
+    const d = realStyle();
+    const sanitized = JSON.parse(sanitizeManifest(textsOf(d).packageJson)) as Record<string, unknown>;
+    const t = textsOf(d);
+    assert.equal(checkOperatorFixture(`${JSON.stringify(sanitized, null, 2)}\n`, t.packageLock).ok, false);
+    assert.equal(checkOperatorFixture(`${JSON.stringify(sanitized, null, 2)}\n`, t.packageLock, { allowLockRootEngines: true }).ok, true);
+    const withType = { ...sanitized, type: "module" };
+    assert.equal(checkOperatorFixture(`${JSON.stringify(withType, null, 2)}\n`, t.packageLock, { allowLockRootEngines: true }).ok, false);
+  });
+});
 
 describe("npm scripts snapshot export", () => {
   const texts = textsOf(scriptsDoc());

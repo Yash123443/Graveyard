@@ -20,7 +20,8 @@
  *                in memory only. A sha256 of every copied file is recorded.
  *   2. install   `npm ci --offline --ignore-scripts` against the sanitized manifest and the unchanged
  *                lockfile, with isolated EMPTY npm configuration. Installation scripts never run.
- *   3. build     restore the ORIGINAL package.json, then `npm run build --ignore-scripts`.
+ *   3. build     restore the ORIGINAL package.json, then run its build with hooks disabled.
+ *                Simple tsc scripts use the local compiler through Node to keep /work noexec.
  *   4. test      verify that package.json, package-lock.json and every test-like file still equal the
  *                original bytes (a build must not rewrite its tests), then `npm run test --ignore-scripts`.
  * `--ignore-scripts` does not stop `npm run` from running the NAMED script; it only disables the
@@ -109,6 +110,20 @@ export interface ScriptsDriverOptions {
   testTimeoutMs?: number;
   maxOutputBytes?: number;
   now?: () => number;
+}
+
+/** Run simple tsc scripts through Node because bin shims on /work cannot execute directly. */
+function typescriptBuildArgs(original: Buffer): string[] | null {
+  const manifest = JSON.parse(original.toString("utf8")) as {
+    scripts?: { build?: unknown };
+    devDependencies?: { typescript?: unknown };
+  } | null;
+  const command = manifest?.scripts?.build;
+  if (typeof manifest?.devDependencies?.typescript !== "string" || typeof command !== "string") return null;
+  const match = /^tsc(?: ((?:-b|--build)|(?:-p|--project) (?:\.\/)?tsconfig\.json))?$/.exec(command.trim());
+  if (match === null) return null;
+  const flags = match[1]?.split(" ") ?? [];
+  return ["node_modules/typescript/bin/tsc", ...flags];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -248,6 +263,24 @@ export interface Prepared {
   digests: Map<string, string>;
   files: number;
   bytes: number;
+  /**
+   * True only when the staged install manifest has a non-empty `devDependencies` object. The host stages
+   * such a manifest only after the shared `allowDevDependencies` policy accepted it (NpmScriptsPipeline
+   * refuses one otherwise), so this reads validated input. Absent means false (the legacy install).
+   */
+  installIncludesDev?: boolean;
+}
+
+/** True when the manifest has a non-empty own `devDependencies` object. Never throws. */
+export function installManifestListsDev(manifest: Buffer): boolean {
+  try {
+    const doc: unknown = JSON.parse(manifest.toString("utf8"));
+    if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return false;
+    const dev = (doc as Record<string, unknown>)["devDependencies"];
+    return typeof dev === "object" && dev !== null && !Array.isArray(dev) && Object.keys(dev).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 export type PrepareResult = { ok: true; value: Prepared } | { ok: false; reason: FailureReason; detail: string };
@@ -330,7 +363,17 @@ export function prepareProject(sourceDir: string, workDir: string): PrepareResul
     if (e instanceof RefusedError) return refuse(e.message);
     return { ok: false, reason: "io-error", detail: `the snapshot could not be copied: ${errCode(e)}` };
   }
-  return { ok: true, value: { projectDir, originalPackageJson: original.packageJson as Buffer, digests, files, bytes } };
+  return {
+    ok: true,
+    value: {
+      projectDir,
+      originalPackageJson: original.packageJson as Buffer,
+      digests,
+      files,
+      bytes,
+      ...(installManifestListsDev(installManifest) ? { installIncludesDev: true } : {}),
+    },
+  };
 }
 
 /** Replaces the project's package.json with the ORIGINAL bytes. False on any problem. */
@@ -462,26 +505,36 @@ export async function runScriptsPipeline(options: ScriptsDriverOptions = {}): Pr
     await runStage(
       "install",
       npmSpec(
-        ["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", ...commonFlags, "--cache", cacheDir],
+        [
+          "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", ...commonFlags, "--cache", cacheDir,
+          // NODE_ENV=production would omit dev packages; `--include=dev` is added only for a manifest that lists them.
+          ...(prepared?.installIncludesDev === true ? ["--include=dev"] : []),
+        ],
         installEnv,
         positive(options.installTimeoutMs, SCRIPTS_CONTAINER_LIMITS.installTimeoutMs),
       ),
     );
   }
 
-  // build: original manifest restored, then exactly `npm run build` with hooks disabled.
+  // build: restore the original manifest, then run its build without npm lifecycle hooks.
   if (failed || prepared === null) skip("build");
   else if (signal?.aborted) failNow("build", "cancelled", "cancelled");
   else if (!restoreOriginalManifest(prepared)) failNow("build", "io-error", "the original package.json could not be restored");
   else {
-    await runStage(
-      "build",
-      npmSpec(
-        ["run", "build", "--ignore-scripts", ...commonFlags, "--cache", runCache],
-        buildEnv,
-        positive(options.buildTimeoutMs, SCRIPTS_CONTAINER_LIMITS.buildTimeoutMs),
-      ),
+    const build = npmSpec(
+      ["run", "build", "--ignore-scripts", ...commonFlags, "--cache", runCache],
+      buildEnv,
+      positive(options.buildTimeoutMs, SCRIPTS_CONTAINER_LIMITS.buildTimeoutMs),
     );
+    let tsc: string[] | null = null;
+    if (prepared.installIncludesDev === true) {
+      try {
+        tsc = typescriptBuildArgs(prepared.originalPackageJson);
+      } catch {
+        // The normal npm invocation reports malformed manifest input.
+      }
+    }
+    await runStage("build", tsc === null ? build : { ...build, command: "node", args: tsc });
   }
 
   // test: the original tests must be intact, then exactly `npm run test` with hooks disabled.

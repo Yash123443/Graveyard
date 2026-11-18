@@ -257,6 +257,7 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
         github.npmScripts !== true
           ? undefined
           : (seams.npmScripts ?? {
+              ...(github.npmDevDependencies === true ? { allowDevDependencies: true } : {}),
               exportSnapshot: (info, runDir, expect) => exportSnapshot(spawnBytesExecutor, info, runDir, expect),
               makePipeline: (a) =>
                 new NpmScriptsPipeline({
@@ -267,6 +268,7 @@ export function composeWorker(config: WorkerConfig, deps: ComposeDeps = {}): Com
                   installManifest: a.installManifest,
                   expectedPackages: a.expectedPackages,
                   driverPath: scriptsDriverPath,
+                  ...(a.allowDevDependencies === true ? { allowDevDependencies: true } : {}),
                 }),
             });
       runner = new GithubJobRunner({

@@ -51,6 +51,15 @@ export interface StaticAuditModel {
   omitted: number
 }
 
+export interface InspectionModel {
+  /** Lowercase 40-hex commit the HEAD resolved to, or null when none was recorded. */
+  commit: string | null
+  /** Root-file profile the backend checked against ('npm-scripts'), or null for the default root build.mjs check. */
+  profile: string | null
+  /** npm-scripts root checks outcome (true/false), or null when no such check was reported. Always preliminary. */
+  rootChecksPassed: boolean | null
+}
+
 export interface ResultModel {
   outcome: string
   headline: string
@@ -68,6 +77,8 @@ export interface ResultModel {
   verifiedDiff: string | null
   findings: string[]
   staticAudit: StaticAuditModel | null
+  /** Unpinned source inspection facts (outcome `source-inspected` only). */
+  inspection: InspectionModel | null
   infrastructure: string | null
   notes: string[]
 }
@@ -195,6 +206,17 @@ function staticAuditOf(result: Record<string, unknown> | null): StaticAuditModel
   return { scope: scopeCount === 1 ? scope : null, problems, total, omitted: omittedValid ? (omittedRaw as number) : 0 }
 }
 
+function inspectionOf(result: Record<string, unknown> | null): InspectionModel | null {
+  if (result === null) return null
+  const source = isRecord(result.source) ? result.source : null
+  const commit = source !== null && typeof source.commit === 'string' && /^[0-9a-f]{40}$/.test(source.commit) ? source.commit : null
+  const analysis = isRecord(result.analysis) ? result.analysis : null
+  const profile = analysis !== null && analysis.profile === 'npm-scripts' ? 'npm-scripts' : null
+  const checks = profile !== null && analysis !== null && isRecord(analysis.rootChecks) ? analysis.rootChecks : null
+  const rootChecksPassed = checks !== null && checks.preliminary === true && typeof checks.passed === 'boolean' ? checks.passed : null
+  return { commit, profile, rootChecksPassed }
+}
+
 export function buildResultModel(view: ResultView): ResultModel {
   const head = HEADLINES[view.outcome] ?? { text: 'Unrecognised result', tone: 'warn' as Tone }
   const result = view.result
@@ -229,6 +251,7 @@ export function buildResultModel(view: ResultView): ResultModel {
     verifiedDiff: diff,
     findings,
     staticAudit,
+    inspection: view.outcome === 'source-inspected' ? inspectionOf(result) : null,
     infrastructure: view.infrastructure ? `${view.infrastructure.kind}: ${view.infrastructure.message}`.slice(0, 400) : null,
     notes: result === null ? [] : strings(result.notes, 6),
   }
