@@ -101,9 +101,9 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
       if (meter.current) meter.current.style.transform = `scaleY(${seq.cam})`
       const mainFocus = smoothstep(0.25, 0.48, seq.exploration.nearMain)
       const recordIn = mainFocus
-      const recordOut = 0
+      const recordOut = smoothstep(2.5, 3.2, seq.exploration.readingSeconds)
       if (readingFill.current) readingFill.current.style.transform = `scaleX(${Math.min(1, seq.exploration.readingSeconds / GRAVE_READING_SECONDS)})`
-      if (readingLabel.current) readingLabel.current.textContent = seq.exploration.readingSeconds > 0 ? 'THE KEEPERS ARE LISTENING' : 'FACE THE GRAVE · PAUSE TO AWAKEN THE KEEPERS'
+      if (readingLabel.current) readingLabel.current.textContent = seq.exploration.readingSeconds > 0 ? 'READ THE RECORD · THE RITUAL FOLLOWS' : 'FACE THE GRAVE · PAUSE TO AWAKEN THE KEEPERS'
       const encounterFade = 1 - smoothstep(0, 0.035, seq.exploration.storyProgress)
       const storyFade = 1 - smoothstep(0.03, 0.22, seq.ending.progress)
       if (graveRecord.current) {
@@ -115,14 +115,16 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
         }
       }
       if (epitaph.current) {
-        const alpha = smoothstep(0.5, 0.9, seq.exploration.nearMain) * storyFade * encounterFade
+        const alpha = smoothstep(0.5, 0.9, seq.exploration.nearMain) * (1 - recordOut) * storyFade * encounterFade
         epitaph.current.style.opacity = String(alpha)
         // Preserve the CSS horizontal centering while the line rises in.
         epitaph.current.style.transform = `translate3d(-50%, ${(1 - alpha) * 12}px, 0)`
       }
       if (graveStoryLine.current) {
-        const alpha = smoothstep(1.5, 3, seq.exploration.readingSeconds) * storyFade * encounterFade
+        const alpha = smoothstep(3.2, 3.8, seq.exploration.readingSeconds) * storyFade * encounterFade
         graveStoryLine.current.style.opacity = String(alpha)
+        const cue = graveStoryLine.current.querySelector('small')
+        if (cue) cue.textContent = seq.exploration.readingSeconds >= 5 ? 'THE KEEPERS AWAKEN IN ' + Math.max(1, Math.ceil(GRAVE_READING_SECONDS - seq.exploration.readingSeconds)) + ' · KEEP WATCHING' : 'THE CAUSE IS BURIED HERE · THE RITUAL IS NEXT'
       }
       if (tourControls.current) {
         const visible = ((seq.exploration.storyStarted && seq.exploration.storyProgress > 0.08) || (seq.guided && seq.exploration.entered && !seq.exploration.storyStarted && seq.exploration.nearMain < 0.75)) && !seq.ending.started
@@ -143,9 +145,9 @@ export function OpeningOverlay({ ready }: { ready: boolean }) {
       if (agentPanel.current) {
         agentPanel.current.style.opacity = String(showAgent)
         agentPanel.current.style.transform = `translate3d(0, ${(1 - showAgent) * 18}px, 0)`
-        agentPanel.current.style.borderColor = ['rgba(165,108,255,.7)', 'rgba(250,85,76,.75)', 'rgba(97,242,155,.75)'][agent]
+        agentPanel.current.style.borderColor = ['rgba(169,239,255,.7)', 'rgba(255,176,91,.75)', 'rgba(222,131,255,.75)'][agent]
       }
-      if (agentName.current) agentName.current.style.color = ['#c5a2ff', '#ff8178', '#8ef5b7'][agent]
+      if (agentName.current) agentName.current.style.color = ['#a9efff', '#ffbe7a', '#e0a0ff'][agent]
       if (agentName.current && agentName.current.textContent !== statuses[agent]) agentName.current.textContent = statuses[agent]
       if (agentLine.current && agentLine.current.textContent !== `“${lines[agent]}”`) agentLine.current.textContent = `“${lines[agent]}”`
       if (agentPurpose.current && agentPurpose.current.textContent !== purposes[agent]) agentPurpose.current.textContent = purposes[agent]

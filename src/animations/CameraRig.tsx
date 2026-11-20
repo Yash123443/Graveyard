@@ -1,3 +1,4 @@
+import { GATE_Z } from '../objects/CemeteryGate'
 import { useFrame } from '@react-three/fiber'
 import { useMemo } from 'react'
 import * as THREE from 'three'
@@ -8,6 +9,7 @@ import { groundHeight } from '../objects/Ground'
 import { memorialObstacles } from '../objects/CemeteryMemorials'
 import { lanternObstacles } from '../objects/LanternAvenue'
 import { witchObstacles } from '../objects/WitchCorners'
+import { relicObstacles } from '../objects/HarvestRelics'
 
 /**
  * The camera is on a rail. Scroll scrubs along it, but the rail is critically
@@ -52,6 +54,12 @@ export function CameraRig() {
     [],
   )
 
+  // Find the waiting point on the actual curve, safely in front of the gate.
+  const gateStop = useMemo(() => {
+    let low=0,high=1;const sample=new THREE.Vector3()
+    for(let i=0;i<24;i++){const mid=(low+high)/2;position.getPoint(mid,sample);if(sample.z>GATE_Z+3)low=mid;else high=mid}
+    return low
+  },[position])
   const p = useMemo(() => new THREE.Vector3(), [])
   const l = useMemo(() => new THREE.Vector3(), [])
   const smoothedLook = useMemo(() => new THREE.Vector3(0, 8.4, -8), [])
@@ -68,7 +76,7 @@ export function CameraRig() {
   useFrame(({ camera, clock }, delta) => {
     const dt = Math.min(delta, 0.05)
     advanceFinalGraveStory(dt)
-    const target = seq.exploration.entered ? seq.cam : Math.min(seq.scroll, cameraLimit())
+    const target = seq.exploration.entered ? seq.cam : Math.min(seq.scroll, cameraLimit(), seq.gateOpen < .985 ? gateStop : 1)
     seq.cam += (target - seq.cam) * (1 - Math.exp(-dt * 1.6))
     const t = Math.min(1, Math.max(0, seq.cam - seq.ending.cameraBack * 0.27))
     position.getPoint(t, p)
@@ -77,7 +85,7 @@ export function CameraRig() {
     const roam = seq.roam
     // Let the visitor take control as soon as the gate opening gives a safe
     // passage. Waiting for the last few degrees made the controls feel dead.
-    if (!seq.exploration.entered && seq.scroll >= 0.5 && seq.cam >= 0.49 && seq.gateOpen > 0.85) {
+    if (!seq.exploration.entered && seq.scroll >= 0.5 && seq.cam >= 0.49 && seq.gateOpen >= .985) {
       seq.exploration.entered = true
       // Hand the visitor the exact position and bearing reached by the opening
       // rail. From this point on, the camera has no path to follow.
@@ -96,6 +104,18 @@ export function CameraRig() {
     // reads as a cut in the opening shot.
     roam.entryBlend = THREE.MathUtils.damp(roam.entryBlend, roamAllowed, 5.5, dt)
     const isClear = (x: number, z: number) => {
+      const nearSegment=(ax:number,az:number,bx:number,bz:number)=>{
+        const dx=bx-ax,dz=bz-az,t=THREE.MathUtils.clamp(((x-ax)*dx+(z-az)*dz)/(dx*dx+dz*dz),0,1)
+        return Math.hypot(x-ax-t*dx,z-az-t*dz)<.8
+      }
+      // Solid wings and both moving leaves use the same hinges as the visible gate.
+      if(nearSegment(-45,GATE_Z,-5.4,GATE_Z)||nearSegment(5.4,GATE_Z,45,GATE_Z))return false
+      for(const dir of [-1,1]){
+        const o=seq.gateOpen
+        const own=dir===1?o:smoothstep(.04,1,o)*.97+(o>.995?.03:0)
+        const angle=own*(dir===1?1.5:1.38)
+        if(nearSegment(-dir*5.4,GATE_Z,-dir*5.4+dir*5.25*Math.cos(angle),GATE_Z-5.25*Math.sin(angle)))return false
+      }
       // A round collision limit mirrors the iron fence enclosing the grounds.
       return Math.hypot(x, z - CEMETERY_CENTER_Z) < CEMETERY_ROAM_RADIUS - 0.9
         && !seq.exploration.obstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
@@ -103,6 +123,7 @@ export function CameraRig() {
         && !memorialObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
         && !lanternObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
         && !witchObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
+        && !relicObstacles.some((obstacle) => Math.hypot(x - obstacle.x, z - obstacle.z) < obstacle.radius + 0.72)
     }
     if (roamAllowed > 0) {
       const touring = seq.guided && !seq.exploration.storyStarted

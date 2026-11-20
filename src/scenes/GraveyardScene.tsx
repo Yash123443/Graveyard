@@ -1,3 +1,5 @@
+import { CemeteryDressing } from '../objects/CemeteryDressing'
+import { CandleLightPool } from '../objects/WaxCandle'
 import { Stars } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
 import { useRef } from 'react'
@@ -23,6 +25,7 @@ import { Sky } from '../objects/Sky'
 import { LanternAvenue } from '../objects/LanternAvenue'
 import { ProcessionalPath } from '../objects/ProcessionalPath'
 import { CemeteryMemorials } from '../objects/CemeteryMemorials'
+import { HarvestRelics } from '../objects/HarvestRelics'
 
 /** Light rig whose intensity is driven by the scene-1 reveal, so the world starts in near-total darkness. */
 function Lights() {
@@ -70,6 +73,7 @@ export function GraveyardScene() {
   return (
     <>
       <CameraRig />
+      <CandleLightPool />
       <Lights />
       <Sky />
       <Stars radius={260} depth={60} count={800} factor={4} saturation={0} fade speed={0.2} />
@@ -80,6 +84,8 @@ export function GraveyardScene() {
       <CircularCemeteryFence />
       <CemeteryGroundDetails />
       <CemeteryMemorials />
+      <HarvestRelics />
+      <CemeteryDressing />
       <LanternAvenue />
       <ScatteredGraves />
       <DeadTreeCluster />

@@ -181,7 +181,14 @@ export function BatFlight() {
       g.rotation.z = dir * -0.12 + Math.cos(now * 1.9 + f.phase) * 0.12
       g.rotation.y = f.gate ? Math.sin(p * Math.PI) * dir * 0.35 : 0
       if (f.gate) g.scale.setScalar(0.9 + Math.sin(p * Math.PI) * 0.18)
+      else g.scale.setScalar(sizes[i])
       g.position.y += -flap * 0.12
+      // Keep the ritual's faces, props and engraving clear of foreground silhouettes.
+      if (seq.exploration.storyStarted && !f.gate) {
+        const depth = Math.max(1, camera.position.z - g.position.z)
+        g.position.y = Math.max(g.position.y, camera.position.y + depth * .5)
+        g.scale.setScalar(sizes[i] * (f.near ? .45 : .7))
+      }
     })
   })
 

@@ -1,3 +1,4 @@
+import { soulSpellOrigins } from '../animations/soulSpellOrigins'
 import { useFrame } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
@@ -47,22 +48,23 @@ function Spectre({ variant, position, rotY, scale, start }: SpectreProps) {
     a.group.position.y = seq.ending.gather * 0.35
     const cue = soulCue(seq.exploration.storyProgress, start)
     a.set(cue.actorTime, clock.elapsedTime, cue.entrance, fade, local)
+    a.spellOrigin.getWorldPosition(soulSpellOrigins[variant === 'analyst' ? 0 : variant === 'fixer' ? 1 : 2])
   })
 
   return <group ref={holder} position={position} />
 }
 
-/** Purple forensic investigator, with a deep cloth hood and open book. */
+/** Black hooded Analyst with cold cyan eyes and a candlelit skull lantern. */
 export function AnalystCharacter() {
   return <Spectre variant="analyst" position={[-3.15, 0.55, -80.5]} rotY={0.25} scale={1.58} start={0} />
 }
 
-/** Crimson repair specialist: broad hooded occult soul with ember-veined robes and red slit eyes. Right of the grave. */
+/** Red-eyed reaper carrying a candlelit jack-o'-lantern. */
 export function FixerCharacter() {
   return <Spectre variant="fixer" position={[3.15, 0.55, -80.15]} rotY={-0.25} scale={1.58} start={0.24} />
 }
 
-/** Emerald verification specialist: hooded occult soul with green eyes and a restrained spectral orbit. Rises behind the grave. */
+/** Black hooded Tester with violet eyes and a bubbling witch's cauldron. */
 export function TesterCharacter() {
   return <Spectre variant="tester" position={[0, 5.0, -84.4]} rotY={0} scale={1.58} start={0.48} />
 }

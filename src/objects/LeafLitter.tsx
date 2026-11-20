@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import { groundHeight } from './Ground'
 
@@ -6,6 +6,7 @@ const clusters: [number, number][] = [
   [-19, -18], [22, -21], [-31, -40], [32, -45], [-20, -63], [23, -68], [-43, -6], [45, -12],
   [-8.5, -24], [10, -35], [-12.5, -48], [13.5, -58], [-9, -68], [9, -73],
   [-2, -30], [-1, -41], [1, -52], [2, -63],
+  [-5.5, -81], [5.6, -82], [-7, -85], [7, -85],
 ]
 const leafColors = ['#76502e', '#5c3d25', '#8a5c30', '#4b3b2b', '#6b492b']
 const leaves = Array.from({ length: clusters.length * 24 }, (_, index) => {
@@ -57,5 +58,6 @@ export function LeafLitter() {
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     return mesh
   }, [])
+  useEffect(() => () => { batch.geometry.dispose(); (batch.material as THREE.Material).dispose() }, [batch])
   return <primitive object={batch} />
 }

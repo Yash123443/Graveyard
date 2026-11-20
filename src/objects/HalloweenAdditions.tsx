@@ -1,3 +1,4 @@
+import { WaxCandle, atmosphereSettings } from './WaxCandle'
 import { useFrame } from '@react-three/fiber'
 import { useMemo, useRef } from 'react'
 import * as THREE from 'three'
@@ -62,14 +63,12 @@ function Pumpkin({ scale = 1 }: { scale?: number }) {
 }
 
 function CandleCluster({ position, scale = 1 }: { position: [number, number, number]; scale?: number }) {
-  const wax = useMemo(() => new THREE.MeshStandardMaterial({ color: '#d6c7ae', roughness: 0.96 }), [])
-  const flame = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ffb45a', toneMapped: false }), [])
-  return <group position={position} scale={scale}>
-    {[-0.18, 0, 0.17].map((x, i) => <group key={x} position={[x, i % 2 ? 0.22 : 0.12, 0]}>
-      <mesh material={wax} castShadow><cylinderGeometry args={[0.055, 0.07, i % 2 ? 0.46 : 0.28, 10]} /></mesh>
-      <mesh material={flame} position={[0, i % 2 ? 0.27 : 0.18, 0]}><sphereGeometry args={[0.055, 8, 6]} /></mesh>
-    </group>)}
-  </group>
+ return <group position={position} scale={scale}>{[-.18,0,.17].map((x,i)=><WaxCandle key={x} position={[x,i%2?.23:.14,0]} scale={i%2?.64:.4}/>)}</group>
+}
+
+function GroundUrn({position}:{position:[number,number,number]}) {
+ const geometry=useMemo(()=>new THREE.LatheGeometry([[.13,0],[.16,.04],[.09,.14],[.22,.3],[.23,.44],[.18,.48],[.15,.48],[.19,.4],[.18,.3],[.07,.14]].map(([x,y])=>new THREE.Vector2(x,y)),24,.18,Math.PI*1.82),[])
+ return <group position={position}><mesh geometry={geometry} receiveShadow castShadow><meshStandardMaterial color="#817b6c" roughness={.96}/></mesh>{[0,1,2].map(i=><mesh key={i} position={[.23+i*.06,.012,.12+i*.05]} rotation={[-Math.PI/2,0,i]}><circleGeometry args={[.055,3]}/><meshStandardMaterial color="#817b6c" roughness={.96} side={THREE.DoubleSide}/></mesh>)}</group>
 }
 
 function Skull({ size = 1 }: { size?: number }) {
@@ -102,9 +101,11 @@ function Raven({ position, rotation = 0 }: { position: [number, number, number];
 }
 
 function TreeWeb({ position, rotation = 0 }: { position: [number, number, number]; rotation?: number }) {
-  const web = useMemo(() => new THREE.LineBasicMaterial({ color: '#b9cbd5', vertexColors: true, transparent: true, opacity: 0.48, depthWrite: false }), [])
+  const webRoot = useRef<THREE.Group>(null)
+  useFrame(({clock}) => { if(webRoot.current) webRoot.current.rotation.z = Math.sin(clock.elapsedTime*.65+position[0])*.006 })
+  const web = useMemo(() => new THREE.LineBasicMaterial({ color: '#b9cbd5', vertexColors: true, transparent: true, opacity: atmosphereSettings.webOpacity, depthWrite: false }), [])
   const geometry = useMemo(() => createCobwebGeometry(position[0] + position[2], 0.8), [position[0], position[2]])
-  return <group position={position} rotation={[0, rotation, 0]}><lineSegments geometry={geometry} material={web} /></group>
+  return <group ref={webRoot} position={position} rotation={[0, rotation, 0]}><lineSegments geometry={geometry} material={web} /></group>
 }
 
 function Spider({ position, scale = 1, hanging = false }: { position: [number, number, number]; scale?: number; hanging?: boolean }) {
@@ -156,10 +157,10 @@ export function HalloweenProps() {
     <TreeWeb position={[-5.8, 2.8, GATE_Z + 0.1]} rotation={0.2} />
     <TreeWeb position={[5.8, 3.2, GATE_Z + 0.1]} rotation={-0.2} />
     <HangingSpider position={[5.6, 2.8, GATE_Z + 0.2]} scale={1.2} />
-    <CandleCluster position={[-6.4, groundHeight(-6.4, GATE_Z - 0.65) + 0.08, GATE_Z - 0.65]} scale={1.1} />
-    <CandleCluster position={[6.5, groundHeight(6.5, GATE_Z - 0.7) + 0.08, GATE_Z - 0.7]} scale={0.92} />
-    <group position={[2.4, groundHeight(2.4, -42) + 0.35, -42]} rotation={[0, -0.25, 0]}><Skull size={1} /></group>
-    <group position={[-13, groundHeight(-13, -36) + 0.12, -36]}><Skull size={0.7} /></group>
+    <CandleCluster position={[-3.6, groundHeight(-3.6, GATE_Z - 2.8) + 0.025, GATE_Z - 2.8]} scale={1.1} />
+    <CandleCluster position={[3.6, groundHeight(3.6, GATE_Z - 2.8) + 0.025, GATE_Z - 2.8]} scale={0.92} />
+    <GroundUrn position={[2.4, groundHeight(2.4, -42), -42]} />
+    <GroundUrn position={[-13, groundHeight(-13, -36), -36]} />
     {groundSpiders.map(([x, z], i) => <Spider key={`ground-spider-${i}`} position={[x, groundHeight(x, z) + 0.16, z]} scale={0.9 + (i % 2) * 0.25} />)}
     {treeDecor.map(([x, z, y, r], i) => <group key={`tree-decor-${i}`}>
       <TreeOfferings position={[x, groundHeight(x, z), z]} index={i} />

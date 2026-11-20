@@ -184,7 +184,7 @@ function openGate() {
   gateState = 'opening'
   gateTween?.kill()
   playGateCreak()
-  const duration = Math.min(8, Math.max(4.2, getCreakDuration(5) + 0.5))
+  const duration = Math.min(3.6, Math.max(2.8, getCreakDuration(3)))
   gateTween = gsap.to(seq, {
     gateOpen: 1,
     duration,
